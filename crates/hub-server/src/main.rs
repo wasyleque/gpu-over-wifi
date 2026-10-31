@@ -300,6 +300,15 @@ fn start_mdns(hostname: &str, port: u16) -> Option<ServiceDaemon> {
     Some(mdns)
 }
 
+/// Inicjalizuje NVML; na Ubuntu bez pakietu -dev istnieje tylko `libnvidia-ml.so.1`.
+fn init_nvml() -> Result<Nvml, nvml_wrapper::error::NvmlError> {
+    Nvml::init().or_else(|_| {
+        Nvml::builder()
+            .lib_path(std::ffi::OsStr::new("libnvidia-ml.so.1"))
+            .init()
+    })
+}
+
 fn detect_hostname() -> String {
     hostname::get()
         .ok()
@@ -326,7 +335,7 @@ async fn main() {
         }
     };
 
-    let nvml = match Nvml::init() {
+    let nvml = match init_nvml() {
         Ok(n) => {
             info!("Zainicjalizowano NVML");
             Some(Arc::new(n))

@@ -19,7 +19,7 @@ z klientami Linux i Windows po Wi-Fi/LAN. Inspiracja: WiCi One (NetworkChuck, cF
 - [x] E0a `hub-proto` (typy, testy przechodzą; autoryzacja domyślnie: token Bearer, TLS później)
 - [x] E1 `hub-server` (agy; zweryfikowane lokalnie: 5 testów, clippy, e2e z hubctl na loopbacku; ścieżka NVML nieprzetestowana — brak GPU lokalnie): endpoint `/status` (nvidia-smi/NVML: GPU, VRAM, temp, obciążenie) + mDNS.
 - [~] E2 `hub-client`: `hubctl status` gotowe (aider, zweryfikowane: test+clippy); `discover` (mDNS) czeka na E1
-- [ ] E3 proxy AI: pass-through do Ollamy + auth tokenem.
+- [ ] E3 proxy AI (zlecenie: docs/tasks/E3-ai-proxy.md, agy): pass-through do Ollamy + auth tokenem.
 - [ ] E4 scheduler: kolejka żądań, grupowanie po modelu, polityka keep_alive.
 - [ ] E5 moduł stream: instalacja/parowanie Sunshine, Moonlight na kliencie.
 - [ ] E6 Windows: build klienta (cross/CI), instalator.
@@ -63,3 +63,7 @@ RTX 3090 24 GB, 62 GB RAM, 32 wątki, NVMe 1,9 TB (94% zajęte, 112 GB wolne!) +
 
 ## Postęp
 - 2026-10-31: `hub-proto` gotowy (2 testy). Zlecenie E1 w `docs/tasks/E1-hub-server-status.md` (dla agy). InferSSD zainstalowany na .11 (bez modelu; test na miejscu, po zwolnieniu 600 GB–1 TB). Użytkownik przez VPN.
+- 2026-10-31: hub-server wdrożony na .11 (`~/gpu-hub`, token w `~/gpu-hub/token`, uprawnienia 600); odczyt RTX 3090 przez NVML potwierdzony lokalnie na serwerze. Naprawiono ładowanie `libnvidia-ml.so.1`. Port 7878 zablokowany przez ufw — czeka na regułę użytkownika (VPN: 10.0.0.0/24, LAN: 192.168.0.0/24). Binarki budowane `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.39`. Dysk root .11: 582 GB wolnego.
+
+## Drugi serwer (plan)
+Ubuntu Server 24.04 LTS (spójność z .11); 2×NVMe w mdadm RAID0 na modele (przepustowość odczytu dla InferSSD, bez redundancji — wagi do pobrania ponownie), system na osobnym dysku, ext4/XFS (bez ZFS/btrfs), HDD na kopie/zimne modele. Hub powinien docelowo obsługiwać wiele hostów (lista, wybór najmniej obciążonego).
