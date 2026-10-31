@@ -16,6 +16,7 @@ z klientami Linux i Windows po Wi-Fi/LAN. Inspiracja: WiCi One (NetworkChuck, cF
 
 ## Etapy (małe, weryfikowalne; logika/integracje → agy, proste → aider+Ollama)
 - [ ] E0 PoC ręczny: zainstalować Sunshine na .11 (wymaga sesji graficznej/headless X lub wlroots + dummy display), sprawdzić Moonlight z laptopa.
+- [x] E0a `hub-proto` (typy, testy przechodzą; autoryzacja domyślnie: token Bearer, TLS później)
 - [ ] E1 `hub-server`: endpoint `/status` (nvidia-smi/NVML: GPU, VRAM, temp, obciążenie) + mDNS.
 - [ ] E2 `hub-client`: `hubctl discover|status`.
 - [ ] E3 proxy AI: pass-through do Ollamy + auth tokenem.
@@ -59,3 +60,6 @@ RTX 3090 24 GB, 62 GB RAM, 32 wątki, NVMe 1,9 TB (94% zajęte, 112 GB wolne!) +
 - Film NetworkChuck: nie kopiować fragmentów, grafik ani transkryptu do repo; plik .mp4 jest w .gitignore. Opisy idei własnymi słowami.
 - Własna licencja hubu: wybrać przed pierwszym publicznym push (propozycja: Apache-2.0 lub MIT) i dodać plik LICENSE.
 - Przed publikacją: uruchomić przegląd zależności (cargo deny/licenses) i uzupełnić THIRD_PARTY_NOTICES.
+
+## Postęp
+- 2026-10-31: `hub-proto` gotowy (2 testy). Zlecenie E1 w `docs/tasks/E1-hub-server-status.md` (dla agy). InferSSD zainstalowany na .11 (bez modelu; test na miejscu, po zwolnieniu 600 GB–1 TB). Użytkownik przez VPN.
