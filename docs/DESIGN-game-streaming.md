@@ -1,3 +1,5 @@
+> **KOREKTA (2026-10-31, po uwadze użytkownika).** Celem NIE jest streaming gry z serwera, tylko **uruchamianie gry na laptopie z Linuksem tak, jakby karta serwera była w nim zamontowana** (gra, CPU, dysk, biblioteka Steam i zapisy zostają lokalnie; renderuje karta serwera). To jest mechanizm **B** poniżej. Mechanizm A (Sunshine/Moonlight, gra działa na serwerze) był moim skrótem i został **zdegradowany do opcji awaryjnej**: etapy E5a–E5c zostają w repo jako plan B i **nie są wykonywane**. Głównym torem jest teraz **E5-VK** (`docs/tasks/E5-VK-remote-venus-poc.md`). Przyczyna pomyłki: wybrałem A, bo był gotowy i szybki, i nie sprawdziłem tego z użytkownikiem.
+
 # Projekt: GPU serwera do gier po sieci (laptop jako pierwszy klient)
 
 Cel użytkownika: używać karty graficznej serwera tak, jakby była zamontowana w laptopie. Pierwszy klient: ten laptop (Omarchy/Arch, Intel HD 520, ekran 1366×768, `moonlight-qt` 6.2.0 zainstalowany).
