@@ -3,4 +3,11 @@ name = "hub-client"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "hubctl"
+path = "src/main.rs"
+
 [dependencies]
+hub-proto = { path = "../hub-proto" }
+clap = { version = "4", features = ["derive", "env"] }
+ureq = { version = "2", features = ["json"] }
