@@ -22,49 +22,62 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new() -> Self {
-        todo!()
+        Self::default()
     }
     pub fn with_capacity(capacity: usize) -> Self {
-        todo!()
+        Self {
+            buf: Vec::with_capacity(capacity),
+        }
     }
     pub fn put_u8(&mut self, v: u8) {
-        todo!()
+        self.buf.push(v);
     }
     pub fn put_u16(&mut self, v: u16) {
-        todo!()
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     pub fn put_u32(&mut self, v: u32) {
-        todo!()
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     pub fn put_u64(&mut self, v: u64) {
-        todo!()
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     pub fn put_f32(&mut self, v: f32) {
-        todo!()
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     pub fn put_f64(&mut self, v: f64) {
-        todo!()
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     /// LEB128 bez znaku.
     pub fn put_varint(&mut self, v: u64) {
-        todo!()
+        let mut value = v;
+        loop {
+            let byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value == 0 {
+                self.buf.push(byte);
+                break;
+            } else {
+                self.buf.push(byte | 0x80);
+            }
+        }
     }
     /// Długość (varint) i surowe bajty.
     pub fn put_bytes(&mut self, v: &[u8]) {
-        todo!()
+        self.put_varint(v.len() as u64);
+        self.buf.extend_from_slice(v);
     }
     /// Długość (varint) i bajty UTF-8.
     pub fn put_str(&mut self, v: &str) {
-        todo!()
+        self.put_bytes(v.as_bytes());
     }
     pub fn len(&self) -> usize {
-        todo!()
+        self.buf.len()
     }
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.len() == 0
     }
     pub fn finish(self) -> Vec<u8> {
-        todo!()
+        self.buf
     }
 }
 
@@ -77,41 +90,125 @@ pub struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        todo!()
+        Self { buf, pos: 0 }
     }
     pub fn get_u8(&mut self) -> Result<u8, WireError> {
-        todo!()
+        if self.pos + 1 > self.buf.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let value = self.buf[self.pos];
+        self.pos += 1;
+        Ok(value)
     }
     pub fn get_u16(&mut self) -> Result<u16, WireError> {
-        todo!()
+        if self.pos + 2 > self.buf.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let value = u16::from_le_bytes([self.buf[self.pos], self.buf[self.pos + 1]]);
+        self.pos += 2;
+        Ok(value)
     }
     pub fn get_u32(&mut self) -> Result<u32, WireError> {
-        todo!()
+        if self.pos + 4 > self.buf.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let value = u32::from_le_bytes([self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3]]);
+        self.pos += 4;
+        Ok(value)
     }
     pub fn get_u64(&mut self) -> Result<u64, WireError> {
-        todo!()
+        if self.pos + 8 > self.buf.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let value = u64::from_le_bytes([
+            self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3],
+            self.buf[self.pos + 4], self.buf[self.pos + 5], self.buf[self.pos + 6], self.buf[self.pos + 7]
+        ]);
+        self.pos += 8;
+        Ok(value)
     }
     pub fn get_f32(&mut self) -> Result<f32, WireError> {
-        todo!()
+        if self.pos + 4 > self.buf.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let value = f32::from_le_bytes([self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3]]);
+        self.pos += 4;
+        Ok(value)
     }
     pub fn get_f64(&mut self) -> Result<f64, WireError> {
-        todo!()
+        if self.pos + 8 > self.buf.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let value = f64::from_le_bytes([
+            self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3],
+            self.buf[self.pos + 4], self.buf[self.pos + 5], self.buf[self.pos + 6], self.buf[self.pos + 7]
+        ]);
+        self.pos += 8;
+        Ok(value)
     }
     pub fn get_varint(&mut self) -> Result<u64, WireError> {
-        todo!()
+        let mut value: u64 = 0;
+        let mut shift = 0;
+        let original_pos = self.pos;
+        
+        loop {
+            if self.pos >= self.buf.len() {
+                self.pos = original_pos;
+                return Err(WireError::UnexpectedEof);
+            }
+            
+            let byte = self.buf[self.pos];
+            self.pos += 1;
+            
+            // Check for overflow when we're at the 10th byte (shift == 63)
+            if shift == 63 {
+                // The 10th byte may only have bits 0 and 1 set (0x00 or 0x01)
+                if (byte & 0x7E) != 0 {
+                    self.pos = original_pos;
+                    return Err(WireError::VarintOverflow);
+                }
+            }
+            
+            value |= ((byte & 0x7F) as u64) << shift;
+            
+            if (byte & 0x80) == 0 {
+                break;
+            }
+            
+            shift += 7;
+            
+            // Check for overflow - LEB128 numbers must fit in 10 bytes
+            if shift >= 64 {
+                self.pos = original_pos;
+                return Err(WireError::VarintOverflow);
+            }
+        }
+        
+        Ok(value)
     }
     pub fn get_bytes(&mut self) -> Result<&'a [u8], WireError> {
-        todo!()
+        let original_pos = self.pos;
+        let len = self.get_varint()?;
+        
+        if self.pos + len as usize > self.buf.len() {
+            self.pos = original_pos;
+            return Err(WireError::UnexpectedEof);
+        }
+        
+        let start = self.pos;
+        self.pos += len as usize;
+        Ok(&self.buf[start..self.pos])
     }
     pub fn get_str(&mut self) -> Result<&'a str, WireError> {
-        todo!()
+        let bytes = self.get_bytes()?;
+        std::str::from_utf8(bytes).map_err(|_| WireError::InvalidUtf8)
     }
     /// Liczba nieprzeczytanych bajtów.
     pub fn remaining(&self) -> usize {
-        todo!()
+        self.buf.len() - self.pos
     }
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.remaining() == 0
     }
 }
 
