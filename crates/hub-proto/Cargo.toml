@@ -1,0 +1,6 @@
+[package]
+name = "hub-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

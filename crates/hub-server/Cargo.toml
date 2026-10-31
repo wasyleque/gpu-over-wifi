@@ -1,0 +1,6 @@
+[package]
+name = "hub-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

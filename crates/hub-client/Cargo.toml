@@ -1,0 +1,6 @@
+[package]
+name = "hub-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
