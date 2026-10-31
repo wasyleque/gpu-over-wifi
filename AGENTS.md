@@ -17,7 +17,7 @@ z klientami Linux i Windows po Wi-Fi/LAN. Inspiracja: WiCi One (NetworkChuck, cF
 ## Etapy (małe, weryfikowalne; logika/integracje → agy, proste → aider+Ollama)
 - [ ] E0 PoC ręczny: zainstalować Sunshine na .11 (wymaga sesji graficznej/headless X lub wlroots + dummy display), sprawdzić Moonlight z laptopa.
 - [x] E0a `hub-proto` (typy, testy przechodzą; autoryzacja domyślnie: token Bearer, TLS później)
-- [ ] E1 `hub-server`: endpoint `/status` (nvidia-smi/NVML: GPU, VRAM, temp, obciążenie) + mDNS.
+- [x] E1 `hub-server` (agy; zweryfikowane lokalnie: 5 testów, clippy, e2e z hubctl na loopbacku; ścieżka NVML nieprzetestowana — brak GPU lokalnie): endpoint `/status` (nvidia-smi/NVML: GPU, VRAM, temp, obciążenie) + mDNS.
 - [~] E2 `hub-client`: `hubctl status` gotowe (aider, zweryfikowane: test+clippy); `discover` (mDNS) czeka na E1
 - [ ] E3 proxy AI: pass-through do Ollamy + auth tokenem.
 - [ ] E4 scheduler: kolejka żądań, grupowanie po modelu, polityka keep_alive.
