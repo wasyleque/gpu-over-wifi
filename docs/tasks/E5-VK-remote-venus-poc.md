@@ -1,3 +1,5 @@
+> **ZASTĄPIONE** projektem własnego stosu: `docs/DESIGN-remote-gpu.md`. Zachowane jako zapis PoC-1 (Venus przez sieć nie działa: deskryptory plików).
+
 # E5-VK — Zdalny Vulkan: gra na laptopie, renderowanie na karcie serwera (PoC)
 
 Cel użytkownika: gra działa lokalnie na laptopie (Linux), a GPU jest "po sieci jak zamontowane". Mechanizm B z `docs/DESIGN-game-streaming.md`.

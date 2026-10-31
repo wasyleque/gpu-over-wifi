@@ -1,0 +1,7 @@
+[package]
+name = "gpu-vkgen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+roxmltree = "0.20"
