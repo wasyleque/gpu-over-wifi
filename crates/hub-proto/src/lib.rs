@@ -41,6 +41,15 @@ pub enum Backend {
     Inferssd,
 }
 
+/// Stan schedulera zadań AI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerStatus {
+    pub queue_len: u32,
+    pub active_backend: Option<String>,
+    pub switches_total: u64,
+    pub in_flight: u32,
+}
+
 /// Odpowiedź endpointu `GET /status`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusResponse {
@@ -49,6 +58,8 @@ pub struct StatusResponse {
     pub hub_version: String,
     pub gpus: Vec<GpuStatus>,
     pub models: Vec<LoadedModel>,
+    #[serde(default)]
+    pub scheduler: Option<SchedulerStatus>,
 }
 
 /// Informacje zwracane przy wykrywaniu serwera (mDNS TXT / `GET /hello`).
@@ -81,6 +92,7 @@ mod tests {
                 backend: Backend::Ollama,
                 vram_mib: 8000,
             }],
+            scheduler: None,
         }
     }
 
@@ -89,6 +101,19 @@ mod tests {
         let s = sample();
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<StatusResponse>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn legacy_status_without_scheduler_deserializes() {
+        let legacy_json = r#"{
+            "protocol_version": 1,
+            "hostname": "wasyl-srv",
+            "hub_version": "0.1.0",
+            "gpus": [],
+            "models": []
+        }"#;
+        let parsed: StatusResponse = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.scheduler, None);
     }
 
     #[test]

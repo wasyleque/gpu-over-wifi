@@ -1,20 +1,26 @@
 use std::time::Duration;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Request, State},
     http::{header::HeaderName, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::any,
     Json, Router,
 };
+use futures_util::StreamExt;
+use serde::Deserialize;
 use serde_json::json;
 use tracing::warn;
 
+use crate::scheduler::{LeaseGuard, ScheduleError};
 use crate::{verify_bearer_token, AppState};
 
 /// Domyślny limit rozmiaru body żądania w MiB.
 pub const DEFAULT_MAX_BODY_MIB: usize = 64;
+
+/// Maksymalny rozmiar prefiksu body buforowanego na potrzeby odczytu pola `model` (1 MiB).
+const MODEL_INSPECTION_LIMIT_BYTES: usize = 1024 * 1024;
 
 /// Tworzy klienta HTTP dla proxy: timeout tylko na nawiązanie połączenia (5 s),
 /// brak ogólnego timeoutu na odpowiedź (wymagane dla streamingu SSE/NDJSON).
@@ -34,6 +40,29 @@ pub fn register_routes(router: Router<AppState>, max_body_mib: usize) -> Router<
         .layer(DefaultBodyLimit::max(limit_bytes));
 
     router.merge(proxy_router)
+}
+
+/// Sprawdza czy dana ścieżka jest trasą generacji/embeddingów wymagającą sprawdzenia pola `model`.
+pub fn is_model_routed_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/chat/completions"
+            | "/v1/completions"
+            | "/v1/embeddings"
+            | "/api/chat"
+            | "/api/generate"
+    ) || path.starts_with("/api/embed")
+}
+
+#[derive(Deserialize)]
+struct ModelFieldOnly {
+    model: Option<String>,
+}
+
+/// Próbuje odczytać pole `model` z prefiksu JSON.
+pub fn extract_model_from_json(bytes: &[u8]) -> Option<String> {
+    let parsed: ModelFieldOnly = serde_json::from_slice(bytes).ok()?;
+    parsed.model.filter(|m| !m.trim().is_empty())
 }
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
@@ -80,12 +109,101 @@ fn backend_unavailable_response() -> Response {
         .into_response()
 }
 
+fn unknown_model_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "unknown model" })),
+    )
+        .into_response()
+}
+
+/// Buforuje maksymalnie `limit` bajtów ze strumienia body i zwraca zbuforowany prefiks
+/// oraz odtworzony strumień całego body (prefiks + reszta strumienia bez buforowania całości).
+async fn peek_body_prefix(
+    body: Body,
+    limit: usize,
+) -> Result<(Bytes, reqwest::Body), axum::Error> {
+    let mut data_stream = body.into_data_stream();
+    let mut buffered = Vec::new();
+    let mut first_overflow_chunk: Option<Bytes> = None;
+
+    while let Some(chunk_res) = data_stream.next().await {
+        let chunk = chunk_res?;
+        if buffered.len() + chunk.len() <= limit {
+            buffered.extend_from_slice(&chunk);
+            if buffered.len() == limit {
+                break;
+            }
+        } else {
+            let needed = limit - buffered.len();
+            buffered.extend_from_slice(&chunk[..needed]);
+            first_overflow_chunk = Some(chunk.slice(needed..));
+            break;
+        }
+    }
+
+    let prefix_bytes = Bytes::from(buffered);
+    let prefix_for_stream = prefix_bytes.clone();
+
+    let combined = futures_util::stream::once(async move {
+        Ok::<Bytes, axum::Error>(prefix_for_stream)
+    })
+    .chain(futures_util::stream::iter(
+        first_overflow_chunk.map(Ok::<Bytes, axum::Error>),
+    ))
+    .chain(data_stream);
+
+    Ok((prefix_bytes, reqwest::Body::wrap_stream(combined)))
+}
+
 async fn proxy_handler(State(state): State<AppState>, req: Request) -> Response {
     if !verify_bearer_token(req.headers(), &state.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
     let (parts, body) = req.into_parts();
+    let path = parts.uri.path();
+
+    let (lease_guard, target_base_url, reqwest_body): (Option<LeaseGuard>, String, reqwest::Body) =
+        if is_model_routed_path(path) {
+            let (prefix, reassembled_body) =
+                match peek_body_prefix(body, MODEL_INSPECTION_LIMIT_BYTES).await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        warn!("Błąd odczytu body żądania: {e}");
+                        return StatusCode::BAD_REQUEST.into_response();
+                    }
+                };
+
+            if let Some(model_name) = extract_model_from_json(&prefix) {
+                match state.scheduler.acquire(&model_name).await {
+                    Ok(lease) => {
+                        let url = lease.base_url().to_string();
+                        (Some(lease), url, reassembled_body)
+                    }
+                    Err(ScheduleError::UnknownModel(_)) => {
+                        return unknown_model_response();
+                    }
+                    Err(ScheduleError::BackendError(_)) => {
+                        return backend_unavailable_response();
+                    }
+                    Err(ScheduleError::Cancelled) => {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                }
+            } else {
+                // Brak pola `model` -> przekaż do domyślnego backendu bez kolejkowania
+                (
+                    None,
+                    state.scheduler.default_backend_url(),
+                    reassembled_body,
+                )
+            }
+        } else {
+            // Trasa bez modelu -> przekaż do domyślnego backendu bez kolejkowania
+            let reqwest_body = reqwest::Body::wrap_stream(body.into_data_stream());
+            (None, state.scheduler.default_backend_url(), reqwest_body)
+        };
 
     let path_and_query = parts
         .uri
@@ -93,7 +211,7 @@ async fn proxy_handler(State(state): State<AppState>, req: Request) -> Response 
         .map(|pq| pq.as_str())
         .unwrap_or_else(|| parts.uri.path());
 
-    let target_url = format!("{}{}", state.ollama_url.trim_end_matches('/'), path_and_query);
+    let target_url = format!("{}{}", target_base_url.trim_end_matches('/'), path_and_query);
 
     let req_conn_scoped = connection_scoped_headers(&parts.headers);
     let mut forwarded_headers = HeaderMap::new();
@@ -102,8 +220,6 @@ async fn proxy_handler(State(state): State<AppState>, req: Request) -> Response 
             forwarded_headers.append(name.clone(), value.clone());
         }
     }
-
-    let reqwest_body = reqwest::Body::wrap_stream(body.into_data_stream());
 
     let upstream_req = state
         .proxy_client
@@ -132,7 +248,14 @@ async fn proxy_handler(State(state): State<AppState>, req: Request) -> Response 
         }
     }
 
-    let stream = upstream_resp.bytes_stream();
+    // Utrzymujemy `lease_guard` przy życiu przez cały czas trwania strumienia odpowiedzi
+    let stream = futures_util::stream::unfold(
+        (upstream_resp.bytes_stream(), lease_guard),
+        |(mut s, guard)| async move {
+            s.next().await.map(|item| (item, (s, guard)))
+        },
+    );
+
     response_builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
@@ -141,30 +264,42 @@ async fn proxy_handler(State(state): State<AppState>, req: Request) -> Response 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{Backend, OllamaBackend};
+    use crate::scheduler::{Scheduler, SchedulerConfig};
     use crate::{build_router, DEFAULT_PORT};
     use axum::{
         body::Bytes,
         http::{HeaderValue, Method},
-        routing::post,
+        routing::{get, post},
     };
     use http_body_util::BodyExt;
     use std::convert::Infallible;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
     use tower::ServiceExt;
 
     fn make_state(ollama_url: String) -> AppState {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(OllamaBackend::with_name_and_models(
+            "ollama".to_string(),
+            ollama_url.clone(),
+            http_client.clone(),
+            vec!["qwen2.5".to_string(), "qwen".to_string()],
+        ));
+        let scheduler = Scheduler::new(SchedulerConfig::default(), vec![backend]);
         AppState {
             token: "secret-test-token".to_string(),
             hostname: "test-srv".to_string(),
             port: DEFAULT_PORT,
             ollama_url,
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_millis(200))
-                .build()
-                .unwrap(),
+            http_client,
             proxy_client: build_proxy_client(),
             max_body_mib: DEFAULT_MAX_BODY_MIB,
             nvml: None,
+            scheduler,
         }
     }
 
@@ -212,26 +347,39 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_forwards_body_status_headers_and_strips_authorization() {
-        let mock_backend = Router::new().route(
-            "/v1/chat/completions",
-            post(|headers: HeaderMap, body: Bytes| async move {
-                // Upewniamy się, że Authorization NIE dotarł do backendu
-                assert!(
-                    headers.get(hub_proto::AUTH_HEADER).is_none(),
-                    "Nagłówek Authorization nie powinien być przekazywany do Ollamy"
-                );
-                // Sprawdzamy, że niestandardowy nagłówek dotarł
-                let custom = headers
-                    .get("x-custom-client")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
+        let mock_backend = Router::new()
+            .route(
+                "/api/tags",
+                get(|| async {
+                    Json(json!({
+                        "models": [{"name": "qwen2.5", "size": 1024}]
+                    }))
+                }),
+            )
+            .route(
+                "/api/ps",
+                get(|| async { Json(json!({ "models": [] })) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|headers: HeaderMap, body: Bytes| async move {
+                    // Upewniamy się, że Authorization NIE dotarł do backendu
+                    assert!(
+                        headers.get(hub_proto::AUTH_HEADER).is_none(),
+                        "Nagłówek Authorization nie powinien być przekazywany do Ollamy"
+                    );
+                    // Sprawdzamy, że niestandardowy nagłówek dotarł
+                    let custom = headers
+                        .get("x-custom-client")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
 
-                let mut resp_headers = HeaderMap::new();
-                resp_headers.insert("x-echoed-custom", HeaderValue::from_str(&custom).unwrap());
-                (StatusCode::CREATED, resp_headers, body)
-            }),
-        );
+                    let mut resp_headers = HeaderMap::new();
+                    resp_headers.insert("x-echoed-custom", HeaderValue::from_str(&custom).unwrap());
+                    (StatusCode::CREATED, resp_headers, body)
+                }),
+            );
 
         let backend_url = spawn_mock_backend(mock_backend).await;
         let app = build_router(make_state(backend_url));
@@ -341,6 +489,7 @@ mod tests {
         }
         assert_eq!(remaining, b"chunk-2\nchunk-3\n");
     }
+
     #[tokio::test]
     async fn proxy_returns_502_when_backend_unavailable() {
         // Bierzemy wolny port i natychmiast zamykamy listener, żeby mieć pewność że jest martwy
@@ -365,5 +514,178 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(val, json!({ "error": "backend unavailable" }));
+    }
+
+    #[tokio::test]
+    async fn routing_by_model_and_fallback_without_model() {
+        let backend_a = Router::new()
+            .route(
+                "/api/tags",
+                get(|| async {
+                    Json(json!({
+                        "models": [{"name": "model-a", "size": 1000}]
+                    }))
+                }),
+            )
+            .route("/api/ps", get(|| async { Json(json!({ "models": [] })) }))
+            .route("/v1/chat/completions", post(|| async { "from-a-chat" }))
+            .route("/api/generate", post(|| async { "from-a-generate" }))
+            .route("/v1/models", get(|| async { "default-a-models" }));
+
+        let backend_b = Router::new()
+            .route(
+                "/api/tags",
+                get(|| async {
+                    Json(json!({
+                        "models": [{"name": "embed-b", "size": 1000}]
+                    }))
+                }),
+            )
+            .route("/api/ps", get(|| async { Json(json!({ "models": [] })) }))
+            .route("/api/embeddings", post(|| async { "from-b-embed" }));
+
+        let url_a = spawn_mock_backend(backend_a).await;
+        let url_b = spawn_mock_backend(backend_b).await;
+
+        let client = reqwest::Client::new();
+        let b1: Arc<dyn Backend> = Arc::new(OllamaBackend::with_name_and_models(
+            "ollama-a".to_string(),
+            url_a.clone(),
+            client.clone(),
+            vec![],
+        ));
+        let b2: Arc<dyn Backend> = Arc::new(OllamaBackend::with_name_and_models(
+            "ollama-b".to_string(),
+            url_b,
+            client.clone(),
+            vec![],
+        ));
+        let scheduler = Scheduler::new(SchedulerConfig::default(), vec![b1, b2]);
+
+        let state = AppState {
+            token: "secret-test-token".to_string(),
+            hostname: "test-srv".to_string(),
+            port: DEFAULT_PORT,
+            ollama_url: url_a,
+            http_client: client,
+            proxy_client: build_proxy_client(),
+            max_body_mib: DEFAULT_MAX_BODY_MIB,
+            nvml: None,
+            scheduler,
+        };
+        let app = build_router(state);
+
+        // 1. /v1/chat/completions z model-a -> backend A
+        let r1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .header(hub_proto::AUTH_HEADER, "Bearer secret-test-token")
+                    .body(Body::from(r#"{"model":"model-a"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1_bytes = r1.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&b1_bytes[..], b"from-a-chat");
+
+        // 2. /api/embeddings z embed-b -> backend B
+        let r2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/embeddings")
+                    .header(hub_proto::AUTH_HEADER, "Bearer secret-test-token")
+                    .body(Body::from(r#"{"model":"embed-b"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2_bytes = r2.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&b2_bytes[..], b"from-b-embed");
+
+        // 3. Fallback bez pola model na trasie /api/generate -> domyślny backend A
+        let r3 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/generate")
+                    .header(hub_proto::AUTH_HEADER, "Bearer secret-test-token")
+                    .body(Body::from(r#"{"prompt":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::OK);
+        let b3_bytes = r3.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&b3_bytes[..], b"from-a-generate");
+
+        // 4. Trasa bez modelu (/v1/models) -> domyślny backend A bez kolejkowania
+        let r4 = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/models")
+                    .header(hub_proto::AUTH_HEADER, "Bearer secret-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r4.status(), StatusCode::OK);
+        let b4_bytes = r4.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&b4_bytes[..], b"default-a-models");
+    }
+
+    #[tokio::test]
+    async fn unknown_model_returns_404() {
+        let mock_backend = Router::new().route(
+            "/api/tags",
+            get(|| async {
+                Json(json!({
+                    "models": [{"name": "known-model", "size": 1000}]
+                }))
+            }),
+        );
+        let url = spawn_mock_backend(mock_backend).await;
+        let client = reqwest::Client::new();
+        let b: Arc<dyn Backend> = Arc::new(OllamaBackend::new(url.clone(), client.clone()));
+        let scheduler = Scheduler::new(SchedulerConfig::default(), vec![b]);
+
+        let state = AppState {
+            token: "secret-test-token".to_string(),
+            hostname: "test-srv".to_string(),
+            port: DEFAULT_PORT,
+            ollama_url: url,
+            http_client: client,
+            proxy_client: build_proxy_client(),
+            max_body_mib: DEFAULT_MAX_BODY_MIB,
+            nvml: None,
+            scheduler,
+        };
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .header(hub_proto::AUTH_HEADER, "Bearer secret-test-token")
+                    .body(Body::from(r#"{"model":"nonexistent-model"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val, json!({ "error": "unknown model" }));
     }
 }

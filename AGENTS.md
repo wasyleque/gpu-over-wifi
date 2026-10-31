@@ -20,7 +20,8 @@ z klientami Linux i Windows po Wi-Fi/LAN. Inspiracja: WiCi One (NetworkChuck, cF
 - [x] E1 `hub-server` (agy; zweryfikowane lokalnie: 5 testów, clippy, e2e z hubctl na loopbacku; ścieżka NVML nieprzetestowana — brak GPU lokalnie): endpoint `/status` (nvidia-smi/NVML: GPU, VRAM, temp, obciążenie) + mDNS.
 - [~] E2 `hub-client`: `hubctl status` gotowe (aider, zweryfikowane: test+clippy); `discover` (mDNS) czeka na E1
 - [x] E3 proxy AI (agy; 9 testów, clippy czysty, zweryfikowane na .11 z prawdziwą Ollamą: auth, lista modeli, streaming SSE): pass-through do Ollamy + auth tokenem.
-- [ ] E4 scheduler: kolejka żądań, grupowanie po modelu, polityka keep_alive.
+- [x] E4a scheduler + backend Ollama (agy zaczął, kwota agy wyczerpana w połowie; dokończone przez nadzorującego: podpięcie w main.rs, 6 testów schedulera, naprawione zakleszczenie dispatchu; 21 testów workspace, clippy czysty; zweryfikowane na .11 z 2 modelami)
+- [ ] E4b InferSSD jako drugi backend z wyłącznością na GPU (docs/tasks/E4b-inferssd-backend.md) — blokowane: kwota agy do ~2026-11-03 albo dokończyć samodzielnie
 - [ ] E5 moduł stream: instalacja/parowanie Sunshine, Moonlight na kliencie.
 - [ ] E6 Windows: build klienta (cross/CI), instalator.
 - [ ] E7 badanie zdalnego CUDA.
@@ -67,3 +68,5 @@ RTX 3090 24 GB, 62 GB RAM, 32 wątki, NVMe 1,9 TB (94% zajęte, 112 GB wolne!) +
 
 ## Drugi serwer (plan)
 Ubuntu Server 24.04 LTS (spójność z .11); 2×NVMe w mdadm RAID0 na modele (przepustowość odczytu dla InferSSD, bez redundancji — wagi do pobrania ponownie), system na osobnym dysku, ext4/XFS (bez ZFS/btrfs), HDD na kopie/zimne modele. Hub powinien docelowo obsługiwać wiele hostów (lista, wybór najmniej obciążonego).
+- 2026-10-31: E4a gotowe i wdrożone na .11. Znaleziony błąd: `acquire()` uruchamiał pętlę dispatchu w zadaniu żądającego → zakleszczenie przy dwóch zimnych modelach w kolejce (flaga `switching` blokowała cały hub). Poprawka: `spawn_dispatch()`; test regresji `cold_requests_for_several_models_do_not_deadlock` (potwierdzone: pada bez poprawki). Agy: kwota wyczerpana (reset za ~76 h od 2026-10-31); jego raporty "testy przechodzą" bywały nieprawdziwe/przedwczesne — zawsze weryfikować `cargo test --workspace` i `clippy --all-targets`. `herdr agent prompt --wait` może zwrócić przed końcem pracy agenta.
+- Przełączenie modeli (przekroczenie vram_budget_mib) pokryte tylko testami na atrapie; na prawdziwej Ollamie niesprawdzone (2 małe modele mieszczą się razem).

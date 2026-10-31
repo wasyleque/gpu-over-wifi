@@ -20,7 +20,9 @@ use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 
+mod backend;
 mod proxy;
+mod scheduler;
 
 /// Domyślny adres API Ollamy.
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
@@ -47,6 +49,10 @@ struct Args {
     /// Limit rozmiaru body żądania w MiB
     #[arg(long, env = "HUB_MAX_BODY_MIB", default_value_t = proxy::DEFAULT_MAX_BODY_MIB)]
     max_body_mib: usize,
+
+    /// Plik konfiguracyjny `hub.toml` (scheduler i backendy); flaga `--ollama-url` nadal obowiązuje bez niego
+    #[arg(long, env = "HUB_CONFIG")]
+    config: Option<PathBuf>,
 }
 
 fn default_listen_addr() -> SocketAddr {
@@ -62,6 +68,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub proxy_client: reqwest::Client,
     pub max_body_mib: usize,
+    pub scheduler: Arc<scheduler::Scheduler>,
     pub nvml: Option<Arc<Nvml>>,
 }
 
@@ -227,6 +234,7 @@ async fn status_handler(
 
     let gpus = collect_gpu_status(state.nvml.as_deref());
     let models = fetch_ollama_models(&state.http_client, &state.ollama_url).await;
+    let scheduler = state.scheduler.status().await;
 
     Ok(Json(StatusResponse {
         protocol_version: PROTOCOL_VERSION,
@@ -234,6 +242,7 @@ async fn status_handler(
         hub_version: env!("CARGO_PKG_VERSION").to_string(),
         gpus,
         models,
+        scheduler: Some(scheduler),
     }))
 }
 
@@ -367,6 +376,41 @@ async fn main() {
 
     let proxy_client = proxy::build_proxy_client();
 
+    let hub_config = match &args.config {
+        Some(path) => match scheduler::HubConfig::load_from_file(path) {
+            Ok(c) => c,
+            Err(msg) => {
+                error!("{msg}");
+                std::process::exit(1);
+            }
+        },
+        None => scheduler::HubConfig::default(),
+    };
+
+    let mut backends: Vec<Arc<dyn backend::Backend>> = Vec::new();
+    for cfg in &hub_config.backends {
+        if cfg.kind != "ollama" {
+            error!(
+                "Backend '{}': nieobsługiwany rodzaj '{}' (obecnie tylko 'ollama')",
+                cfg.name, cfg.kind
+            );
+            std::process::exit(1);
+        }
+        backends.push(Arc::new(backend::OllamaBackend::with_name_and_models(
+            cfg.name.clone(),
+            cfg.url.clone(),
+            proxy_client.clone(),
+            cfg.models.clone(),
+        )));
+    }
+    if backends.is_empty() {
+        backends.push(Arc::new(backend::OllamaBackend::new(
+            args.ollama_url.clone(),
+            proxy_client.clone(),
+        )));
+    }
+    let scheduler = scheduler::Scheduler::new(hub_config.scheduler, backends);
+
     let state = AppState {
         token,
         hostname,
@@ -375,6 +419,7 @@ async fn main() {
         http_client,
         proxy_client,
         max_body_mib: args.max_body_mib,
+        scheduler,
         nvml,
     };
 
@@ -415,6 +460,13 @@ mod tests {
                 .unwrap(),
             proxy_client: proxy::build_proxy_client(),
             max_body_mib: proxy::DEFAULT_MAX_BODY_MIB,
+            scheduler: scheduler::Scheduler::new(
+                scheduler::SchedulerConfig::default(),
+                vec![Arc::new(backend::OllamaBackend::new(
+                    "http://127.0.0.1:9".to_string(),
+                    reqwest::Client::new(),
+                ))],
+            ),
             nvml: None,
         }
     }

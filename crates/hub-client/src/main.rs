@@ -130,6 +130,7 @@ mod tests {
                     vram_mib: 12000,
                 },
             ],
+            scheduler: None,
         };
 
         let output = format_status(&s);
