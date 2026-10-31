@@ -48,3 +48,14 @@ RTX 3090 24 GB, 62 GB RAM, 32 wątki, NVMe 1,9 TB (94% zajęte, 112 GB wolne!) +
 - Modele: DeepSeek-V4.1-Flash-1017 GGUF Q8_0 (~470 GiB, 763B/8–16B aktywnych) i Muse-Spark-Open UD-Q4_K_XL (816B). Wagi oryginalne: MIT.
 - Deklarowane (5090): DeepSeek 7,27 tok/s, Muse 1,52 tok/s, 5060 Ti: 0,22 tok/s. Na 3090 + dysk PCIe3 spodziewać się mniej.
 - Wymagania serwera .11: nvcc 12.0 OK, gcc/git/python OK, cgroup v2 OK, **brak liburing-dev (apt, wymaga sudo z hasłem)**. Dysk: nvme0 ma 112 GB wolnego; nvme1 (954 GB) zawiera partycje NTFS (Windows?) — do przeformatowania przez użytkownika.
+
+## Licencje i szacunek dla autorów (obowiązkowe przed publikacją na GitHub)
+- InferSSD: Apache-2.0 (LICENSE + NOTICE, copyright WiCi AI). llama.cpp/ggml: MIT. NIE GPL.
+- Model integracji: InferSSD uruchamiany jako **osobny proces** (`inferssd serve`, API OpenAI), bez kopiowania ani wbudowywania jego kodu. Hub jest tylko klientem API, obok Ollamy.
+- Jeśli kiedykolwiek skopiujemy lub zmodyfikujemy ich kod: dołączyć LICENSE i NOTICE, oznaczyć zmiany, zachować nagłówki praw autorskich.
+- Nie używać nazwy/logo WiCi ani InferSSD do promocji hubu; wspominać o nich tylko faktograficznie ("obsługuje InferSSD").
+- NOTICE InferSSD wymienia dodatkowe komponenty zewnętrzne — przeczytać w całości przed dystrybucją.
+- Modele mają własne licencje (DeepSeek V4.1 Flash: MIT; Muse-Spark-Open i konwersje GGUF: sprawdzić osobno). Hub nie dołącza ani nie redystrybuuje wag.
+- Film NetworkChuck: nie kopiować fragmentów, grafik ani transkryptu do repo; plik .mp4 jest w .gitignore. Opisy idei własnymi słowami.
+- Własna licencja hubu: wybrać przed pierwszym publicznym push (propozycja: Apache-2.0 lub MIT) i dodać plik LICENSE.
+- Przed publikacją: uruchomić przegląd zależności (cargo deny/licenses) i uzupełnić THIRD_PARTY_NOTICES.
