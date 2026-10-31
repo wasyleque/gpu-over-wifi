@@ -20,6 +20,8 @@ use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 
+mod proxy;
+
 /// Domyślny adres API Ollamy.
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
 
@@ -41,6 +43,10 @@ struct Args {
     /// Bazowy URL lokalnej instancji Ollamy
     #[arg(long, env = "HUB_OLLAMA_URL", default_value = DEFAULT_OLLAMA_URL)]
     ollama_url: String,
+
+    /// Limit rozmiaru body żądania w MiB
+    #[arg(long, env = "HUB_MAX_BODY_MIB", default_value_t = proxy::DEFAULT_MAX_BODY_MIB)]
+    max_body_mib: usize,
 }
 
 fn default_listen_addr() -> SocketAddr {
@@ -54,6 +60,8 @@ pub struct AppState {
     pub port: u16,
     pub ollama_url: String,
     pub http_client: reqwest::Client,
+    pub proxy_client: reqwest::Client,
+    pub max_body_mib: usize,
     pub nvml: Option<Arc<Nvml>>,
 }
 
@@ -230,10 +238,11 @@ async fn status_handler(
 }
 
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let max_body_mib = state.max_body_mib;
+    let router = Router::new()
         .route("/hello", get(hello_handler))
-        .route("/status", get(status_handler))
-        .with_state(state)
+        .route("/status", get(status_handler));
+    proxy::register_routes(router, max_body_mib).with_state(state)
 }
 
 fn load_token(token_arg: Option<String>, token_file: Option<PathBuf>) -> Result<String, String> {
@@ -356,12 +365,16 @@ async fn main() {
         .build()
         .expect("Błąd inicjalizacji klienta HTTP");
 
+    let proxy_client = proxy::build_proxy_client();
+
     let state = AppState {
         token,
         hostname,
         port,
         ollama_url: args.ollama_url,
         http_client,
+        proxy_client,
+        max_body_mib: args.max_body_mib,
         nvml,
     };
 
@@ -400,6 +413,8 @@ mod tests {
                 .timeout(Duration::from_millis(100))
                 .build()
                 .unwrap(),
+            proxy_client: proxy::build_proxy_client(),
+            max_body_mib: proxy::DEFAULT_MAX_BODY_MIB,
             nvml: None,
         }
     }
