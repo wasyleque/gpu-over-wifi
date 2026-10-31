@@ -42,3 +42,9 @@ RTX 3090 24 GB, 62 GB RAM, 32 wątki, NVMe 1,9 TB (94% zajęte, 112 GB wolne!) +
 ## Konsekwencje dla planu
 - E3/E4 (proxy AI + scheduler): parkowanie modeli = trzymanie w page cache/NVMe + `keep_alive`/`OLLAMA_MAX_LOADED_MODELS`; sprawdzić czy Ollama wystarcza, czy potrzebny własny loader.
 - Nowy E3b: ocenić InferSSD na 3090 (licencja, wsparcie Ampere) vs llama.cpp z offloadem ekspertów (`--n-cpu-moe`). 62 GB RAM + NVMe pozwala na mniejsze MoE, nie na 750B.
+
+## InferSSD — wynik rozpoznania (2026-10-31)
+- Apache-2.0, nakładka na llama.cpp, serwer OpenAI-compatible (`inferssd serve`, :8080/v1). Testowane tylko: RTX 5060 Ti/5090, DGX Spark, M5 Max. **Ampere/3090 nie wymienione** (compute 8.6 — wymaga próby).
+- Modele: DeepSeek-V4.1-Flash-1017 GGUF Q8_0 (~470 GiB, 763B/8–16B aktywnych) i Muse-Spark-Open UD-Q4_K_XL (816B). Wagi oryginalne: MIT.
+- Deklarowane (5090): DeepSeek 7,27 tok/s, Muse 1,52 tok/s, 5060 Ti: 0,22 tok/s. Na 3090 + dysk PCIe3 spodziewać się mniej.
+- Wymagania serwera .11: nvcc 12.0 OK, gcc/git/python OK, cgroup v2 OK, **brak liburing-dev (apt, wymaga sudo z hasłem)**. Dysk: nvme0 ma 112 GB wolnego; nvme1 (954 GB) zawiera partycje NTFS (Windows?) — do przeformatowania przez użytkownika.
