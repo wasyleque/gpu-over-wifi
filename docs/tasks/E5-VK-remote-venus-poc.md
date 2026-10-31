@@ -44,3 +44,12 @@ Gra działa na laptopie, karta jest zdalna, obraz wraca skompresowany. Z filmu: 
 5. Przewidywanie/cache odpowiedzi (trik 3), redukcja rund-trip.
 6. Gra przez Proton/DXVK na laptopie; pomiar FPS i opóźnienia; cel: ≤ 400 Mb/s i stabilne 60 FPS.
 Kryterium po etapach 1–2: czy ruch po kompresji i liczba rund-trip rokują; jeśli nie — raport i decyzja użytkownika (plan B = streaming).
+
+## WYNIK PoC-1 (2026-10-31)
+Przebieg: serwer `virgl_test_server --venus --no-virgl --rendernode /dev/dri/renderD128 --socket-path ...`; laptop `VK_DRIVER_FILES=virtio_icd.json VN_DEBUG=vtest VTEST_SOCKET_NAME=...`.
+- **Na serwerze lokalnie: DZIAŁA.** `vulkaninfo` przez Venus widzi `Virtio-GPU Venus (NVIDIA GeForce RTX 3090 Ti)`, `driverName = venus`, exit 0. Stos Venus→NVIDIA jest sprawny.
+- **Z laptopa przez tunel (ssh -L gniazdo unix) / socat: PADA.** Handshake przechodzi (serwer loguje "client context created"), potem klient kończy `abort()` wewnątrz libvulkan_virtio.so w `vkCreateInstance`. Zapis bajtów (socat -x) pokazuje: ostatnia wymiana to odpowiedź serwera na komendę 0x12 z 1 dodatkowym bajtem po danych.
+- **Przyczyna (mocny wniosek z dowodu pośredniego, niezweryfikowany na poziomie kodu):** vtest przekazuje zasoby pamięci współdzielonej jako **deskryptory plików przez SCM_RIGHTS** (ten dodatkowy bajt to nośnik). Tunel SSH i socat nie przenoszą deskryptorów, więc klient dostaje błąd. Dowód: ten sam serwer i ten sam klient działają, gdy klient jest na tej samej maszynie.
+- **Wniosek projektowy:** surowy Venus przez sieć jest niemożliwy. Potrzebny jest własny pośrednik, który **emuluje pamięć współdzieloną**: po stronie laptopa tworzy lokalne `memfd` i oddaje je klientowi Venus, po stronie serwera trzyma prawdziwy zasób, a zawartość synchronizuje przez sieć w punktach synchronizacji (przed komendami czytającymi pamięć gościa, przed odpowiedziami zależnymi od wyników hosta). To jest właśnie sedno WiCi (trik 2: tylko różnice; trik 1: grupowanie), nie dodatek. Etap 2 planu staje się więc obowiązkowy i jest głównym ryzykiem projektu.
+- Uwaga środowiskowa: wymagało dodania użytkownika serwera do grup `render` i `video` (bez tego NVIDIA Vulkan zwracał ERROR_INITIALIZATION_FAILED).
+- Narzędzia: `socat -x -v` jest dobrym podglądem protokołu; brakujących symboli Mesa (debuginfod Arch nie ma) nie da się odzyskać.
