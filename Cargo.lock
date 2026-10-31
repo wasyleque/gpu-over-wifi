@@ -517,6 +517,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hub-proto",
+ "serde_json",
  "ureq",
 ]
 

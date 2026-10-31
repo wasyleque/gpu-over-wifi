@@ -11,3 +11,4 @@ path = "src/main.rs"
 hub-proto = { path = "../hub-proto" }
 clap = { version = "4", features = ["derive", "env"] }
 ureq = { version = "2", features = ["json"] }
+serde_json = "1"
