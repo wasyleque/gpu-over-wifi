@@ -23,3 +23,24 @@ Cel użytkownika: gra działa lokalnie na laptopie (Linux), a GPU jest "po sieci
 
 ## Zasady
 Venus/virglrenderer: MIT. Nie kopiować kodu WiCi. Wynik PoC zapisać w AGENTS.md z liczbami.
+
+## Cel funkcjonalny: odtworzyć to, co pokazało WiCi (transkrypcja filmu NetworkChuck)
+Gra działa na laptopie, karta jest zdalna, obraz wraca skompresowany. Z filmu: fałszywy sterownik GPU na kliencie + cztery triki, dzięki którym z ~8 GB/s ruchu zrobiło się ~400 Mb/s i 92 FPS w Cyberpunku przez Wi-Fi (RTT 1,5 ms; u nas kabel, RTT 0,55 ms).
+
+| Element WiCi | Nasz odpowiednik | Stan |
+|---|---|---|
+| fałszywy sterownik GPU | Venus (`vulkan-virtio`, Mesa, MIT) | istnieje |
+| zdalne wykonanie | `virgl-server` + Vulkan NVIDIA | istnieje |
+| trik 1: grupowanie/kompresja poleceń, bez czekania na odpowiedź | własny transport w Rust | do napisania |
+| trik 2: tylko różnice w danych | dyferencjowanie buforów/tekstur | do napisania |
+| trik 3: odpowiedzi z wyprzedzeniem | cache i przewidywanie odpowiedzi na zapytania | do napisania |
+| trik 4: wynik jako skompresowane wideo | NVENC (serwer) + VA-API (laptop) + warstwa prezentacji | do napisania |
+
+## Etapy (każdy kończy się liczbą)
+1. PoC surowego Venus przez sieć; pomiar bazowy MB/s i rund-trip/klatkę (ile mają zaoszczędzić triki).
+2. Pośrednik w Rust między gniazdem Venus (vtest) a serwerem: grupowanie + kompresja (trik 1).
+3. Dyferencjowanie danych (trik 2).
+4. Powrót obrazu jako wideo (trik 4) — wymaga, by ruch < 1 Gb/s.
+5. Przewidywanie/cache odpowiedzi (trik 3), redukcja rund-trip.
+6. Gra przez Proton/DXVK na laptopie; pomiar FPS i opóźnienia; cel: ≤ 400 Mb/s i stabilne 60 FPS.
+Kryterium po etapach 1–2: czy ruch po kompresji i liczba rund-trip rokują; jeśli nie — raport i decyzja użytkownika (plan B = streaming).
