@@ -67,6 +67,11 @@ pub trait Backend: Send + Sync {
 
     /// Klasa rezydencji w VRAM.
     fn class(&self) -> ResidencyClass;
+
+    /// Rodzaj backendu raportowany w `/status`.
+    fn kind(&self) -> hub_proto::Backend {
+        hub_proto::Backend::Ollama
+    }
 }
 
 /// Implementacja backendu dla serwera Ollama.

@@ -14,6 +14,7 @@ use crate::backend::{model_names_match, Backend, ResidencyClass};
 pub const DEFAULT_MAX_WAIT_SECS: u64 = 120;
 pub const DEFAULT_MAX_CONCURRENT_PER_MODEL: usize = 4;
 pub const DEFAULT_VRAM_BUDGET_MIB: u64 = 22_528;
+pub const DEFAULT_EXCLUSIVE_IDLE_STOP_SECS: u64 = 900;
 
 /// Zegar używany przez scheduler (umożliwia wstrzykiwanie czasu w testach).
 pub trait Clock: Send + Sync {
@@ -45,6 +46,9 @@ pub struct SchedulerConfig {
     pub max_concurrent_per_model: usize,
     #[serde(default = "default_vram_budget_mib")]
     pub vram_budget_mib: u64,
+    /// Po tylu sekundach bezczynności backend na wyłączność (InferSSD) jest zatrzymywany.
+    #[serde(default = "default_exclusive_idle_stop_secs")]
+    pub exclusive_idle_stop_secs: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -53,8 +57,13 @@ impl Default for SchedulerConfig {
             max_wait_secs: DEFAULT_MAX_WAIT_SECS,
             max_concurrent_per_model: DEFAULT_MAX_CONCURRENT_PER_MODEL,
             vram_budget_mib: DEFAULT_VRAM_BUDGET_MIB,
+            exclusive_idle_stop_secs: DEFAULT_EXCLUSIVE_IDLE_STOP_SECS,
         }
     }
+}
+
+fn default_exclusive_idle_stop_secs() -> u64 {
+    DEFAULT_EXCLUSIVE_IDLE_STOP_SECS
 }
 
 fn default_max_wait_secs() -> u64 {
@@ -74,9 +83,29 @@ pub struct BackendConfig {
     pub name: String,
     #[serde(default = "default_backend_kind")]
     pub kind: String,
+    /// Dla `inferssd` domyślnie `http://127.0.0.1:<port>`.
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
     pub models: Vec<String>,
+
+    // --- tylko dla kind = "inferssd" ---
+    /// Ścieżka do programu `inferssd` (domyślnie `inferssd` z PATH).
+    #[serde(default)]
+    pub binary: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// alias modelu widoczny dla klientów -> ścieżka do pierwszego shardu GGUF
+    #[serde(default)]
+    pub model_paths: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub log_file: Option<String>,
+    #[serde(default)]
+    pub start_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
 }
 
 fn default_backend_kind() -> String {
@@ -129,6 +158,7 @@ struct InnerState {
     known_resident: HashSet<String>,
     switches_total: u64,
     switching: bool,
+    last_activity: Instant,
 }
 
 pub struct Scheduler {
@@ -159,9 +189,10 @@ impl Drop for LeaseGuard {
         let scheduler = self.scheduler.clone();
         let backend_idx = self.backend_idx;
         let model = self.model.clone();
+        let now = scheduler.clock.now();
         let released = match scheduler.inner.try_lock() {
             Ok(mut guard) => {
-                Self::release_locked(&mut guard, backend_idx, &model);
+                Self::release_locked(&mut guard, backend_idx, &model, now);
                 true
             }
             Err(_) => false,
@@ -173,7 +204,7 @@ impl Drop for LeaseGuard {
             tokio::spawn(async move {
                 {
                     let mut guard = scheduler.inner.lock().await;
-                    Self::release_locked(&mut guard, backend_idx, &model);
+                    Self::release_locked(&mut guard, backend_idx, &model, now);
                 }
                 scheduler.notify.notify_waiters();
                 scheduler.dispatch_loop().await;
@@ -183,7 +214,8 @@ impl Drop for LeaseGuard {
 }
 
 impl LeaseGuard {
-    fn release_locked(inner: &mut InnerState, backend_idx: usize, model: &str) {
+    fn release_locked(inner: &mut InnerState, backend_idx: usize, model: &str, now: Instant) {
+        inner.last_activity = now;
         if let Some(c) = inner.in_flight_per_model.get_mut(model) {
             *c = c.saturating_sub(1);
             if *c == 0 {
@@ -245,6 +277,7 @@ impl Scheduler {
         backends: Vec<Arc<dyn Backend>>,
         clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
+        let last_activity = clock.now();
         Arc::new(Self {
             config,
             backends,
@@ -258,6 +291,7 @@ impl Scheduler {
                 known_resident: HashSet::new(),
                 switches_total: 0,
                 switching: false,
+                last_activity,
             }),
             notify: Notify::new(),
             next_id: AtomicU64::new(1),
@@ -270,6 +304,80 @@ impl Scheduler {
             .first()
             .map(|b| b.base_url().to_string())
             .unwrap_or_else(|| "http://127.0.0.1:11434".to_string())
+    }
+
+    /// Identyfikatory modeli backendów innych niż domyślny (pierwszy), do `GET /v1/models`.
+    pub async fn extra_model_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for backend in self.backends.iter().skip(1) {
+            ids.extend(backend.models().await);
+        }
+        ids
+    }
+
+    /// Załadowane modele backendów innych niż domyślny (np. InferSSD), do `GET /status`.
+    pub async fn extra_loaded_models(&self) -> Vec<hub_proto::LoadedModel> {
+        let mut out = Vec::new();
+        for backend in self.backends.iter().skip(1) {
+            for name in backend.resident().await {
+                out.push(hub_proto::LoadedModel {
+                    name,
+                    backend: backend.kind(),
+                    vram_mib: 0,
+                });
+            }
+        }
+        out
+    }
+
+    /// Zatrzymuje backend na wyłączność (InferSSD), jeśli jest bezczynny dłużej niż
+    /// `exclusive_idle_stop_secs`: brak żądań w toku, pusta kolejka, brak przełączania.
+    pub async fn reap_idle_once(self: &Arc<Self>) {
+        let idle = Duration::from_secs(self.config.exclusive_idle_stop_secs);
+        let idx = {
+            let mut inner = self.inner.lock().await;
+            let Some(idx) = inner.active_backend else {
+                return;
+            };
+            if self.backends[idx].class() != ResidencyClass::Exclusive
+                || inner.switching
+                || inner.total_in_flight > 0
+                || !inner.queue.is_empty()
+                || self.clock.now().saturating_duration_since(inner.last_activity) < idle
+            {
+                return;
+            }
+            inner.switching = true;
+            idx
+        };
+
+        info!(
+            "Backend '{}' bezczynny od ponad {} s — zwalniam kartę",
+            self.backends[idx].name(),
+            idle.as_secs()
+        );
+        if let Err(e) = self.backends[idx].unload_all().await {
+            warn!("Błąd unload_all na backendzie {}: {e}", self.backends[idx].name());
+        }
+        {
+            let mut inner = self.inner.lock().await;
+            inner.known_resident.clear();
+            inner.active_backend = None;
+            inner.switching = false;
+        }
+        self.notify.notify_waiters();
+        self.spawn_dispatch();
+    }
+
+    /// Uruchamia w tle okresowe zatrzymywanie bezczynnego backendu na wyłączność.
+    pub fn spawn_idle_reaper(self: &Arc<Self>) {
+        let sched = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                sched.reap_idle_once().await;
+            }
+        });
     }
 
     /// Zwraca bieżący stan obserwowalny schedulera dla `GET /status`.
@@ -544,6 +652,7 @@ impl Scheduler {
             inner.total_in_flight += 1;
             inner.active_backend = Some(backend_idx);
             inner.known_resident.insert(model);
+            inner.last_activity = self.clock.now();
         }
     }
 
@@ -628,8 +737,31 @@ impl Scheduler {
             }
         }
 
+        // Backend na wyłączność dostaje całą kartę: zwolnij VRAM pozostałych backendów.
+        if target_backend.class() == ResidencyClass::Exclusive {
+            self.wait_for_drain(|inner| inner.total_in_flight == 0).await;
+            for (idx, other) in self.backends.iter().enumerate() {
+                if idx != target_backend_idx && Some(idx) != prev_backend_idx {
+                    if let Err(e) = other.unload_all().await {
+                        warn!("Błąd unload_all na backendzie {}: {e}", other.name());
+                    }
+                }
+            }
+        }
+
         if let Err(e) = target_backend.ensure_ready(target_model).await {
             warn!("ensure_ready nie powiodło się dla {target_model}: {e}");
+            // Żądania do tego modelu kończą się błędem (odbiorcy dostają Cancelled -> 503),
+            // zamiast trafić do niedziałającego backendu.
+            let mut inner = self.inner.lock().await;
+            inner.queue.retain(|item| {
+                !(item.backend_idx == target_backend_idx
+                    && model_names_match(&item.model, target_model))
+            });
+            inner.switching = false;
+            drop(inner);
+            self.notify.notify_waiters();
+            return;
         }
 
         // Po przygotowaniu modelu wpuść z kolejki wszystkie gotowe żądania do tego modelu (do limitu współbieżności)
@@ -638,6 +770,7 @@ impl Scheduler {
             inner.queue.retain(|item| !item.tx.is_closed());
             inner.active_backend = Some(target_backend_idx);
             inner.known_resident.insert(target_model.to_string());
+            inner.last_activity = self.clock.now();
 
             let mut i = 0;
             while i < inner.queue.len() {
@@ -709,30 +842,54 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use tokio::task::JoinHandle;
 
-    /// Atrapa backendu współdzielonego: pamięta załadowane modele i liczy wywołania `unload_all`.
+    /// Atrapa backendu: pamięta załadowane modele i liczy wywołania `unload_all`.
     struct MockBackend {
+        name: String,
+        url: String,
+        class: ResidencyClass,
         models: Vec<String>,
         resident: StdMutex<Vec<String>>,
         unloads: AtomicUsize,
+        fail_ready: std::sync::atomic::AtomicBool,
     }
 
     impl MockBackend {
         fn new(models: &[&str]) -> Arc<Self> {
+            Self::build("mock", ResidencyClass::Shared, models)
+        }
+
+        fn exclusive(name: &str, models: &[&str]) -> Arc<Self> {
+            Self::build(name, ResidencyClass::Exclusive, models)
+        }
+
+        fn shared(name: &str, models: &[&str]) -> Arc<Self> {
+            Self::build(name, ResidencyClass::Shared, models)
+        }
+
+        fn build(name: &str, class: ResidencyClass, models: &[&str]) -> Arc<Self> {
             Arc::new(Self {
+                name: name.to_string(),
+                url: format!("http://{name}"),
+                class,
                 models: models.iter().map(|m| m.to_string()).collect(),
                 resident: StdMutex::new(Vec::new()),
                 unloads: AtomicUsize::new(0),
+                fail_ready: std::sync::atomic::AtomicBool::new(false),
             })
+        }
+
+        fn unloads(&self) -> usize {
+            self.unloads.load(Ordering::SeqCst)
         }
     }
 
     #[async_trait]
     impl Backend for MockBackend {
         fn name(&self) -> &str {
-            "mock"
+            &self.name
         }
         fn base_url(&self) -> &str {
-            "http://mock"
+            &self.url
         }
         async fn models(&self) -> Vec<String> {
             self.models.clone()
@@ -741,6 +898,9 @@ mod tests {
             self.resident.lock().unwrap().clone()
         }
         async fn ensure_ready(&self, model: &str) -> Result<(), String> {
+            if self.fail_ready.load(Ordering::SeqCst) {
+                return Err("start nie powiódł się".to_string());
+            }
             let mut r = self.resident.lock().unwrap();
             if !r.iter().any(|m| m == model) {
                 r.push(model.to_string());
@@ -753,7 +913,7 @@ mod tests {
             Ok(())
         }
         fn class(&self) -> ResidencyClass {
-            ResidencyClass::Shared
+            self.class
         }
     }
 
@@ -786,6 +946,7 @@ mod tests {
             max_wait_secs: 120,
             max_concurrent_per_model: max_concurrent,
             vram_budget_mib: DEFAULT_VRAM_BUDGET_MIB,
+            exclusive_idle_stop_secs: 60,
         }
     }
 
@@ -953,5 +1114,104 @@ mod tests {
             .expect("kolejne żądanie powinno przejść od razu");
         assert!(next.is_ok());
         assert_eq!(s.status().await.queue_len, 0);
+    }
+
+    #[tokio::test]
+    async fn exclusive_backend_frees_the_gpu_of_other_backends_and_back() {
+        let ollama = MockBackend::shared("ollama", &["small"]);
+        let big = MockBackend::exclusive("inferssd", &["big"]);
+        let s = Scheduler::new(config(1), vec![ollama.clone(), big.clone()]);
+
+        drop(s.acquire("small").await.unwrap());
+        assert_eq!(ollama.unloads(), 0);
+
+        // Start modelu na wyłączność wymaga zwolnienia VRAM Ollamy.
+        drop(s.acquire("big").await.unwrap());
+        assert_eq!(ollama.unloads(), 1, "Ollama musi oddać kartę");
+        assert_eq!(big.resident().await, vec!["big".to_string()]);
+
+        // Powrót do Ollamy zatrzymuje backend na wyłączność.
+        drop(s.acquire("small").await.unwrap());
+        assert_eq!(big.unloads(), 1, "InferSSD musi oddać kartę");
+        assert!(big.resident().await.is_empty());
+        assert_eq!(s.status().await.switches_total, 2);
+    }
+
+    #[tokio::test]
+    async fn exclusive_start_evicts_models_loaded_outside_the_hub() {
+        let ollama = MockBackend::shared("ollama", &["small"]);
+        let big = MockBackend::exclusive("inferssd", &["big"]);
+        // Ktoś załadował model do Ollamy bezpośrednio — scheduler nic o tym nie wie.
+        ollama.ensure_ready("small").await.unwrap();
+        let s = Scheduler::new(config(1), vec![ollama.clone(), big.clone()]);
+
+        drop(s.acquire("big").await.unwrap());
+
+        assert_eq!(ollama.unloads(), 1, "model spoza huba musi oddać VRAM");
+        assert!(ollama.resident().await.is_empty());
+        assert_eq!(big.resident().await, vec!["big".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn idle_exclusive_backend_is_stopped_but_busy_one_is_not() {
+        let clock = ManualClock::new();
+        let ollama = MockBackend::shared("ollama", &["small"]);
+        let big = MockBackend::exclusive("inferssd", &["big"]);
+        let s = Scheduler::with_clock(config(1), vec![ollama, big.clone()], clock.clone());
+
+        let lease = s.acquire("big").await.unwrap();
+
+        // Żądanie w toku: nawet po długim czasie nic nie jest zatrzymywane.
+        clock.advance(600);
+        s.reap_idle_once().await;
+        assert_eq!(big.unloads(), 0);
+
+        drop(lease);
+        wait_in_flight(&s, 0).await;
+
+        // Bezczynność krótsza niż limit (60 s) — jeszcze nie.
+        clock.advance(30);
+        s.reap_idle_once().await;
+        assert_eq!(big.unloads(), 0);
+
+        // Po przekroczeniu limitu karta wraca do puli.
+        clock.advance(31);
+        s.reap_idle_once().await;
+        assert_eq!(big.unloads(), 1);
+        assert!(big.resident().await.is_empty());
+
+        // Kolejne żądanie uruchamia model od nowa.
+        drop(s.acquire("big").await.unwrap());
+        assert_eq!(big.resident().await, vec!["big".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn failed_backend_start_rejects_requests_instead_of_forwarding() {
+        let big = MockBackend::exclusive("inferssd", &["big"]);
+        big.fail_ready.store(true, Ordering::SeqCst);
+        let s = Scheduler::new(config(1), vec![MockBackend::shared("ollama", &["small"]), big.clone()]);
+
+        let res = tokio::time::timeout(Duration::from_secs(5), s.acquire("big"))
+            .await
+            .expect("żądanie nie może wisieć po nieudanym starcie");
+        assert!(matches!(res, Err(ScheduleError::Cancelled)));
+        let status = s.status().await;
+        assert_eq!(status.queue_len, 0);
+        assert_eq!(status.in_flight, 0);
+
+        // Po naprawie backendu kolejne żądanie przechodzi.
+        big.fail_ready.store(false, Ordering::SeqCst);
+        assert!(s.acquire("big").await.is_ok());
+    }
+
+    /// Czeka (z limitem), aż liczba żądań w toku osiągnie zadaną wartość.
+    async fn wait_in_flight(s: &Arc<Scheduler>, n: u32) {
+        for _ in 0..200 {
+            if s.status().await.in_flight == n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("in_flight nie osiągnął {n}");
     }
 }

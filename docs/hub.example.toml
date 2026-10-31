@@ -1,0 +1,30 @@
+# Przykładowa konfiguracja hub-server (--config hub.toml albo HUB_CONFIG).
+# Bez pliku hub działa z jednym backendem Ollama (--ollama-url).
+
+[scheduler]
+max_wait_secs = 120              # po tylu sekundach żądanie wyprzedza grupowanie po modelu
+max_concurrent_per_model = 4
+vram_budget_mib = 22528          # ile VRAM Ollama może zająć modelami naraz
+exclusive_idle_stop_secs = 900   # bezczynny InferSSD jest zatrzymywany po tylu sekundach
+
+# Domyślny backend (zawsze pierwszy): Ollama.
+[[backend]]
+name = "ollama"
+kind = "ollama"
+url  = "http://127.0.0.1:11434"
+
+# InferSSD: uruchamiany przez hub na żądanie jako osobny proces (`inferssd serve -m ... --port ...`).
+# Zajmuje całą kartę, więc hub wyładowuje modele Ollamy przed jego startem
+# i zatrzymuje go po bezczynności lub gdy ktoś poprosi o model Ollamy.
+[[backend]]
+name = "inferssd"
+kind = "inferssd"
+binary = "/home/wasyl/.local/bin/inferssd"
+port = 8080
+start_timeout_secs = 1800        # start dużego modelu trwa minuty; żądania czekają w kolejce
+retry_after_secs = 60            # po nieudanym starcie kolejne próby są odrzucane (503) przez ten czas
+log_file = "/home/wasyl/gpu-hub/inferssd.log"
+
+# alias widoczny dla klientów -> pierwszy shard pliku GGUF (pobrany wcześniej, np. przez `inferssd cli -hf ...`)
+[backend.model_paths]
+"deepseek-v4.1-flash" = "/ścieżka/do/DeepSeek-V4.1-Flash-1017-Q8_0-00001-of-000NN.gguf"

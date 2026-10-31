@@ -540,6 +540,7 @@ dependencies = [
  "hostname",
  "http-body-util",
  "hub-proto",
+ "libc",
  "mdns-sd",
  "nvml-wrapper",
  "reqwest",

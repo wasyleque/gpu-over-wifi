@@ -156,9 +156,36 @@ async fn peek_body_prefix(
     Ok((prefix_bytes, reqwest::Body::wrap_stream(combined)))
 }
 
+/// `GET /v1/models`: lista z domyślnego backendu (Ollama) uzupełniona o modele pozostałych backendów.
+async fn merged_models_response(state: &AppState) -> Response {
+    let url = format!(
+        "{}/v1/models",
+        state.scheduler.default_backend_url().trim_end_matches('/')
+    );
+    let upstream = match state.http_client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    };
+    let extra = state.scheduler.extra_model_ids().await;
+    if upstream.is_none() && extra.is_empty() {
+        return backend_unavailable_response();
+    }
+    let mut body = upstream.unwrap_or_else(|| json!({ "object": "list", "data": [] }));
+    if let Some(data) = body.get_mut("data").and_then(|d| d.as_array_mut()) {
+        for id in extra {
+            data.push(json!({ "id": id, "object": "model", "created": 0, "owned_by": "hub" }));
+        }
+    }
+    (StatusCode::OK, Json(body)).into_response()
+}
+
 async fn proxy_handler(State(state): State<AppState>, req: Request) -> Response {
     if !verify_bearer_token(req.headers(), &state.token) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    if req.method() == axum::http::Method::GET && req.uri().path() == "/v1/models" {
+        return merged_models_response(&state).await;
     }
 
     let (parts, body) = req.into_parts();
@@ -530,7 +557,15 @@ mod tests {
             .route("/api/ps", get(|| async { Json(json!({ "models": [] })) }))
             .route("/v1/chat/completions", post(|| async { "from-a-chat" }))
             .route("/api/generate", post(|| async { "from-a-generate" }))
-            .route("/v1/models", get(|| async { "default-a-models" }));
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({
+                        "object": "list",
+                        "data": [{"id": "model-a", "object": "model"}]
+                    }))
+                }),
+            );
 
         let backend_b = Router::new()
             .route(
@@ -626,7 +661,7 @@ mod tests {
         let b3_bytes = r3.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&b3_bytes[..], b"from-a-generate");
 
-        // 4. Trasa bez modelu (/v1/models) -> domyślny backend A bez kolejkowania
+        // 4. /v1/models łączy modele domyślnego backendu A z modelami pozostałych backendów
         let r4 = app
             .oneshot(
                 Request::builder()
@@ -640,7 +675,14 @@ mod tests {
             .unwrap();
         assert_eq!(r4.status(), StatusCode::OK);
         let b4_bytes = r4.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&b4_bytes[..], b"default-a-models");
+        let listed: serde_json::Value = serde_json::from_slice(&b4_bytes).unwrap();
+        let ids: Vec<&str> = listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["model-a", "embed-b"]);
     }
 
     #[tokio::test]

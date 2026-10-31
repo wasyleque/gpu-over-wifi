@@ -21,6 +21,7 @@ use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 
 mod backend;
+mod inferssd;
 mod proxy;
 mod scheduler;
 
@@ -233,7 +234,8 @@ async fn status_handler(
     }
 
     let gpus = collect_gpu_status(state.nvml.as_deref());
-    let models = fetch_ollama_models(&state.http_client, &state.ollama_url).await;
+    let mut models = fetch_ollama_models(&state.http_client, &state.ollama_url).await;
+    models.extend(state.scheduler.extra_loaded_models().await);
     let scheduler = state.scheduler.status().await;
 
     Ok(Json(StatusResponse {
@@ -318,6 +320,32 @@ fn start_mdns(hostname: &str, port: u16) -> Option<ServiceDaemon> {
     Some(mdns)
 }
 
+/// Buduje konfigurację backendu InferSSD z wpisu `[[backend]]` w `hub.toml`.
+fn inferssd_config(cfg: &scheduler::BackendConfig) -> inferssd::InferssdConfig {
+    let port = cfg.port.unwrap_or(8080);
+    inferssd::InferssdConfig {
+        name: cfg.name.clone(),
+        binary: PathBuf::from(cfg.binary.as_deref().unwrap_or("inferssd")),
+        base_url: if cfg.url.is_empty() {
+            format!("http://127.0.0.1:{port}")
+        } else {
+            cfg.url.clone()
+        },
+        port,
+        models: cfg
+            .model_paths
+            .iter()
+            .map(|(alias, path)| (alias.clone(), PathBuf::from(path)))
+            .collect(),
+        extra_args: cfg.args.clone(),
+        log_file: cfg.log_file.as_ref().map(PathBuf::from),
+        start_timeout: Duration::from_secs(cfg.start_timeout_secs.unwrap_or(1800)),
+        poll_interval: Duration::from_secs(2),
+        retry_after: Duration::from_secs(cfg.retry_after_secs.unwrap_or(60)),
+        term_grace: Duration::from_secs(15),
+    }
+}
+
 /// Inicjalizuje NVML; na Ubuntu bez pakietu -dev istnieje tylko `libnvidia-ml.so.1`.
 fn init_nvml() -> Result<Nvml, nvml_wrapper::error::NvmlError> {
     Nvml::init().or_else(|_| {
@@ -387,21 +415,23 @@ async fn main() {
         None => scheduler::HubConfig::default(),
     };
 
+    // Domyślny backend (indeks 0) to zawsze Ollama; reszta z konfiguracji idzie za nim.
     let mut backends: Vec<Arc<dyn backend::Backend>> = Vec::new();
+    let mut others: Vec<Arc<dyn backend::Backend>> = Vec::new();
     for cfg in &hub_config.backends {
-        if cfg.kind != "ollama" {
-            error!(
-                "Backend '{}': nieobsługiwany rodzaj '{}' (obecnie tylko 'ollama')",
-                cfg.name, cfg.kind
-            );
-            std::process::exit(1);
+        match cfg.kind.as_str() {
+            "ollama" => backends.push(Arc::new(backend::OllamaBackend::with_name_and_models(
+                cfg.name.clone(),
+                cfg.url.clone(),
+                proxy_client.clone(),
+                cfg.models.clone(),
+            ))),
+            "inferssd" => others.push(Arc::new(inferssd::InferssdBackend::new(inferssd_config(cfg)))),
+            other => {
+                error!("Backend '{}': nieobsługiwany rodzaj '{other}'", cfg.name);
+                std::process::exit(1);
+            }
         }
-        backends.push(Arc::new(backend::OllamaBackend::with_name_and_models(
-            cfg.name.clone(),
-            cfg.url.clone(),
-            proxy_client.clone(),
-            cfg.models.clone(),
-        )));
     }
     if backends.is_empty() {
         backends.push(Arc::new(backend::OllamaBackend::new(
@@ -409,7 +439,9 @@ async fn main() {
             proxy_client.clone(),
         )));
     }
+    backends.extend(others);
     let scheduler = scheduler::Scheduler::new(hub_config.scheduler, backends);
+    scheduler.spawn_idle_reaper();
 
     let state = AppState {
         token,
