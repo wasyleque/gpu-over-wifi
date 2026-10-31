@@ -92,60 +92,48 @@ impl<'a> Decoder<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
+    
+    fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
+        let end = self.pos.checked_add(n)
+            .ok_or(WireError::UnexpectedEof)?;
+        if end > self.buf.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let result = &self.buf[self.pos..end];
+        self.pos = end;
+        Ok(result)
+    }
+    
     pub fn get_u8(&mut self) -> Result<u8, WireError> {
-        if self.pos + 1 > self.buf.len() {
-            return Err(WireError::UnexpectedEof);
-        }
-        let value = self.buf[self.pos];
-        self.pos += 1;
-        Ok(value)
+        let bytes = self.take(1)?;
+        Ok(bytes[0])
     }
+    
     pub fn get_u16(&mut self) -> Result<u16, WireError> {
-        if self.pos + 2 > self.buf.len() {
-            return Err(WireError::UnexpectedEof);
-        }
-        let value = u16::from_le_bytes([self.buf[self.pos], self.buf[self.pos + 1]]);
-        self.pos += 2;
-        Ok(value)
+        let bytes = self.take(2)?;
+        Ok(u16::from_le_bytes(bytes.try_into().map_err(|_| WireError::UnexpectedEof)?))
     }
+    
     pub fn get_u32(&mut self) -> Result<u32, WireError> {
-        if self.pos + 4 > self.buf.len() {
-            return Err(WireError::UnexpectedEof);
-        }
-        let value = u32::from_le_bytes([self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3]]);
-        self.pos += 4;
-        Ok(value)
+        let bytes = self.take(4)?;
+        Ok(u32::from_le_bytes(bytes.try_into().map_err(|_| WireError::UnexpectedEof)?))
     }
+    
     pub fn get_u64(&mut self) -> Result<u64, WireError> {
-        if self.pos + 8 > self.buf.len() {
-            return Err(WireError::UnexpectedEof);
-        }
-        let value = u64::from_le_bytes([
-            self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3],
-            self.buf[self.pos + 4], self.buf[self.pos + 5], self.buf[self.pos + 6], self.buf[self.pos + 7]
-        ]);
-        self.pos += 8;
-        Ok(value)
+        let bytes = self.take(8)?;
+        Ok(u64::from_le_bytes(bytes.try_into().map_err(|_| WireError::UnexpectedEof)?))
     }
+    
     pub fn get_f32(&mut self) -> Result<f32, WireError> {
-        if self.pos + 4 > self.buf.len() {
-            return Err(WireError::UnexpectedEof);
-        }
-        let value = f32::from_le_bytes([self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3]]);
-        self.pos += 4;
-        Ok(value)
+        let bytes = self.take(4)?;
+        Ok(f32::from_le_bytes(bytes.try_into().map_err(|_| WireError::UnexpectedEof)?))
     }
+    
     pub fn get_f64(&mut self) -> Result<f64, WireError> {
-        if self.pos + 8 > self.buf.len() {
-            return Err(WireError::UnexpectedEof);
-        }
-        let value = f64::from_le_bytes([
-            self.buf[self.pos], self.buf[self.pos + 1], self.buf[self.pos + 2], self.buf[self.pos + 3],
-            self.buf[self.pos + 4], self.buf[self.pos + 5], self.buf[self.pos + 6], self.buf[self.pos + 7]
-        ]);
-        self.pos += 8;
-        Ok(value)
+        let bytes = self.take(8)?;
+        Ok(f64::from_le_bytes(bytes.try_into().map_err(|_| WireError::UnexpectedEof)?))
     }
+    
     pub fn get_varint(&mut self) -> Result<u64, WireError> {
         let mut value: u64 = 0;
         let mut shift = 0;
@@ -186,27 +174,34 @@ impl<'a> Decoder<'a> {
         
         Ok(value)
     }
+    
+    /// Długość (varint) i surowe bajty. Długość pochodzi z sieci, więc nie może powodować
+    /// przepełnienia; po błędzie pozycja wraca na początek.
     pub fn get_bytes(&mut self) -> Result<&'a [u8], WireError> {
         let original_pos = self.pos;
         let len = self.get_varint()?;
-        
-        if self.pos + len as usize > self.buf.len() {
+        let result = usize::try_from(len)
+            .map_err(|_| WireError::UnexpectedEof)
+            .and_then(|n| self.take(n));
+        if result.is_err() {
             self.pos = original_pos;
-            return Err(WireError::UnexpectedEof);
         }
-        
-        let start = self.pos;
-        self.pos += len as usize;
-        Ok(&self.buf[start..self.pos])
+        result
     }
+    /// Długość (varint) i bajty UTF-8; po błędzie pozycja wraca na początek.
     pub fn get_str(&mut self) -> Result<&'a str, WireError> {
+        let original_pos = self.pos;
         let bytes = self.get_bytes()?;
-        std::str::from_utf8(bytes).map_err(|_| WireError::InvalidUtf8)
+        std::str::from_utf8(bytes).map_err(|_| {
+            self.pos = original_pos;
+            WireError::InvalidUtf8
+        })
     }
     /// Liczba nieprzeczytanych bajtów.
     pub fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }
+    
     pub fn is_empty(&self) -> bool {
         self.remaining() == 0
     }
@@ -347,5 +342,29 @@ mod tests {
         e.put_u32(1);
         assert_eq!(e.len(), 4);
         assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn huge_declared_length_is_eof_not_a_panic() {
+        // Długość pochodzi z sieci: u64::MAX nie może powodować przepełnienia ani paniki.
+        let mut e = Encoder::new();
+        e.put_varint(u64::MAX);
+        let b = e.finish();
+        let mut d = Decoder::new(&b);
+        assert_eq!(d.get_bytes(), Err(WireError::UnexpectedEof));
+        assert_eq!(d.remaining(), b.len(), "pozycja nie może się przesunąć");
+        let mut d2 = Decoder::new(&b);
+        assert_eq!(d2.get_str(), Err(WireError::UnexpectedEof));
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_advance_the_position() {
+        let mut e = Encoder::new();
+        e.put_bytes(&[0xFF, 0xFE]);
+        let b = e.finish();
+        let mut d = Decoder::new(&b);
+        assert_eq!(d.get_str(), Err(WireError::InvalidUtf8));
+        assert_eq!(d.remaining(), b.len());
+        assert_eq!(d.get_bytes().unwrap(), &[0xFF, 0xFE]);
     }
 }
