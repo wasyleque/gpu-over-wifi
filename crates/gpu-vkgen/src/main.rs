@@ -3,6 +3,8 @@
 //! Etap M0: analiza rejestru i klasyfikacja poleceń według tego, czy wymagają odpowiedzi.
 //! Klasyfikacja steruje transportem: polecenia bez odpowiedzi są wysyłane partiami bez czekania.
 
+mod structs;
+
 use std::collections::BTreeMap;
 
 /// Jak polecenie zachowuje się w sieci.
