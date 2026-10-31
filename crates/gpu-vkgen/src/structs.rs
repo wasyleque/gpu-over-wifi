@@ -1,6 +1,8 @@
 //! Model struktur i unii Vulkan wczytany z `vk.xml`. Podstawa generatora koderów.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 /// Jeden członek struktury lub unii.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
@@ -37,7 +39,178 @@ pub struct StructDef {
 
 /// Wczytuje wszystkie struktury i unie (z rozwiązanymi aliasami) w kolejności z pliku.
 pub fn parse_structs(xml: &str) -> Result<Vec<StructDef>, String> {
-    todo!()
+    let doc = roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() },
+    )
+    .map_err(|e| e.to_string())?;
+    
+    let mut structs_by_name: HashMap<String, StructDef> = HashMap::new();
+    let mut aliases: Vec<(String, String)> = Vec::new(); // (alias_name, target_name)
+    
+    // Najpierw przetwarzamy wszystkie definicje bez aliasów
+    for type_node in doc.descendants().filter(|n| n.has_tag_name("type")) {
+        let category = type_node.attribute("category");
+        if category != Some("struct") && category != Some("union") {
+            continue;
+        }
+        
+        let name = type_node.attribute("name").unwrap_or("").to_string();
+        if name.is_empty() {
+            return Err("Brak nazwy typu".to_string());
+        }
+        
+        // Sprawdzamy czy to alias
+        if let Some(alias) = type_node.attribute("alias") {
+            aliases.push((name, alias.to_string()));
+            continue;
+        }
+        
+        // Przetwarzamy definicję struktury/unii
+        let extends = type_node
+            .attribute("structextends")
+            .map(|s| s.split(',').map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+            
+        let returned_only = type_node.attribute("returnedonly") == Some("true");
+        let is_union = category == Some("union");
+        
+        let mut members: Vec<Member> = Vec::new();
+        for member_node in type_node.children().filter(|n| n.has_tag_name("member")) {
+            let mut loose_text = String::new();
+            
+            let mut ty = String::new();
+            let mut name = String::new();
+            let mut is_const = false;
+            let mut ptr_depth = 0u8;
+            let mut array_dims: Vec<String> = Vec::new();
+            let len = member_node.attribute("len").map(|s| s.to_string());
+            let optional = member_node
+                .attribute("optional")
+                .and_then(|s| s.split(',').next())
+                .map(|s| s == "true")
+                .unwrap_or(false);
+            let values = member_node.attribute("values").map(|s| s.to_string());
+            
+            for child in member_node.children() {
+                if child.is_text() {
+                    if let Some(text) = child.text() {
+                        loose_text.push_str(text);
+                    }
+                } else if child.has_tag_name("type") {
+                    if let Some(text) = child.text() {
+                        ty = text.to_string();
+                    }
+                } else if child.has_tag_name("name") {
+                    if let Some(text) = child.text() {
+                        name = text.to_string();
+                    }
+                    
+                    // Sprawdzamy const i ptr_depth z tekstu przed nazwą
+                    let parts: Vec<&str> = loose_text.split_whitespace().collect();
+                    is_const = parts.contains(&"const");
+                    ptr_depth = loose_text.chars().filter(|&c| c == '*').count() as u8;
+                    
+                    // Przetwarzamy wymiary tablicy po nazwie
+                    let mut remaining_text = loose_text.clone();
+                    if let Some(name_pos) = remaining_text.find(&name) {
+                        remaining_text = remaining_text[name_pos + name.len()..].to_string();
+                    }
+                    
+                    // Zbieramy wszystkie teksty bezpośrednie po nazwie i enumy
+                    let mut array_text = String::new();
+                    let mut found_name = false;
+                    for grandchild in member_node.children() {
+                        if grandchild.has_tag_name("name") {
+                            found_name = true;
+                        } else if found_name && (grandchild.is_text() || grandchild.has_tag_name("enum")) {
+                            if let Some(text) = grandchild.text() {
+                                array_text.push_str(text);
+                            }
+                        }
+                    }
+                    
+                    // Wyszukujemy wszystkie grupy [x]
+                    let mut dims: Vec<String> = Vec::new();
+                    let mut start = 0;
+                    while let Some(open_bracket) = array_text[start..].find('[') {
+                        let open_pos = start + open_bracket;
+                        if let Some(close_bracket) = array_text[open_pos..].find(']') {
+                            let dim = &array_text[open_pos + 1..open_pos + close_bracket];
+                            dims.push(dim.to_string());
+                            start = open_pos + close_bracket + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    array_dims = dims;
+                }
+            }
+            
+            members.push(Member {
+                name,
+                ty,
+                ptr_depth,
+                is_const,
+                array_dims,
+                len,
+                optional,
+                values,
+            });
+        }
+        
+        structs_by_name.insert(
+            name.clone(),
+            StructDef {
+                name,
+                members,
+                extends,
+                returned_only,
+                is_union,
+                alias_of: None,
+            },
+        );
+    }
+    
+    // Teraz rozwiązuje aliasy i zwraca wynik w odpowiedniej kolejności
+    let mut result: Vec<StructDef> = Vec::new();
+    
+    // Przechodzimy przez wszystkie elementy <type> w kolejności pliku
+    for type_node in doc.descendants().filter(|n| n.has_tag_name("type")) {
+        let category = type_node.attribute("category");
+        if category != Some("struct") && category != Some("union") {
+            continue;
+        }
+        
+        let name = type_node.attribute("name").unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        
+        // Sprawdzamy czy to alias
+        if let Some(alias) = type_node.attribute("alias") {
+            if let Some(target_struct) = structs_by_name.get(alias) {
+                let alias_struct = StructDef {
+                    name: name.clone(),
+                    members: target_struct.members.clone(),
+                    extends: target_struct.extends.clone(),
+                    returned_only: target_struct.returned_only,
+                    is_union: target_struct.is_union,
+                    alias_of: Some(alias.to_string()),
+                };
+                result.push(alias_struct);
+            } else {
+                return Err(format!("Brak struktury docelowej dla aliasu: {}", name));
+            }
+        } else {
+            // To normalna definicja
+            if let Some(struct_def) = structs_by_name.get(&name) {
+                result.push(struct_def.clone());
+            }
+        }
+    }
+    
+    Ok(result)
 }
 
 #[cfg(test)]
