@@ -2,7 +2,7 @@
 //! Nie zależy od Vulkana (backend jest cechą), więc da się ją w pełni testować atrapą.
 
 use gpu_proto::msg::{PdFunc, Request, Response, MAX_NAME_LEN, PROTOCOL_VERSION};
-use gpu_wire::Encoder;
+use gpu_wire::{Decoder, Encoder};
 
 /// `VK_ERROR_UNKNOWN`: kod dla odrzuconych żądań (nieznany uchwyt, limit).
 pub const ERR_UNKNOWN: i32 = -13;
@@ -26,12 +26,39 @@ pub trait GpuBackend {
 
 /// Kodowanie listy rozszerzeń w `Response::Data`: varint liczby, potem (napis, u32 specVersion).
 pub fn encode_extensions(list: &[(String, u32)]) -> Vec<u8> {
-    todo!()
+    let mut enc = Encoder::new();
+    enc.put_varint(list.len() as u64);
+    for (name, spec) in list {
+        enc.put_str(name);
+        enc.put_u32(*spec);
+    }
+    enc.finish()
 }
 
 /// Odwrotność `encode_extensions`; `None` przy błędnych danych (ucięte, za długie nazwy, nadmiar).
 pub fn decode_extensions(bytes: &[u8]) -> Option<Vec<(String, u32)>> {
-    todo!()
+    let mut dec = Decoder::new(bytes);
+    let count = match dec.get_varint() {
+        Ok(c) if c <= 1024 && c <= (bytes.len() as u64) => c as usize,
+        _ => return None,
+    };
+    let mut result = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = match dec.get_str() {
+            Ok(s) if s.len() <= MAX_NAME_LEN => s.to_string(),
+            _ => return None,
+        };
+        let spec = match dec.get_u32() {
+            Ok(s) => s,
+            _ => return None,
+        };
+        result.push((name, spec));
+    }
+    if dec.remaining() != 0 {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Jedna sesja klienta. Dopóki `Hello` nie przejdzie, wszystkie inne żądania są odrzucane.
@@ -53,12 +80,125 @@ impl<B: GpuBackend> Session<B> {
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
-        todo!()
+        if !self.authed {
+            match req {
+                Request::Hello { version, token } => {
+                    if version != PROTOCOL_VERSION || token.is_empty() || token.len() > MAX_NAME_LEN {
+                        return Response::Error { code: ERR_PROTOCOL, message: "bad version or empty token".to_string() };
+                    }
+                    if self.token.len() != token.len() {
+                        return Response::Error { code: ERR_PROTOCOL, message: "token length mismatch".to_string() };
+                    }
+                    let equal = self.token.iter().zip(token.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+                    if !equal {
+                        return Response::Error { code: ERR_PROTOCOL, message: "token mismatch".to_string() };
+                    }
+                    self.authed = true;
+                    Response::HelloOk { version }
+                }
+                _ => Response::Error { code: ERR_PROTOCOL, message: "not authenticated".to_string() },
+            }
+        } else {
+            match req {
+                Request::Hello { .. } => Response::Error { code: ERR_PROTOCOL, message: "already authenticated".to_string() },
+                Request::EnumInstanceVersion => {
+                    match self.backend.instance_version() {
+                        Ok(v) => Response::U32(v),
+                        Err(code) => Response::Error { code, message: "instance version error".to_string() },
+                    }
+                }
+                Request::EnumInstanceExtensions => {
+                    match self.backend.instance_extensions() {
+                        Ok(exts) => Response::Data(encode_extensions(&exts)),
+                        Err(code) => Response::Error { code, message: "instance extensions error".to_string() },
+                    }
+                }
+                Request::CreateInstance { api_version, extensions } => {
+                    if self.instances.len() >= MAX_INSTANCES {
+                        return Response::Error { code: ERR_UNKNOWN, message: "too many instances".to_string() };
+                    }
+                    match self.backend.create_instance(api_version, &extensions) {
+                        Ok(handle) => {
+                            self.instances.push((handle, Vec::new()));
+                            Response::Handle(handle)
+                        }
+                        Err(code) => Response::Error { code, message: "create instance error".to_string() },
+                    }
+                }
+                Request::DestroyInstance { instance } => {
+                    let idx = self.instances.iter().position(|(h, _)| *h == instance);
+                    match idx {
+                        Some(i) => {
+                            let (handle, _) = self.instances.remove(i);
+                            match self.backend.destroy_instance(handle) {
+                                Ok(_) => Response::U32(0),
+                                Err(code) => Response::Error { code, message: "destroy instance error".to_string() },
+                            }
+                        }
+                        None => Response::Error { code: ERR_UNKNOWN, message: "unknown instance".to_string() },
+                    }
+                }
+                Request::EnumPhysicalDevices { instance } => {
+                    let idx = self.instances.iter().position(|(h, _)| *h == instance);
+                    match idx {
+                        Some(i) => {
+                            let (handle, ref mut devices) = self.instances[i];
+                            if devices.is_empty() {
+                                match self.backend.enum_physical_devices(handle) {
+                                    Ok(d) => {
+                                        *devices = d;
+                                        Response::Handles(devices.clone())
+                                    }
+                                    Err(code) => Response::Error { code, message: "enum physical devices error".to_string() },
+                                }
+                            } else {
+                                Response::Handles(devices.clone())
+                            }
+                        }
+                        None => Response::Error { code: ERR_UNKNOWN, message: "unknown instance".to_string() },
+                    }
+                }
+                Request::GetPhysicalDevice { pdev, func, arg, count, chain } => {
+                    let mut found = false;
+                    for (_, devices) in &self.instances {
+                        if devices.contains(&pdev) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Response::Error { code: ERR_UNKNOWN, message: "unknown physical device".to_string() };
+                    }
+                    match self.backend.get_physical_device(pdev, func, arg, count, &chain) {
+                        Ok(data) => Response::Data(data),
+                        Err(code) => Response::Error { code, message: "get physical device error".to_string() },
+                    }
+                }
+                Request::EnumDeviceExtensions { pdev } => {
+                    let mut found = false;
+                    for (_, devices) in &self.instances {
+                        if devices.contains(&pdev) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Response::Error { code: ERR_UNKNOWN, message: "unknown physical device".to_string() };
+                    }
+                    match self.backend.device_extensions(pdev) {
+                        Ok(exts) => Response::Data(encode_extensions(&exts)),
+                        Err(code) => Response::Error { code, message: "device extensions error".to_string() },
+                    }
+                }
+            }
+        }
     }
 
     /// Wywoływane po rozłączeniu: niszczy wszystkie instancje, które sesja jeszcze trzyma.
     pub fn cleanup(&mut self) {
-        todo!()
+        for (handle, _) in self.instances.drain(..) {
+            let _ = self.backend.destroy_instance(handle);
+        }
     }
 }
 
@@ -188,6 +328,16 @@ mod tests {
     fn empty_configured_token_never_authenticates() {
         let mut s = Session::new(Mock::default(), Vec::new());
         assert!(is_err(&s.handle(hello(b""))), "pusty token w konfiguracji nie może wpuszczać");
+    }
+
+    #[test]
+    fn different_tokens_never_authenticate_even_when_xor_folds_to_zero() {
+        // Wzorzec `acc ^ a ^ b` dałby tu 0: (1^2)=3, potem 3^3^0=0.
+        let mut s = Session::new(Mock::default(), vec![1, 3]);
+        assert!(is_err(&s.handle(Request::Hello { version: PROTOCOL_VERSION, token: vec![2, 0] })));
+        assert!(!s.is_authenticated());
+        let mut s = Session::new(Mock::default(), vec![1, 3]);
+        assert!(!is_err(&s.handle(Request::Hello { version: PROTOCOL_VERSION, token: vec![1, 3] })));
     }
 
     #[test]
