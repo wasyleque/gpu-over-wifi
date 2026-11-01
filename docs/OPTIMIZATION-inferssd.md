@@ -46,3 +46,13 @@ Telemetria (na token, warstwy ekspertów): GGUF 783 ms (oczekiwanie na dysk 599 
 - Pozostałe ~50% czasu to czekanie na jeden dysk. Następny skok da sprzęt: RAID0 z dwóch Kingstonów po wymianie wadliwego (odczyt ~2x) — wtedy przebudować/skopiować model i pack na macierz.
 - Wdrożenie: hub `mode = "launch"` (patrz `docs/hub.example.toml`), pack 269 GiB w `/srv/models/DeepSeek-V4.1-Flash-1017/model.expert-pack`, plik ustawień `~/gpu-hub/inferssd-settings.ssd`. Budowa packa: 9 min 8 s (~650 MB/s).
 - Rozumowanie wyłączać parametrem żądania `chat_template_kwargs.enable_thinking=false` dla generowania dokumentów i kodu.
+
+## Stabilność na długim prompcie (2026-11-01) — WAŻNA KOREKTA
+Konfiguracja "pack + ubatch 2048 + vram auto" była szybka na krótkich promptach, ale **padała** na długich zleceniach (prompt ~4 tys. tokenów, generowanie >200 tokenów): `CUDA graph instantiate ran out of device memory`, `[kimi_vram_tier] cannot drain after out of memory`, serwer znika w trakcie odpowiedzi. Przyczyna: warstwa ekspertów w VRAM (`vram.budget=auto`) zapełnia kartę do końca i nie zostawia miejsca na grafy CUDA.
+| Zapas VRAM | prompt 4105 tok | błędy OOM w logu | gen |
+|---|---|---|---|
+| brak | **serwer pada** | 26 | |
+| `vram.reserve_mib=2048` + `vram.margin_mib=2112` | OK, 55,7 tok/s | 0 | 3,02 tok/s |
+| 4096 / 4160 | OK, 55,9 tok/s | 0 | 3,16 tok/s |
+**Wdrożone:** `args = ["--set","vram.reserve_mib=2048","--set","vram.margin_mib=2112"]` w `[[backend]]` (margin musi być większy od reserve o >= 64 MiB, inaczej `launch` odmawia startu). Przetwarzanie długiego promptu: ok. 56 tok/s (krótkie prompty ok. 8 tok/s, bo każdy token czyta eksperty osobno). Generowanie przy długim kontekście ok. 3,0-3,1 tok/s (przy krótkim 4,7).
+**Lekcja:** pomiary prędkości robić także na długim prompcie i długiej generacji, nie tylko na 60 tokenach.
