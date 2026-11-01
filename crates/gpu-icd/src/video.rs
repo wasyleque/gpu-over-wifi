@@ -60,6 +60,7 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
     let mut presenter: Option<Presenter> = None;
     let mut bgra: Vec<u8> = Vec::new();
     let mut decoded: Vec<u8> = Vec::new();
+    let mut va: Option<gpu_vaapi::VaDecoder> = None;
     loop {
         let t0 = std::time::Instant::now();
         let Ok(frame) = c.recv_frame() else { break };
@@ -82,7 +83,30 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
                 }
                 &decoded
             }
-            Codec::Hevc | Codec::H264 => continue, // M5: dekodery wideo dojdą z VA-API
+            Codec::H264 => {
+                if va.is_none() {
+                    match gpu_vaapi::VaDecoder::new() {
+                        Ok(d) => va = Some(d),
+                        Err(e) => {
+                            eprintln!("gpu-icd: dekoder H.264 (VA-API): {e}");
+                            break;
+                        }
+                    }
+                }
+                let Some(d) = va.as_mut() else { break };
+                match d.decode(body) {
+                    Ok(Some(f)) if f.width == width && f.height == height => {
+                        decoded = f.bgra;
+                        &decoded
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("gpu-icd: dekodowanie H.264: {e}");
+                        continue;
+                    }
+                }
+            }
+            Codec::Hevc => continue, // HEVC: laptop (i965) go nie dekoduje
         };
         st.decode_ns += t_dec.elapsed().as_nanos() as u64;
         let frame_bgra: &[u8] = if h.format == PixelFormat::Rgba8 {

@@ -453,6 +453,7 @@ version = "0.1.0"
 dependencies = [
  "gpu-proto",
  "gpu-renderd",
+ "gpu-vaapi",
  "gpu-vkcodec",
  "gpu-wire",
 ]
@@ -476,6 +477,7 @@ dependencies = [
 name = "gpu-renderd"
 version = "0.1.0"
 dependencies = [
+ "gpu-nvenc",
  "gpu-proto",
  "gpu-vkcodec",
  "gpu-wire",

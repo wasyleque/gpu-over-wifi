@@ -10,7 +10,7 @@ fn main() {
         std::process::exit(2);
     }
     let (w, h, n, mbps): (u32, u32, usize, u32) = (a[1].parse().unwrap_or(1280), a[2].parse().unwrap_or(720), a[3].parse().unwrap_or(60), a[4].parse().unwrap_or(40));
-    let cfg = EncoderConfig { width: w, height: h, fps: 60, bitrate_bps: mbps * 1_000_000 };
+    let cfg = EncoderConfig { width: w, height: h, fps: 60, bitrate_bps: mbps * 1_000_000, rgba: false };
     let nv = Nvenc::load().unwrap_or_else(|e| {
         eprintln!("NVENC: {e}");
         std::process::exit(1);

@@ -99,6 +99,8 @@ pub struct Session<B: GpuBackend> {
     /// Identyfikator sesji i nadajnik ramek obrazu na jej połączenie wideo.
     session_id: u64,
     video_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    /// Koder H.264 bieżącego kanału wideo (tworzony przy pierwszej klatce H.264, zerowany przy nowym `SessionId`).
+    encoder: Option<gpu_nvenc::encoder::H264Encoder>,
 }
 
 impl<B: GpuBackend> Session<B> {
@@ -107,6 +109,7 @@ impl<B: GpuBackend> Session<B> {
         Session {
             session_id,
             video_tx,
+            encoder: None,
             backend,
             token,
             authed: false,
@@ -142,6 +145,7 @@ impl<B: GpuBackend> Session<B> {
         let codec = match codec {
             0 => Codec::Raw,
             2 => Codec::Lz4,
+            3 => Codec::H264,
             _ => return Err(ERR_UNKNOWN),
         };
         // Surowy rozmiar musi odpowiadać wymiarom (nagłówek waliduje to tylko dla `Raw`).
@@ -153,7 +157,15 @@ impl<B: GpuBackend> Session<B> {
         if data.len() != len as usize {
             return Err(ERR_UNKNOWN);
         }
-        let body = if codec == Codec::Lz4 { compress_lz4(&data) } else { data };
+        let (codec, body) = match codec {
+            Codec::H264 => match self.encode_h264(&data, width, height, format == PixelFormat::Rgba8) {
+                Some(b) => (Codec::H264, b),
+                // Brak NVENC albo wymiary poza zakresem kodera: ramka idzie bezstratnie (LZ4), odbiorca czyta kodek z nagłówka.
+                None => (Codec::Lz4, compress_lz4(&data)),
+            },
+            Codec::Lz4 => (Codec::Lz4, compress_lz4(&data)),
+            c => (c, data),
+        };
         let header = VideoHeader { swapchain: 0, image_index: 0, seq, width, height, format, codec, payload_len: body.len() as u32 };
         // Nagłówek sam się waliduje: niepoprawna ramka nie wychodzi z serwera.
         let hb = header.encode();
@@ -164,6 +176,19 @@ impl<B: GpuBackend> Session<B> {
         // Blokuje, gdy odbiorca nie nadąża (backpressure); brak odbiorcy (odłączone wideo) nie jest błędem sesji.
         let _ = self.video_tx.send(payload);
         Ok(())
+    }
+
+    /// Koduje klatkę kodekiem H.264 (koder powstaje przy pierwszej klatce i jest odtwarzany przy zmianie wymiarów lub formatu).
+    fn encode_h264(&mut self, data: &[u8], width: u16, height: u16, rgba: bool) -> Option<Vec<u8>> {
+        use gpu_nvenc::encoder::{EncoderConfig, H264Encoder};
+        let mbps: u32 = std::env::var("GPU_RENDERD_H264_MBPS").ok().and_then(|v| v.parse().ok()).filter(|v| (1..=800).contains(v)).unwrap_or(50);
+        let cfg = EncoderConfig { width: width as u32, height: height as u32, fps: 60, bitrate_bps: mbps * 1_000_000, rgba };
+        if self.encoder.as_ref().map(|e| e.config()) != Some(cfg) {
+            self.encoder = None;
+            let nv = gpu_nvenc::api::Nvenc::load().map_err(|e| eprintln!("gpu-renderd: NVENC niedostępny: {e}")).ok()?;
+            self.encoder = Some(H264Encoder::new(&nv, cfg).map_err(|e| eprintln!("gpu-renderd: koder H.264: {e}")).ok()?);
+        }
+        self.encoder.as_mut()?.encode(data, false).map_err(|e| eprintln!("gpu-renderd: kodowanie H.264: {e}")).ok()
     }
 
     /// Identyfikator sesji (do podłączenia połączenia wideo).
@@ -229,6 +254,7 @@ impl<B: GpuBackend> Session<B> {
                     crate::videohub::forget(self.session_id);
                     self.session_id = id;
                     self.video_tx = tx;
+                    self.encoder = None; // nowy strumień zaczyna się od IDR
                     Response::Handle(id)
                 }
                 Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
@@ -847,6 +873,20 @@ mod tests {
         s.handle_request(Request::PresentFrame { memory: 7, len: 100, seq: 3, width: 8, height: 8, format: 1, codec: 2 });
         assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }), "len różne od w*h*4");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn h264_request_for_a_frame_the_encoder_cannot_take_falls_back_to_lz4() {
+        use gpu_proto::video::{decompress_lz4, Codec, VideoHeader};
+        let mut s = stream_session(None);
+        let Some(Response::Handle(id)) = s.handle_request(Request::SessionId) else { panic!() };
+        let rx = crate::videohub::claim(id).unwrap();
+        // 8x8 jest poniżej minimum NVENC (33), więc niezależnie od maszyny koder odmawia i ramka idzie jako LZ4.
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 64 * 4, seq: 1, width: 8, height: 8, format: 1, codec: 3 }), None);
+        let payload = rx.try_recv().unwrap();
+        let h = VideoHeader::decode(&payload[..28]).unwrap();
+        assert_eq!(h.codec, Codec::Lz4);
+        assert_eq!(decompress_lz4(&payload[28..], 64 * 4).unwrap(), vec![7u8; 64 * 4]);
     }
 
     #[test]

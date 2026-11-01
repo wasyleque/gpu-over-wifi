@@ -52,13 +52,14 @@ unsafe fn rd<T: Copy>(struct_name: &str, ptr: *const u8, member: &str) -> Option
 }
 
 /// Kodek ramek wybrany ustawieniem `GPU_ICD_CODEC` (`auto`, `raw`, `lz4`, `h264`, `hevc`) spośród tych, które ICD umie dekodować
-/// i serwer koduje (dziś: LZ4 i surowy; H.264/HEVC dojdą wraz z NVENC i dekoderem). Niedostępny wybór => ostrzeżenie i `auto`.
+/// i serwer koduje (LZ4, surowy i H.264 przez NVENC/VA-API; HEVC nie, bo i965 go nie dekoduje). Niedostępny wybór => ostrzeżenie i `auto`.
 fn pick_codec() -> u8 {
     use gpu_proto::video::{choose_codec, Codec};
-    const AVAILABLE: &[Codec] = &[Codec::Lz4, Codec::Raw];
+    // Kolejność = preferencja dla `auto`; H.264 tylko na wyraźne żądanie, dopóki nie zmierzymy, że jest lepszy.
+    const AVAILABLE: &[Codec] = &[Codec::Lz4, Codec::Raw, Codec::H264];
     let setting = std::env::var("GPU_ICD_CODEC").unwrap_or_default();
     let chosen = choose_codec(&setting, AVAILABLE).unwrap_or_else(|| {
-        eprintln!("gpu-icd: kodek {setting:?} niedostępny (dostępne: lz4, raw); używam lz4");
+        eprintln!("gpu-icd: kodek {setting:?} niedostępny (dostępne: lz4, raw, h264); używam lz4");
         Codec::Lz4
     });
     chosen as u8

@@ -15,6 +15,8 @@ pub struct EncoderConfig {
     pub fps: u32,
     /// Średni i maksymalny bitrate (CBR) w bitach na sekundę.
     pub bitrate_bps: u32,
+    /// `true`: bajty pikseli w kolejności R,G,B,A (NVENC ABGR); `false`: B,G,R,A (NVENC ARGB).
+    pub rgba: bool,
 }
 
 impl EncoderConfig {
@@ -90,6 +92,7 @@ impl H264Encoder {
             h.set_enableIntraRefresh(0);
         }
 
+        let fmt = if cfg.rgba { NV_ENC_BUFFER_FORMAT_ABGR } else { NV_ENC_BUFFER_FORMAT_ARGB };
         let mut init = NV_ENC_INITIALIZE_PARAMS {
             version: NV_ENC_INITIALIZE_PARAMS_VER,
             encodeGUID: NV_ENC_CODEC_H264_GUID,
@@ -105,7 +108,7 @@ impl H264Encoder {
             maxEncodeWidth: cfg.width,
             maxEncodeHeight: cfg.height,
             tuningInfo: NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
-            bufferFormat: NV_ENC_BUFFER_FORMAT_ARGB,
+            bufferFormat: fmt,
             ..Default::default()
         };
         let initialize = session.fl.nvEncInitializeEncoder.ok_or("brak nvEncInitializeEncoder")?;
@@ -126,7 +129,7 @@ impl H264Encoder {
             height: cfg.height,
             pitch: cfg.width * 4,
             resourceToRegister: devptr as *mut c_void,
-            bufferFormat: NV_ENC_BUFFER_FORMAT_ARGB,
+            bufferFormat: fmt,
             bufferUsage: NV_ENC_INPUT_IMAGE,
             ..Default::default()
         };
@@ -223,7 +226,7 @@ mod tests {
     use super::*;
 
     fn cfg() -> EncoderConfig {
-        EncoderConfig { width: 640, height: 360, fps: 60, bitrate_bps: 20_000_000 }
+        EncoderConfig { width: 640, height: 360, fps: 60, bitrate_bps: 20_000_000, rgba: false }
     }
 
     #[test]
