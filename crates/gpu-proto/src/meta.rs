@@ -62,14 +62,17 @@ pub struct StructMeta {
     pub size: u32,
     pub align: u32,
     pub is_union: bool,
-    /// Indeks pierwszego członka w `MEMBERS` i liczba członków.
+    /// Syntetyczna struktura parametrów polecenia: członkowie leżą w `CMD_MEMBERS`.
+    pub commands: bool,
+    /// Indeks pierwszego członka (w `MEMBERS` albo `CMD_MEMBERS`) i liczba członków.
     pub first: u32,
     pub count: u32,
 }
 
 impl StructMeta {
     pub fn members(&self) -> &'static [MemberMeta] {
-        &MEMBERS[self.first as usize..(self.first + self.count) as usize]
+        let all = if self.commands { CMD_MEMBERS } else { MEMBERS };
+        &all[self.first as usize..(self.first + self.count) as usize]
     }
 }
 
@@ -109,7 +112,7 @@ impl CommandMeta {
 
     /// Syntetyczna struktura parametrów (do kodeka): rozmiar to 8 B na parametr.
     pub fn as_struct(&self) -> StructMeta {
-        StructMeta { name: self.name, size: self.count * 8, align: 8, is_union: false, first: 0, count: 0 }
+        StructMeta { name: self.name, size: self.count * 8, align: 8, is_union: false, commands: true, first: self.first, count: self.count }
     }
 }
 

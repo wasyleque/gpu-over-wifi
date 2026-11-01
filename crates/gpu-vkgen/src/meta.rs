@@ -309,7 +309,7 @@ pub fn meta_table_source(rows: &[StructRow], cmds: &[CommandRow]) -> String {
     let mut idx = 0usize;
     for r in rows {
         structs.push_str(&format!(
-            "    StructMeta {{ name: {:?}, size: {}, align: {}, is_union: {}, first: {}, count: {} }},\n",
+            "    StructMeta {{ name: {:?}, size: {}, align: {}, is_union: {}, commands: false, first: {}, count: {} }},\n",
             r.name, r.size, r.align, r.is_union, idx, r.members.len()
         ));
         for m in &r.members {
@@ -481,6 +481,6 @@ mod tests {
         let rows = real();
         assert!(rows.windows(2).all(|w| w[0].name < w[1].name));
         let src = meta_table_source(&rows, &cmds());
-        assert!(src.contains("StructMeta { name: \"VkInstanceCreateInfo\", size: 64, align: 8, is_union: false, first: "));
+        assert!(src.contains("StructMeta { name: \"VkInstanceCreateInfo\", size: 64, align: 8, is_union: false, commands: false, first: "));
     }
 }

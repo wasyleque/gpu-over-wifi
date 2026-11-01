@@ -343,3 +343,132 @@ fn coverage_report_of_members_the_codec_cannot_carry() {
     eprintln!("członków nieobsługiwanych: {unsupported} z {total}");
     assert!(unsupported * 20 < total, "{unsupported}/{total}");
 }
+
+// ---------- polecenia ----------
+
+use gpu_proto::meta::find_command;
+use gpu_vkcodec::codec::{decode_command, encode_command};
+
+fn slots(vals: &[u64]) -> Vec<u64> {
+    vals.to_vec()
+}
+
+fn enc_cmd(name: &str, args: &[u64], ctx: &dyn Ctx) -> Vec<u8> {
+    let (op, _) = find_command(name).unwrap();
+    let mut e = Encoder::new();
+    unsafe { encode_command(op, args.as_ptr() as *const u8, &mut e, ctx) }.unwrap();
+    e.finish()
+}
+
+#[test]
+fn fill_buffer_values_roundtrip_with_handle_translation() {
+    struct Plus;
+    impl Ctx for Plus {
+        fn handle_to_wire(&self, _: &str, r: u64) -> Result<u64, CodecError> { Ok(r + 1000) }
+        fn wire_to_handle(&self, _: &str, w: u64) -> Result<u64, CodecError> { Ok(w - 1000) }
+    }
+    // vkCmdFillBuffer(commandBuffer, dstBuffer, dstOffset, size, data)
+    let args = slots(&[11, 22, 256, 4096, 0xDEAD_BEEF]);
+    let wire = enc_cmd("vkCmdFillBuffer", &args, &Plus);
+    let d = decode_command(&mut Decoder::new(&wire), &Plus).unwrap().unwrap();
+    assert_eq!(d.command.name, "vkCmdFillBuffer");
+    let got: Vec<u64> = (0..5).map(|i| unsafe { std::ptr::read_unaligned(d.args.ptr.add(i * 8) as *const u64) }).collect();
+    assert_eq!(got[0], 11, "uchwyt wraca do wartości serwera");
+    assert_eq!(got[1], 22);
+    assert_eq!((got[2], got[3], got[4] & 0xFFFF_FFFF), (256, 4096, 0xDEAD_BEEF));
+}
+
+#[test]
+fn create_buffer_keeps_the_client_assigned_output_id_untranslated() {
+    struct Plus;
+    impl Ctx for Plus {
+        fn handle_to_wire(&self, _: &str, r: u64) -> Result<u64, CodecError> { Ok(r + 1000) }
+        fn wire_to_handle(&self, _: &str, w: u64) -> Result<u64, CodecError> { Ok(w - 1000) }
+    }
+    let mut ci = C::new("VkBufferCreateInfo");
+    ci.set_u64("size", 65536);
+    ci.set_u32("usage", 0x20);
+    let id_slot: u64 = 77; // *pBuffer: identyfikator nadany przez klienta
+    let args = slots(&[5, ci.ptr() as u64, 0, &id_slot as *const u64 as u64]);
+    let wire = enc_cmd("vkCreateBuffer", &args, &Plus);
+    let d = decode_command(&mut Decoder::new(&wire), &Plus).unwrap().unwrap();
+    unsafe {
+        assert_eq!(std::ptr::read_unaligned(d.args.ptr as *const u64), 5, "device przetłumaczony");
+        let info = std::ptr::read_unaligned(d.args.ptr.add(8) as *const *const u8);
+        assert_eq!(std::ptr::read_unaligned(info.add(off("VkBufferCreateInfo", "size")) as *const u64), 65536);
+        assert_eq!(std::ptr::read_unaligned(d.args.ptr.add(16) as *const u64), 0, "pAllocator zawsze null");
+        let out = std::ptr::read_unaligned(d.args.ptr.add(24) as *const *const u64);
+        assert_eq!(*out, 77, "uchwyt wyjściowy bez tłumaczenia");
+    }
+}
+
+#[test]
+fn allocate_command_buffers_count_comes_from_the_info_struct() {
+    let mut ai = C::new("VkCommandBufferAllocateInfo");
+    ai.set_u64("commandPool", 3);
+    ai.set_u32("commandBufferCount", 3);
+    let ids: [u64; 3] = [101, 102, 103];
+    let args = slots(&[5, ai.ptr() as u64, ids.as_ptr() as u64]);
+    let wire = enc_cmd("vkAllocateCommandBuffers", &args, &Identity);
+    let d = decode_command(&mut Decoder::new(&wire), &Identity).unwrap().unwrap();
+    unsafe {
+        let out = std::ptr::read_unaligned(d.args.ptr.add(16) as *const *const u64);
+        assert_eq!((*out, *out.add(1), *out.add(2)), (101, 102, 103));
+    }
+}
+
+#[test]
+fn blend_constants_array_and_submit_struct_array() {
+    let bc = [0.25f32, 0.5, 0.75, 1.0];
+    let wire = enc_cmd("vkCmdSetBlendConstants", &slots(&[9, bc.as_ptr() as u64]), &Identity);
+    let d = decode_command(&mut Decoder::new(&wire), &Identity).unwrap().unwrap();
+    unsafe {
+        let p = std::ptr::read_unaligned(d.args.ptr.add(8) as *const *const f32);
+        assert_eq!((*p, *p.add(1), *p.add(2), *p.add(3)), (0.25, 0.5, 0.75, 1.0));
+    }
+    let mut si = C::new("VkSubmitInfo");
+    let cbs: [u64; 2] = [31, 32];
+    si.set_u32("commandBufferCount", 2);
+    si.set_ptr("pCommandBuffers", cbs.as_ptr());
+    let wire = enc_cmd("vkQueueSubmit", &slots(&[4, 1, si.ptr() as u64, 8]), &Identity);
+    let d = decode_command(&mut Decoder::new(&wire), &Identity).unwrap().unwrap();
+    unsafe {
+        let subs = std::ptr::read_unaligned(d.args.ptr.add(16) as *const *const u8);
+        let cbp = std::ptr::read_unaligned(subs.add(off("VkSubmitInfo", "pCommandBuffers")) as *const *const u64);
+        assert_eq!((*cbp, *cbp.add(1)), (31, 32));
+        assert_eq!(std::ptr::read_unaligned(d.args.ptr.add(24) as *const u64), 8, "fence");
+    }
+}
+
+#[test]
+fn command_streams_decode_sequentially_and_reject_bad_opcodes() {
+    let mut all = Vec::new();
+    all.extend(enc_cmd("vkCmdFillBuffer", &slots(&[1, 2, 0, 16, 7]), &Identity));
+    all.extend(enc_cmd("vkEndCommandBuffer", &slots(&[1]), &Identity));
+    let mut dec = Decoder::new(&all);
+    assert_eq!(decode_command(&mut dec, &Identity).unwrap().unwrap().command.name, "vkCmdFillBuffer");
+    assert_eq!(decode_command(&mut dec, &Identity).unwrap().unwrap().command.name, "vkEndCommandBuffer");
+    assert!(decode_command(&mut dec, &Identity).unwrap().is_none(), "czysty koniec");
+    assert!(decode_command(&mut Decoder::new(&[0xFF, 0xFF]), &Identity).is_err(), "kod operacji poza tabelą");
+    let (op, _) = find_command("vkGetPhysicalDeviceXcbPresentationSupportKHR").unwrap();
+    let mut e = Encoder::new();
+    assert!(unsafe { encode_command(op, [0u64; 4].as_ptr() as *const u8, &mut e, &Identity) }.is_err(), "nieobsługiwane polecenie");
+}
+
+#[test]
+fn random_command_streams_never_panic() {
+    let mut x: u64 = 0xABCD_EF01_2345_6789;
+    let mut next = || {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    };
+    let ops: Vec<u16> = ["vkCreateBuffer", "vkQueueSubmit", "vkCreateGraphicsPipelines", "vkAllocateCommandBuffers", "vkCmdPipelineBarrier"].iter().map(|n| find_command(n).unwrap().0).collect();
+    for i in 0..3000 {
+        let mut bytes = ops[i % ops.len()].to_le_bytes().to_vec();
+        let len = (next() % 200) as usize;
+        bytes.extend((0..len).map(|_| next() as u8));
+        let _ = decode_command(&mut Decoder::new(&bytes), &Identity);
+    }
+}

@@ -179,7 +179,9 @@ unsafe fn enc_ptr(meta: &StructMeta, m: &MemberMeta, base: *const u8, enc: &mut 
         (1, Elem::Handle) => {
             enc.put_varint(count);
             for i in 0..count as usize {
-                enc.put_u64(ctx.handle_to_wire(m.type_name, std::ptr::read_unaligned(p.add(i * 8) as *const u64))?);
+                let raw = std::ptr::read_unaligned(p.add(i * 8) as *const u64);
+                // Wyjściowe uchwyty (parametr nie-const) to identyfikatory nadane przez klienta: bez tłumaczenia.
+                enc.put_u64(if m.is_const { ctx.handle_to_wire(m.type_name, raw)? } else { raw });
             }
         }
         (1, Elem::Struct) => {
@@ -226,6 +228,19 @@ unsafe fn enc_chain(mut p: *const u8, enc: &mut Encoder, ctx: &dyn Ctx, depth: u
         enc_struct(sm, node, enc, ctx, depth + 1, true)?;
     }
     Ok(())
+}
+
+/// Koduje polecenie: kod operacji (`u16`) i parametry z `args` (8 B na parametr, w kolejności z `vk.xml`).
+///
+/// # Safety
+/// `args` musi wskazywać na `8 * liczba_parametrów` bajtów z poprawnymi wartościami parametrów.
+pub unsafe fn encode_command(opcode: u16, args: *const u8, enc: &mut Encoder, ctx: &dyn Ctx) -> Result<(), CodecError> {
+    let cmd = gpu_proto::meta::COMMANDS.get(opcode as usize).ok_or(CodecError::Limit("kod operacji"))?;
+    if !cmd.supported {
+        return Err(CodecError::Unsupported(format!("polecenie {}", cmd.name)));
+    }
+    enc.put_u16(opcode);
+    encode_struct(&cmd.as_struct(), args, enc, ctx)
 }
 
 // ======================= dekoder =======================
@@ -379,7 +394,8 @@ unsafe fn dec_ptr(meta: &StructMeta, m: &MemberMeta, dec: &mut Decoder, dst: *mu
             let p = arena.alloc(n as usize * 8)?;
             for i in 0..n as usize {
                 let w = dec.get_u64()?;
-                std::ptr::write_unaligned(p.add(i * 8) as *mut u64, ctx.wire_to_handle(m.type_name, w)?);
+                let v = if m.is_const { ctx.wire_to_handle(m.type_name, w)? } else { w };
+                std::ptr::write_unaligned(p.add(i * 8) as *mut u64, v);
             }
             put_ptr(dst, m.offset, p);
         }
@@ -437,4 +453,25 @@ unsafe fn dec_chain(dec: &mut Decoder, slot: *mut u8, arena: &mut Arena, ctx: &d
         slot = node.add(PNEXT_OFFSET);
     }
     Ok(())
+}
+
+/// Odtworzone polecenie: `args` to 8-bajtowe sloty parametrów w arenie.
+pub struct DecodedCommand {
+    pub opcode: u16,
+    pub command: &'static gpu_proto::meta::CommandMeta,
+    pub args: Decoded,
+}
+
+/// Odczytuje kolejne polecenie ze strumienia. `Ok(None)` na czystym końcu strumienia.
+pub fn decode_command(dec: &mut Decoder, ctx: &dyn Ctx) -> Result<Option<DecodedCommand>, CodecError> {
+    if dec.remaining() == 0 {
+        return Ok(None);
+    }
+    let opcode = dec.get_u16()?;
+    let command = gpu_proto::meta::COMMANDS.get(opcode as usize).ok_or(CodecError::Limit("kod operacji"))?;
+    if !command.supported {
+        return Err(CodecError::Unsupported(format!("polecenie {}", command.name)));
+    }
+    let args = decode_struct(&command.as_struct(), dec, ctx)?;
+    Ok(Some(DecodedCommand { opcode, command, args }))
 }
