@@ -80,6 +80,8 @@ impl StructMeta {
 pub enum Ret {
     Void,
     VkResult,
+    /// Wartość 64-bitowa (np. `VkDeviceAddress`), przesyłana po kodzie wyniku i parametrach wyjściowych.
+    U64,
     Other,
 }
 
@@ -129,6 +131,14 @@ pub fn find_struct(name: &str) -> Option<&'static StructMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_returning_a_device_address_are_synchronous_and_supported() {
+        for n in ["vkGetBufferDeviceAddress", "vkGetBufferOpaqueCaptureAddress", "vkGetDeviceMemoryOpaqueCaptureAddress"] {
+            let (_, c) = find_command(n).unwrap_or_else(|| panic!("brak {n}"));
+            assert_eq!((c.ret, c.class, c.supported), (Ret::U64, CmdClass::Query, true), "{n}");
+        }
+    }
     use crate::stype::STYPE_TABLE;
 
     #[test]

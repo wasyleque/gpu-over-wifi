@@ -294,7 +294,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
 
     st.stats.commands += 1;
     let has_data_out = params.iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1);
-    if force_async || (cmd.class != CmdClass::Sync && !has_data_out) {
+    if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64) {
         st.batch.extend(bytes);
         if st.batch.len() > BATCH_FLUSH {
             st.flush();
@@ -317,8 +317,13 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         return fail(VK_ERROR_DEVICE_LOST);
     };
     let result = d.get(..4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(VK_ERROR_DEVICE_LOST);
-    if result >= 0 && decode_out_params(cmd, args, &mut Decoder::new(d.get(4..).unwrap_or(&[]))).is_err() {
+    let mut dec = Decoder::new(d.get(4..).unwrap_or(&[]));
+    if result >= 0 && decode_out_params(cmd, args, &mut dec).is_err() {
         return fail(VK_ERROR_INITIALIZATION_FAILED);
+    }
+    if cmd.ret == Ret::U64 {
+        // Wartość zwracana (np. adres bufora) idzie na końcu odpowiedzi; brak = 0, czyli adres nieprawidłowy.
+        return if result >= 0 { dec.get_u64().unwrap_or(0) } else { 0 };
     }
     if cmd.class == CmdClass::Sync {
         st.read_mapped();

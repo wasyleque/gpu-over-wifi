@@ -276,6 +276,8 @@ pub fn compute_commands(xml: &str) -> Result<Vec<CommandRow>, String> {
         let ret = match proto.children().find(|x| x.has_tag_name("type")).and_then(|x| x.text()) {
             Some("void") => "Void",
             Some("VkResult") => "VkResult",
+            // Adres na urządzeniu (VkDeviceAddress) i wartości 64-bitowe wracają w odpowiedzi na `Query`.
+            Some("VkDeviceAddress") | Some("uint64_t") => "U64",
             _ => "Other",
         };
         let mut params = Vec::new();
@@ -289,14 +291,14 @@ pub fn compute_commands(xml: &str) -> Result<Vec<CommandRow>, String> {
             ("Pointer", "Scalar") | ("Pointer", "Char") | ("Pointer", "Void") | ("Pointer", "Handle") | ("Pointer", "Struct") | ("Pointer", "Union") => p.ptr_depth == 1 || (p.ptr_depth == 2 && p.elem == "Char"),
             _ => false,
         }) && ret != "Other";
-        let class = match classes.get(name) {
+        let class = if ret == "U64" { "Query" } else { match classes.get(name) {
             Some(crate::Class::FireAndForget) => "FireAndForget",
             Some(crate::Class::DeferredResult) => "DeferredResult",
             Some(crate::Class::OptimisticCreate) => "OptimisticCreate",
             Some(crate::Class::Query) => "Query",
             Some(crate::Class::Sync) => "Sync",
             None => "Query",
-        };
+        } };
         out.insert(name.to_string(), CommandRow { name: name.to_string(), ret, class, supported, params });
     }
     Ok(out.into_values().collect())

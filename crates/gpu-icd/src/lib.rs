@@ -646,6 +646,20 @@ macro_rules! table {
 
 /// Adres funkcji o danej nazwie: ręczne (lokalne) albo generyczny punkt wejścia przekazujący do serwera.
 pub fn proc_addr_by_name(name: &str) -> *const c_void {
+    let p = proc_addr_lookup(name);
+    if p.is_null() {
+        if let Ok(path) = std::env::var("GPU_ICD_PROCLOG") {
+            // Gra bez sprawdzania null wywołuje taki wskaźnik i pada: lista nazw, o które pytała, a których nie mamy.
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{name}");
+            }
+        }
+    }
+    p
+}
+
+fn proc_addr_lookup(name: &str) -> *const c_void {
     let p = local_proc_addr(name);
     if !p.is_null() {
         return p;

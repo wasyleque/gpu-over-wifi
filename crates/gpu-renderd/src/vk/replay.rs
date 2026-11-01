@@ -66,6 +66,8 @@ pub struct Replayer {
     instance: VkInstance,
     fns: HashMap<u16, *const c_void>,
     maps: HashMap<u64, *mut u8>,
+    /// Surowa wartość zwrócona przez ostatnio wykonane polecenie (dla poleceń `Ret::U64`).
+    last_ret: u64,
 }
 
 // SAFETY: wskaźniki to uchwyty i adresy odwzorowań sterownika używane wyłącznie przez wątek sesji.
@@ -78,7 +80,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new() }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), last_ret: 0 }
     }
 
     pub fn set_instance(&mut self, raw: VkInstance) {
@@ -132,6 +134,9 @@ impl Replayer {
         if result >= 0 {
             // SAFETY: `dc.args` to świeżo odtworzone i wykonane parametry tego polecenia.
             unsafe { encode_out_params(dc.command, dc.args.ptr, &mut enc, &Identity) }.map_err(code)?;
+            if dc.command.ret == Ret::U64 {
+                enc.put_u64(self.last_ret);
+            }
         }
         Ok(enc.finish())
     }
@@ -163,6 +168,7 @@ impl Replayer {
         let size = if cmd.name == "vkAllocateMemory" { unsafe { arg_uint(cmd, args, "pAllocateInfo->allocationSize") }.unwrap_or(0) } else { 0 };
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
+        self.last_ret = rax;
         let result = if cmd.ret == Ret::VkResult { rax as u32 as i32 } else { 0 };
         if result < 0 {
             return if tolerate { Ok(result) } else { Err(result) };
