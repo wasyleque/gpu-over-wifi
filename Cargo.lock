@@ -444,6 +444,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-proto"
+version = "0.1.0"
+
+[[package]]
 name = "gpu-vkgen"
 version = "0.1.0"
 dependencies = [

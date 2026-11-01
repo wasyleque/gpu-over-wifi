@@ -1,0 +1,6 @@
+[package]
+name = "gpu-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
