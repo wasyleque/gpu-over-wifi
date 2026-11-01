@@ -390,29 +390,3 @@ mod tests {
         eprintln!("lokalny sterownik: {} ({}), instancja: {:?}", l.device_name, l.manifest.display(), l.enabled_instance_exts);
     }
 }
-
-#[cfg(test)]
-mod experiments {
-    use super::*;
-
-    #[test]
-    fn headless_surface_handle_as_the_loader_would_pass_it() {
-        let Ok(l) = LocalVulkan::open() else { return };
-        // VkIcdSurfaceHeadless { VkIcdSurfaceBase { platform } }: VK_ICD_WSI_PLATFORM_HEADLESS = 9.
-        let surf = [9u64; 2];
-        let h = surf.as_ptr() as u64;
-        eprintln!("support: {:?}", l.surface_support(0, h));
-        eprintln!("caps: {:?}", l.surface_caps(h).map(|c| (u32::from_le_bytes(c[0..4].try_into().unwrap()), u32::from_le_bytes(c[4..8].try_into().unwrap()))));
-        eprintln!("formats: {:?}", l.surface_formats(h).map(|f| f.len()));
-        eprintln!("modes: {:?}", l.present_modes(h));
-        // Ta sama próba przez własną powierzchnię sterownika (vkCreateHeadlessSurfaceEXT wywołany bezpośrednio).
-        let mut info = [0u64; 3];
-        info[0] = 1_000_256_000;
-        let mut own: u64 = 0;
-        let r = l.call("vkCreateHeadlessSurfaceEXT", &[l.instance as u64, info.as_ptr() as u64, 0, &mut own as *mut u64 as u64]);
-        eprintln!("własna powierzchnia headless: wynik {r:?}, uchwyt {own:#x}");
-        if r == Some(0) {
-            eprintln!("  support {:?}, caps {:?}", l.surface_support(0, own), l.surface_caps(own).map(|c| c.len()));
-        }
-    }
-}

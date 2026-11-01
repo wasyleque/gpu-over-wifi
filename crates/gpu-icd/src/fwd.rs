@@ -287,6 +287,12 @@ fn trace(name: &str, ret: u64, micros: u128) {
     }
 }
 
+/// Alokacje, które w normalnym działaniu mogą się nie powieść i których aplikacja oczekuje wyniku (pełna pula deskryptorów =>
+/// nowa pula i ponowna próba; brak pamięci => inny typ/heap), więc nie mogą być optymistyczne.
+fn may_fail_legitimately(name: &str) -> bool {
+    matches!(name, "vkAllocateDescriptorSets" | "vkAllocateMemory")
+}
+
 /// `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`: aplikacja pyta, czy potok jest w pamięci podręcznej, i oczekuje
 /// prawdziwego wyniku (`VK_PIPELINE_COMPILE_REQUIRED`), więc takie tworzenie nie może być optymistyczne.
 const PIPELINE_FAIL_ON_COMPILE_REQUIRED: u32 = 0x100;
@@ -432,7 +438,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
 
     st.stats.commands += 1;
     let has_data_out = params.iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1);
-    if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64 && !is_pipeline_probe(cmd.name, slots)) {
+    if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64 && !is_pipeline_probe(cmd.name, slots) && !may_fail_legitimately(cmd.name)) {
         st.batch.extend(bytes);
         if st.batch.len() > BATCH_FLUSH {
             st.flush();
@@ -462,6 +468,20 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     if cmd.ret == Ret::U64 {
         // Wartość zwracana (np. adres bufora) idzie na końcu odpowiedzi; brak = 0, czyli adres nieprawidłowy.
         return if result >= 0 { dec.get_u64().unwrap_or(0) } else { 0 };
+    }
+    if result < 0 {
+        // Nieudana alokacja: uchwyty wyjściowe mają być VK_NULL_HANDLE, a rozmiar pamięci nie ma być zapamiętany.
+        if cmd.name == "vkAllocateDescriptorSets" && slots[1] != 0 && slots[2] != 0 {
+            let n = std::ptr::read_unaligned((slots[1] as *const u8).add(24) as *const u32).min(65536) as usize;
+            for i in 0..n {
+                std::ptr::write_unaligned((slots[2] as *mut u64).add(i), 0);
+            }
+        }
+        if cmd.name == "vkAllocateMemory" && slots[3] != 0 {
+            let id = std::ptr::read_unaligned(slots[3] as *const u64);
+            st.mem_sizes.remove(&id);
+            std::ptr::write_unaligned(slots[3] as *mut u64, 0);
+        }
     }
     if cmd.class == CmdClass::Sync && result == 0 {
         st.read_mapped();
@@ -591,5 +611,18 @@ mod pipeline_probe_tests {
             assert!(!is_pipeline_probe("vkCreateGraphicsPipelines", &[1, 0, 2, 0]));
             assert!(!is_pipeline_probe("vkCreateGraphicsPipelines", &[1, 0, 1 << 40, mem.as_ptr() as u64]));
         }
+    }
+}
+
+#[cfg(test)]
+mod alloc_tests {
+    use super::*;
+
+    #[test]
+    fn only_allocations_that_may_legitimately_fail_are_synchronous() {
+        assert!(may_fail_legitimately("vkAllocateDescriptorSets"));
+        assert!(may_fail_legitimately("vkAllocateMemory"));
+        assert!(!may_fail_legitimately("vkAllocateCommandBuffers"));
+        assert!(!may_fail_legitimately("vkCreateBuffer"));
     }
 }
