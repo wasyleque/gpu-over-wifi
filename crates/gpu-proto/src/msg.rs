@@ -82,8 +82,9 @@ pub enum Request {
     /// Drugie połączenie (po `Hello`): odtąd serwer wypycha na nie ramki obrazu sesji `session`.
     AttachVideo { session: u64 },
     /// Bez odpowiedzi: serwer czyta `len` bajtów obrazu z `memory` (po wykonaniu wcześniejszych poleceń)
-    /// i wysyła je jako ramkę `seq` na połączeniu wideo. `format`: 1 = BGRA8, 2 = RGBA8 (jak `video::PixelFormat`).
-    PresentFrame { memory: u64, len: u32, seq: u32, width: u16, height: u16, format: u8 },
+    /// i wysyła je jako ramkę `seq` na połączeniu wideo. `format`: 1 = BGRA8, 2 = RGBA8 (jak `video::PixelFormat`);
+    /// `codec`: 0 = surowe, 2 = LZ4 (jak `video::Codec`).
+    PresentFrame { memory: u64, len: u32, seq: u32, width: u16, height: u16, format: u8, codec: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +188,7 @@ impl Request {
                 e.put_u8(14);
                 e.put_u64(*session);
             }
-            Request::PresentFrame { memory, len, seq, width, height, format } => {
+            Request::PresentFrame { memory, len, seq, width, height, format, codec } => {
                 e.put_u8(15);
                 e.put_u64(*memory);
                 e.put_u32(*len);
@@ -195,6 +196,7 @@ impl Request {
                 e.put_u16(*width);
                 e.put_u16(*height);
                 e.put_u8(*format);
+                e.put_u8(*codec);
             }
         }
         e.finish()
@@ -291,10 +293,11 @@ impl Request {
                 let width = d.get_u16()?;
                 let height = d.get_u16()?;
                 let format = d.get_u8()?;
+                let codec = d.get_u8()?;
                 if len as usize > MAX_BATCH {
                     return Err(MsgError::LimitExceeded("frame"));
                 }
-                Request::PresentFrame { memory, len, seq, width, height, format }
+                Request::PresentFrame { memory, len, seq, width, height, format, codec }
             }
             op => return Err(MsgError::UnknownOp(op)),
         };
@@ -413,7 +416,7 @@ mod tests {
             Request::MemRead { memory: 5, offset: 0, len: 4096 },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },
-            Request::PresentFrame { memory: 9, len: 1_870_000, seq: 77, width: 650, height: 718, format: 1 },
+            Request::PresentFrame { memory: 9, len: 1_870_000, seq: 77, width: 650, height: 718, format: 1, codec: 2 },
         ]
     }
 
@@ -533,7 +536,7 @@ mod tests {
         assert!(matches!(Request::decode(&bigw), Err(MsgError::LimitExceeded(_))));
         let bigr = Request::MemRead { memory: 1, offset: 0, len: MAX_BATCH as u32 + 1 }.encode();
         assert!(matches!(Request::decode(&bigr), Err(MsgError::LimitExceeded(_))));
-        let bigf = Request::PresentFrame { memory: 1, len: MAX_BATCH as u32 + 1, seq: 0, width: 1, height: 1, format: 1 }.encode();
+        let bigf = Request::PresentFrame { memory: 1, len: MAX_BATCH as u32 + 1, seq: 0, width: 1, height: 1, format: 1, codec: 0 }.encode();
         assert!(matches!(Request::decode(&bigf), Err(MsgError::LimitExceeded(_))));
         // Granice dokładnie na limicie są dozwolone.
         let ok = Request::CreateInstance { api_version: 1, extensions: vec!["a".repeat(MAX_NAME_LEN); MAX_EXTENSIONS] }.encode();

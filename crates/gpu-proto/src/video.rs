@@ -25,6 +25,8 @@ pub enum PixelFormat {
 pub enum Codec {
     Raw = 0,
     Hevc = 1,
+    /// Surowe piksele skompresowane bezstratnie (blok LZ4 bez prefiksu rozmiaru; rozmiar wynika z wymiarów).
+    Lz4 = 2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ impl VideoHeader {
         let codec = match codec_byte {
             0 => Codec::Raw,
             1 => Codec::Hevc,
+            2 => Codec::Lz4,
             other => return Err(VideoError::BadCodec(other)),
         };
         if bytes[22] != 0 || bytes[23] != 0 {
@@ -177,6 +180,34 @@ pub fn pack_rows(
         out[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
     }
     Ok(out)
+}
+
+/// Kompresuje surowe piksele do bloku LZ4 (bezstratnie, bez `unsafe`).
+pub fn compress_lz4(raw: &[u8]) -> Vec<u8> {
+    lz4_flex::block::compress(raw)
+}
+
+/// Rozpakowuje blok LZ4 do dokładnie `expected` bajtów (`width * height * 4`). Nie alokuje więcej niż `expected`,
+/// więc zniekształcony strumień nie może wywołać "bomby dekompresyjnej"; zła długość wyniku to `BadSize`.
+pub fn decompress_lz4(payload: &[u8], expected: usize) -> Result<Vec<u8>, VideoError> {
+    if expected == 0 || expected > MAX_PAYLOAD as usize * 4 {
+        return Err(VideoError::BadSize);
+    }
+    match lz4_flex::block::decompress(payload, expected) {
+        Ok(v) if v.len() == expected => Ok(v),
+        _ => Err(VideoError::BadSize),
+    }
+}
+
+/// Jak `decompress_lz4`, ale do gotowego bufora (bez alokacji na klatkę); `out.len()` to oczekiwany rozmiar.
+pub fn decompress_lz4_into(payload: &[u8], out: &mut [u8]) -> Result<(), VideoError> {
+    if out.is_empty() || out.len() > MAX_PAYLOAD as usize * 4 {
+        return Err(VideoError::BadSize);
+    }
+    match lz4_flex::block::decompress_into(payload, out) {
+        Ok(n) if n == out.len() => Ok(()),
+        _ => Err(VideoError::BadSize),
+    }
 }
 
 /// Zwraca dane surowej ramki (`Codec::Raw`) po sprawdzeniu, że `payload.len() == header.payload_len`
@@ -422,6 +453,60 @@ mod tests {
         let mut hevc = h;
         hevc.codec = Codec::Hevc;
         assert_eq!(raw_pixels(&hevc, &payload), Err(VideoError::BadCodec(1)));
+    }
+
+    #[test]
+    fn lz4_header_roundtrips_and_lz4_payload_is_not_a_raw_frame() {
+        let mut h = hdr();
+        h.codec = Codec::Lz4;
+        h.payload_len = 12345;
+        assert_eq!(VideoHeader::decode(&h.encode()), Ok(h));
+        assert_eq!(raw_pixels(&h, &[0u8; 12345]), Err(VideoError::BadCodec(2)));
+    }
+
+    #[test]
+    fn lz4_roundtrips_flat_and_noisy_frames_and_compresses_flat_ones() {
+        let flat = vec![0x33u8; 64 * 48 * 4];
+        let c = compress_lz4(&flat);
+        assert!(c.len() * 20 < flat.len(), "płaska klatka kompresuje się >20x: {}", c.len());
+        assert_eq!(decompress_lz4(&c, flat.len()).unwrap(), flat);
+        let mut x: u32 = 1;
+        let noisy: Vec<u8> = (0..64 * 48 * 4).map(|_| { x = x.wrapping_mul(1664525).wrapping_add(1013904223); (x >> 24) as u8 }).collect();
+        assert_eq!(decompress_lz4(&compress_lz4(&noisy), noisy.len()).unwrap(), noisy);
+    }
+
+    #[test]
+    fn lz4_decompression_rejects_wrong_sizes_garbage_and_bombs() {
+        let flat = vec![7u8; 4096];
+        let c = compress_lz4(&flat);
+        assert_eq!(decompress_lz4(&c, 4095), Err(VideoError::BadSize), "za mały oczekiwany rozmiar");
+        assert_eq!(decompress_lz4(&c, 8192), Err(VideoError::BadSize), "za duży oczekiwany rozmiar");
+        assert_eq!(decompress_lz4(&c, 0), Err(VideoError::BadSize));
+        assert_eq!(decompress_lz4(&[], 16), Err(VideoError::BadSize));
+        assert_eq!(decompress_lz4(&[0xFF; 64], 16), Err(VideoError::BadSize));
+        assert_eq!(decompress_lz4(&c, usize::MAX), Err(VideoError::BadSize), "limit przed alokacją");
+        let mut x: u64 = 88172645463325252;
+        for _ in 0..2000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let n = (x % 80) as usize;
+            let junk: Vec<u8> = (0..n).map(|i| (x >> (i % 56)) as u8).collect();
+            let _ = decompress_lz4(&junk, 1024);
+        }
+    }
+
+    #[test]
+    fn lz4_into_fills_a_reusable_buffer_and_rejects_size_mismatch() {
+        let raw: Vec<u8> = (0..4096u32).map(|i| (i / 7) as u8).collect();
+        let c = compress_lz4(&raw);
+        let mut out = vec![0u8; raw.len()];
+        assert_eq!(decompress_lz4_into(&c, &mut out), Ok(()));
+        assert_eq!(out, raw);
+        assert_eq!(decompress_lz4_into(&c, &mut vec![0u8; raw.len() - 1]), Err(VideoError::BadSize));
+        assert_eq!(decompress_lz4_into(&c, &mut vec![0u8; raw.len() + 1]), Err(VideoError::BadSize));
+        assert_eq!(decompress_lz4_into(&c, &mut []), Err(VideoError::BadSize));
+        assert_eq!(decompress_lz4_into(&[0xFF; 32], &mut [0u8; 64]), Err(VideoError::BadSize));
     }
 
     #[test]

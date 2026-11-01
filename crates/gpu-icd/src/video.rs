@@ -5,7 +5,7 @@ use std::net::{Shutdown, TcpStream};
 use std::thread::JoinHandle;
 
 use gpu_proto::msg::{Request, Response};
-use gpu_proto::video::{raw_pixels, Codec, PixelFormat, VideoHeader, HEADER_LEN};
+use gpu_proto::video::{decompress_lz4_into, raw_pixels, Codec, PixelFormat, VideoHeader, HEADER_LEN};
 use gpu_renderd::client::Client;
 
 use crate::present::{rgba_to_bgra, Presenter};
@@ -22,6 +22,7 @@ pub struct VideoStats {
     pub frames: u64,
     pub bytes: u64,
     pub recv_ns: u64,
+    pub decode_ns: u64,
     pub present_ns: u64,
 }
 
@@ -58,16 +59,32 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
     let mut st = VideoStats::default();
     let mut presenter: Option<Presenter> = None;
     let mut bgra: Vec<u8> = Vec::new();
+    let mut decoded: Vec<u8> = Vec::new();
     loop {
         let t0 = std::time::Instant::now();
         let Ok(frame) = c.recv_frame() else { break };
         st.recv_ns += t0.elapsed().as_nanos() as u64;
         let Some(head) = frame.payload.get(..HEADER_LEN) else { continue };
         let (Ok(h), Some(body)) = (VideoHeader::decode(head), frame.payload.get(HEADER_LEN..)) else { continue };
-        if h.codec != Codec::Raw || h.width as u32 != width || h.height as u32 != height {
-            continue; // M5 doda kodeki; zmiana rozmiaru wymaga nowego swapchaina
+        if h.width as u32 != width || h.height as u32 != height {
+            continue; // zmiana rozmiaru wymaga nowego swapchaina
         }
-        let Ok(px) = raw_pixels(&h, body) else { continue };
+        let t_dec = std::time::Instant::now();
+        let px: &[u8] = match h.codec {
+            Codec::Raw => match raw_pixels(&h, body) {
+                Ok(p) => p,
+                Err(_) => continue,
+            },
+            Codec::Lz4 => {
+                decoded.resize(width as usize * height as usize * 4, 0);
+                if decompress_lz4_into(body, &mut decoded).is_err() {
+                    continue;
+                }
+                &decoded
+            }
+            Codec::Hevc => continue, // M5
+        };
+        st.decode_ns += t_dec.elapsed().as_nanos() as u64;
         let frame_bgra: &[u8] = if h.format == PixelFormat::Rgba8 {
             bgra.resize(px.len(), 0);
             if !rgba_to_bgra(px, &mut bgra) {
@@ -106,7 +123,7 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
     }
     if std::env::var("GPU_ICD_STATS").is_ok() && st.frames > 0 {
         let per = |v: u64| v as f64 / st.frames as f64 / 1e6;
-        eprintln!("gpu-icd wideo: klatek {}, {:.2} MB, na klatkę: odbiór {:.1} ms, wyświetlenie {:.1} ms", st.frames, st.bytes as f64 / 1e6, per(st.recv_ns), per(st.present_ns));
+        eprintln!("gpu-icd wideo: klatek {}, {:.2} MB ({:.0} KB/klatkę), na klatkę: odbiór {:.1} ms, dekodowanie {:.1} ms, wyświetlenie {:.1} ms", st.frames, st.bytes as f64 / 1e6, st.bytes as f64 / st.frames as f64 / 1e3, per(st.recv_ns), per(st.decode_ns), per(st.present_ns));
     }
     st
 }

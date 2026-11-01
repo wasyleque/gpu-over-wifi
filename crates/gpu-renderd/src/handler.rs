@@ -130,25 +130,37 @@ impl<B: GpuBackend> Session<B> {
         }
     }
 
-    /// Czyta obraz z pamięci urządzenia i wypycha go jako ramkę na połączenie wideo (surowy BGRA/RGBA).
-    fn present_frame(&mut self, memory: u64, len: u32, seq: u32, width: u16, height: u16, format: u8) -> Result<(), i32> {
-        use gpu_proto::video::{Codec, PixelFormat, VideoHeader};
+    /// Czyta obraz z pamięci urządzenia, koduje (surowo albo LZ4) i wypycha go jako ramkę na połączenie wideo.
+    #[allow(clippy::too_many_arguments)]
+    fn present_frame(&mut self, memory: u64, len: u32, seq: u32, width: u16, height: u16, format: u8, codec: u8) -> Result<(), i32> {
+        use gpu_proto::video::{compress_lz4, Codec, PixelFormat, VideoHeader};
         let format = match format {
             1 => PixelFormat::Bgra8,
             2 => PixelFormat::Rgba8,
             _ => return Err(ERR_UNKNOWN),
         };
-        let header = VideoHeader { swapchain: 0, image_index: 0, seq, width, height, format, codec: Codec::Raw, payload_len: len };
-        // Nagłówek sam się waliduje (rozmiar surowej ramki = w*h*4): niepoprawna ramka nie wychodzi z serwera.
-        let hb = header.encode();
-        VideoHeader::decode(&hb).map_err(|_| ERR_UNKNOWN)?;
+        let codec = match codec {
+            0 => Codec::Raw,
+            2 => Codec::Lz4,
+            _ => return Err(ERR_UNKNOWN),
+        };
+        // Surowy rozmiar musi odpowiadać wymiarom (nagłówek waliduje to tylko dla `Raw`).
+        let expected = (width as u64) * (height as u64) * 4;
+        if width == 0 || height == 0 || len as u64 != expected {
+            return Err(ERR_UNKNOWN);
+        }
         let data = self.backend.mem_read(memory, 0, len)?;
         if data.len() != len as usize {
             return Err(ERR_UNKNOWN);
         }
-        let mut payload = Vec::with_capacity(hb.len() + data.len());
+        let body = if codec == Codec::Lz4 { compress_lz4(&data) } else { data };
+        let header = VideoHeader { swapchain: 0, image_index: 0, seq, width, height, format, codec, payload_len: body.len() as u32 };
+        // Nagłówek sam się waliduje: niepoprawna ramka nie wychodzi z serwera.
+        let hb = header.encode();
+        VideoHeader::decode(&hb).map_err(|_| ERR_UNKNOWN)?;
+        let mut payload = Vec::with_capacity(hb.len() + body.len());
         payload.extend_from_slice(&hb);
-        payload.extend_from_slice(&data);
+        payload.extend_from_slice(&body);
         // Blokuje, gdy odbiorca nie nadąża (backpressure); brak odbiorcy (odłączone wideo) nie jest błędem sesji.
         let _ = self.video_tx.send(payload);
         Ok(())
@@ -220,8 +232,8 @@ impl<B: GpuBackend> Session<B> {
                     Response::Handle(id)
                 }
                 Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
-                Request::PresentFrame { memory, len, seq, width, height, format } => {
-                    let r = self.present_frame(memory, len, seq, width, height, format);
+                Request::PresentFrame { memory, len, seq, width, height, format, codec } => {
+                    let r = self.present_frame(memory, len, seq, width, height, format, codec);
                     self.note_async(r)
                 }
                 Request::Cmds { data } => {
@@ -783,7 +795,7 @@ mod tests {
         let Some(Response::Handle(id)) = s.handle_request(Request::SessionId) else { panic!() };
         assert_eq!(id, s.session_id());
         let rx = crate::videohub::claim(id).unwrap();
-        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 5, width: 2, height: 2, format: 1 }), None);
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 5, width: 2, height: 2, format: 1, codec: 0 }), None);
         let payload = rx.try_recv().unwrap();
         let h = VideoHeader::decode(&payload[..28]).unwrap();
         assert_eq!((h.seq, h.width, h.height, h.format, h.codec, h.payload_len), (5, 2, 2, PixelFormat::Bgra8, Codec::Raw, 16));
@@ -800,7 +812,7 @@ mod tests {
         assert_ne!(a, b);
         assert!(rx_a.recv().is_err(), "stary kanał jest zamknięty, więc jego połączenie wideo się kończy");
         let rx_b = crate::videohub::claim(b).unwrap();
-        s.handle_request(Request::PresentFrame { memory: 7, len: 4, seq: 1, width: 1, height: 1, format: 2 });
+        s.handle_request(Request::PresentFrame { memory: 7, len: 4, seq: 1, width: 1, height: 1, format: 2, codec: 0 });
         assert!(rx_b.try_recv().is_ok(), "ramki idą nowym kanałem");
     }
 
@@ -809,19 +821,38 @@ mod tests {
         let mut s = stream_session(None);
         let Some(Response::Handle(id)) = s.handle_request(Request::SessionId) else { panic!() };
         let rx = crate::videohub::claim(id).unwrap();
-        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 15, seq: 0, width: 2, height: 2, format: 1 }), None);
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 15, seq: 0, width: 2, height: 2, format: 1, codec: 0 }), None);
         assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }));
-        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 0, width: 2, height: 2, format: 9 }), None);
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 0, width: 2, height: 2, format: 9, codec: 0 }), None);
         assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }));
-        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 0, width: 0, height: 2, format: 1 }), None);
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 0, width: 0, height: 2, format: 1, codec: 0 }), None);
         assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }));
         assert!(rx.try_recv().is_err(), "żadna niepoprawna ramka nie wyszła");
     }
 
     #[test]
+    fn lz4_frames_are_compressed_and_rejected_when_the_codec_or_size_is_wrong() {
+        use gpu_proto::video::{decompress_lz4, Codec, VideoHeader};
+        let mut s = stream_session(None);
+        let Some(Response::Handle(id)) = s.handle_request(Request::SessionId) else { panic!() };
+        let rx = crate::videohub::claim(id).unwrap();
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 64 * 4, seq: 1, width: 8, height: 8, format: 1, codec: 2 }), None);
+        let payload = rx.try_recv().unwrap();
+        let h = VideoHeader::decode(&payload[..28]).unwrap();
+        assert_eq!((h.codec, h.payload_len as usize), (Codec::Lz4, payload.len() - 28));
+        assert!(payload.len() - 28 < 64 * 4, "płaski obraz się kompresuje");
+        assert_eq!(decompress_lz4(&payload[28..], 64 * 4).unwrap(), vec![7u8; 64 * 4]);
+        s.handle_request(Request::PresentFrame { memory: 7, len: 64 * 4, seq: 2, width: 8, height: 8, format: 1, codec: 1 });
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }), "HEVC nie jest jeszcze obsługiwany");
+        s.handle_request(Request::PresentFrame { memory: 7, len: 100, seq: 3, width: 8, height: 8, format: 1, codec: 2 });
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }), "len różne od w*h*4");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn unauthenticated_present_frame_and_attach_are_rejected() {
         let mut u = Session::new(Stream::default(), b"t".to_vec());
-        assert!(matches!(u.handle_request(Request::PresentFrame { memory: 1, len: 4, seq: 0, width: 1, height: 1, format: 1 }), Some(Response::Error { .. })));
+        assert!(matches!(u.handle_request(Request::PresentFrame { memory: 1, len: 4, seq: 0, width: 1, height: 1, format: 1, codec: 0 }), Some(Response::Error { .. })));
         let mut a = stream_session(None);
         assert!(matches!(a.handle_request(Request::AttachVideo { session: 1 }), Some(Response::Error { .. })), "attach działa tylko na poziomie połączenia");
     }

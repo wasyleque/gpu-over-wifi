@@ -305,7 +305,9 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         exec_named_async(st, "vkResetFences", &mut [dev, 1, &fence as *const u64 as u64]);
         st.flush();
         let format = if matches!(fmt, 37 | 43) { 2u8 } else { 1u8 };
-        let req = gpu_proto::msg::Request::PresentFrame { memory: readback, len: (w * h * 4), seq, width: w as u16, height: h as u16, format };
+        // Kodek ramek: domyślnie LZ4 (bezstratny); `GPU_ICD_CODEC=raw` wymusza surowe piksele.
+        let codec = if std::env::var("GPU_ICD_CODEC").is_ok_and(|c| c == "raw") { 0u8 } else { 2u8 };
+        let req = gpu_proto::msg::Request::PresentFrame { memory: readback, len: (w * h * 4), seq, width: w as u16, height: h as u16, format, codec };
         st.stats.frames += 1;
         st.stats.t_wait_ns += t0.elapsed().as_nanos() as u64;
         return if st.client.send(&req).is_ok() { 0 } else { VK_ERROR_INITIALIZATION_FAILED };

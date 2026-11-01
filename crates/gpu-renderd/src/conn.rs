@@ -452,7 +452,7 @@ mod tests {
         let (mut control, _) = session();
         control.handle_request(hello());
         let Some(Response::Handle(id)) = control.handle_request(Request::SessionId) else { panic!() };
-        control.handle_request(Request::PresentFrame { memory: 7, len: 4, seq: 3, width: 1, height: 1, format: 1 });
+        control.handle_request(Request::PresentFrame { memory: 7, len: 4, seq: 3, width: 1, height: 1, format: 1, codec: 0 });
         drop(control); // sesja sterująca kończy się: kanał się zamyka po opróżnieniu
         let (mut video, _) = session();
         let mut input = req_frame(1, 0, &hello());
