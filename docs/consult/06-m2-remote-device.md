@@ -1,6 +1,6 @@
 # Konsultacja 06: M2 vkcube (DeepSeek Flash na .2, 2026-11-01)
 
-STATUS: surowa odpowiedź, jeszcze NIEPRZEJRZANA przez Claude (brak limitu sesji). Przed użyciem sprawdzić krytycznie: poprzednie odpowiedzi miały błędy (offsety zamiast adresów w pNext, dlclose w Drop).
+STATUS: odpowiedź DeepSeeka (ucięta w §7: finish_reason=length) + przegląd Claude na końcu pliku. Obowiązuje przegląd, nie surowa treść.
 
 ---
 
@@ -126,3 +126,22 @@ Kolejność: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Każdy moduł ma test:
 - **`pNext` w `VkDeviceCreateInfo`:** vkcube dodaje `VkPhysicalDeviceFeatures2`/`VkPhysicalDeviceVulkan12Features`. Jeśli nie przekażemy łańcucha do serwera, `vkCreateDevice` serwera odrzuci funkcje. Generator musi kodować `pNext` rekurencyjnie — **to jest najczęstszy błąd**.
 - **`VK_KHR_swapchain` na ICD bez okna:** nie reklamujemy rozszerzenia, jeśli nie mamy surface. vkcube z `--c` używa headless; wariant z oknem wymaga `VK_KHR_xcb_surface` — **reklamujemy tylko to, co serwer ma** (migawka z M1). Inaczej `vkCreateSwapchainKHR` na serwerze padnie.
 - **Ukryte zależności od lokalnego GPU:** vkcube ładuje `libvulkan.so.1` i robi `dlopen` — nasz ICD musi być **jedynym** widocznym sterownikiem (`VK_DRIVER_FILES`), inaczej loader może wybrać Intel i pomylić `Vk
+
+---
+
+## Przegląd (Claude, 2026-11-02)
+
+**Fałszywe założenie:** `vkcube` z vulkan-tools 1.4.363 NIE ma trybu offscreen/headless (`--wsi` przyjmuje tylko `xcb|xlib|wayland|display`). Wymaga prawdziwego `VkSurfaceKHR` i swapchaina, czyli wirtualnego swapchaina z lokalną prezentacją (obraz wraca z serwera, ICD pokazuje go na Intelu). To etap M2b, nie M2a. Cel M2 dzielimy:
+- **M2a (offscreen, bez WSI):** własny klient testowy (`gpu-smoke`, Rust + dlopen libvulkan, ładowany z `VK_DRIVER_FILES`): urządzenie, kolejka, bufor, pamięć, command pool/buffer, `vkCmdFillBuffer`/`vkCmdClearColorImage` + `vkCmdCopyImageToBuffer`, submit, fence, odczyt zmapowanej pamięci i porównanie bajtów. Daje pomiar bazowy bez okna.
+- **M2b (okno):** rozszerzenia `VK_KHR_surface` + `VK_KHR_xcb/wayland_surface`, wirtualny swapchain, wtedy dopiero `vkcube`.
+
+**Zmiany względem odpowiedzi:**
+1. **Jeden uporządkowany strumień TCP, nie dwa kanały.** Zapytanie/Sync zależne od wcześniejszych FireAndForget (np. `vkWaitForFences` po `vkQueueSubmit`) musi zobaczyć je w kolejności; dwa niezależne połączenia dają wyścig. Jedno połączenie, polecenia w partiach, a punkt synchronizacji to polecenie „flush + odpowiedz" (odpowiedź niesie wyniki Query/Sync). Błędy asynchroniczne wracają jako ramka serwera w tym samym strumieniu.
+2. **Kodowanie struktur sterowane metadanymi, nie generowanym kodem na każdą strukturę.** Zamiast ~1356 par encode/decode generujemy z `vk.xml` tylko tabele opisu (członek: offset, rozmiar, rodzaj: skalar/uchwyt/wskaźnik/tablica/napis/`pNext`/wyjście, wyrażenie długości) i piszemy JEDEN interpreter (`gpu-vkcodec`) chodzący po tych tabelach. Mniej kodu, testowalne złotym plikiem z kompilatora C (jak układ struktur), a generowanie kodu zostaje jako późniejsza optymalizacja gorącej ścieżki.
+3. **Uchwyty klienta** (`[16 bitów rodzaj][48 bitów licznik]`) przydziela ICD, a serwer trzyma mapę z walidacją (rodzaj musi pasować, limit liczby żywych, obiekt należy do sesji). Wrogi klient nie może użyć cudzego ani nieistniejącego uchwytu. Zgodne z już działającym znacznikiem rodzaju w `HandleTable`.
+4. **Obiekty dyspozycyjne** (`VkDevice`, `VkQueue`, `VkCommandBuffer`) muszą w ICD zaczynać się od wskaźnika loadera (jak `InstanceObj` w M1). Odpowiedź tego nie wspomina.
+5. **Pętla klatki:** odpowiedź wpisuje `vkCreate*` do pętli na klatkę; w rzeczywistości są one jednorazowe. Na klatkę: acquire, nagranie, submit, present. Rund-trip na klatkę to nadal tylko wait/fence.
+6. **Pamięć:** plan (memfd u klienta, kopia na serwerze, `SYNC_WRITE{handle, offset, size}` w punktach `Flush`/`Submit`, całe zakresy w M2, tylko brudne strony w M3) jest dobry i zostaje. Pamięć koherentna zapisywana bez `Flush` też synchronizujemy przy submit.
+7. **Pomiar bazowy (progi §5):** przyjęte jako hipotezy do zmierzenia, nie fakty; `video_bytes` przy 1080p60 HEVC wymaga pomiaru na prawdziwym NVENC.
+
+**Kolejność prac M2a:** (1) generator metadanych w `gpu-vkgen` + testy z gcc; (2) `gpu-vkcodec` (interpreter) + testy okrężne na losowych strukturach; (3) protokół strumienia (partie, flush+odpowiedź, SYNC_WRITE, błąd asynchroniczny) w `gpu-proto`; (4) replay w `gpu-renderd`; (5) polecenia w `gpu-icd`; (6) `gpu-smoke` i pomiar.
