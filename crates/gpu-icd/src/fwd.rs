@@ -211,7 +211,22 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let t0 = std::time::Instant::now();
     let r = exec(&mut st, op, &mut slots);
     trace(cmd.name, r, t0.elapsed().as_micros());
+    periodic_stats(&st.stats);
     r
+}
+
+/// Co 5 s (przy `GPU_ICD_DEBUG`) wypisuje liczniki sieci do logu: pokazuje, czy ładowanie ogranicza przepustowość pamięci.
+fn periodic_stats(stats: &Stats) {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if std::env::var("GPU_ICD_DEBUG").is_err() {
+        return;
+    }
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    if last.is_none_or(|t| now.duration_since(t).as_secs() >= 5) {
+        *last = Some(now);
+        eprintln!("[gpu-icd] {}", stats.report());
+    }
 }
 
 fn trace_text(line: &str) {
