@@ -543,7 +543,7 @@ mod tests {
             BitWriter { bytes: Vec::new(), nbits: 0 }
         }
         fn bit(&mut self, b: u32) -> &mut Self {
-            if self.nbits % 8 == 0 {
+            if self.nbits.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             if b != 0 {
@@ -572,7 +572,7 @@ mod tests {
         }
         fn finish(&mut self) -> Vec<u8> {
             self.bit(1);
-            while self.nbits % 8 != 0 {
+            while !self.nbits.is_multiple_of(8) {
                 self.bit(0);
             }
             self.bytes.clone()
