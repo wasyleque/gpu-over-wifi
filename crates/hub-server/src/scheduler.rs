@@ -338,6 +338,21 @@ impl Scheduler {
         ids
     }
 
+    /// Wszystkie załadowane modele wszystkich backendów, z rozmiarem w VRAM (dla monitora).
+    pub async fn all_loaded(&self) -> Vec<hub_proto::LoadedModel> {
+        let mut out = Vec::new();
+        for backend in self.backends.iter() {
+            for m in backend.resident_with_vram().await {
+                out.push(hub_proto::LoadedModel {
+                    name: m.name,
+                    backend: backend.kind(),
+                    vram_mib: m.size_vram_mib,
+                });
+            }
+        }
+        out
+    }
+
     /// Załadowane modele backendów innych niż domyślny (np. InferSSD), do `GET /status`.
     pub async fn extra_loaded_models(&self) -> Vec<hub_proto::LoadedModel> {
         let mut out = Vec::new();
@@ -1236,5 +1251,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("in_flight nie osiągnął {n}");
+    }
+
+    #[tokio::test]
+    async fn all_loaded_lists_models_of_every_backend_including_the_first() {
+        let a = MockBackend::shared("ollama", &["m1"]);
+        let b = MockBackend::exclusive("inferssd", &["big"]);
+        a.ensure_ready("m1").await.unwrap();
+        b.ensure_ready("big").await.unwrap();
+        let sched = Scheduler::new(SchedulerConfig::default(), vec![a, b]);
+        let names: Vec<String> = sched.all_loaded().await.into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["m1".to_string(), "big".to_string()]);
     }
 }

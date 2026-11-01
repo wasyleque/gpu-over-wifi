@@ -52,6 +52,8 @@ pub struct Sample {
     pub in_flight: u32,
     pub active_backend: Option<String>,
     pub switches_total: u64,
+    /// Modele załadowane w VRAM (wszystkie backendy).
+    pub loaded: Vec<hub_proto::LoadedModel>,
 }
 
 /// Widok telemetrii wnioskowania dla strony.
@@ -275,6 +277,7 @@ async fn collect_sample(nvml: Option<&Nvml>, sched: &Arc<Scheduler>, prev: &mut 
         in_flight: st.in_flight,
         active_backend: st.active_backend,
         switches_total: st.switches_total,
+        loaded: sched.all_loaded().await,
     }
 }
 
@@ -329,7 +332,7 @@ mod tests {
         Sample {
             t, gpus: vec![], cpu_pct: 0.0, cpu_cores_pct: vec![], cpu_temp_c: None, load1: 0.0,
             ram_used_mib: 0, ram_total_mib: 0, ram_cached_mib: 0, swap_used_mib: 0, disks: vec![], net: vec![],
-            queue_len: 0, in_flight: 0, active_backend: None, switches_total: 0,
+            queue_len: 0, in_flight: 0, active_backend: None, switches_total: 0, loaded: vec![],
         }
     }
 
