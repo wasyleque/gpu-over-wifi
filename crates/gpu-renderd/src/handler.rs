@@ -29,6 +29,25 @@ pub trait GpuBackend {
         chain: &[u32],
     ) -> Result<Vec<u8>, i32>;
     fn device_extensions(&mut self, pdev: u64) -> Result<Vec<(String, u32)>, i32>;
+
+    /// Wykonuje partię poleceń (M2). Domyślnie nieobsługiwane.
+    fn execute(&mut self, _batch: &[u8]) -> Result<(), i32> {
+        Err(ERR_UNKNOWN)
+    }
+    /// Wykonuje pojedyncze polecenie z wynikami wyjściowymi i zwraca zakodowane wyniki.
+    fn query(&mut self, _data: &[u8]) -> Result<Vec<u8>, i32> {
+        Err(ERR_UNKNOWN)
+    }
+    fn mem_write(&mut self, _memory: u64, _offset: u64, _data: &[u8]) -> Result<(), i32> {
+        Err(ERR_UNKNOWN)
+    }
+    fn mem_read(&mut self, _memory: u64, _offset: u64, _len: u32) -> Result<Vec<u8>, i32> {
+        Err(ERR_UNKNOWN)
+    }
+    /// Czeka, aż wszystko wysłane wcześniej zostanie wykonane po stronie backendu.
+    fn sync(&mut self) -> Result<(), i32> {
+        Ok(())
+    }
 }
 
 /// Kodowanie listy rozszerzeń w `Response::Data`: varint liczby, potem (napis, u32 specVersion).
@@ -75,6 +94,8 @@ pub struct Session<B: GpuBackend> {
     authed: bool,
     /// instancja -> fizyczne karty zwrócone przez `EnumPhysicalDevices` (tylko takie wolno odpytywać).
     instances: Vec<(u64, Vec<u64>)>,
+    /// Pierwszy błąd z poleceń bez odpowiedzi od ostatniego `Sync` (0 = brak).
+    async_error: i32,
 }
 
 impl<B: GpuBackend> Session<B> {
@@ -84,11 +105,32 @@ impl<B: GpuBackend> Session<B> {
             token,
             authed: false,
             instances: Vec::new(),
+            async_error: 0,
         }
     }
 
     pub fn is_authenticated(&self) -> bool {
         self.authed
+    }
+
+    /// Jak `handle`, ale `None` dla poleceń bez odpowiedzi (`Cmds`, `MemWrite`) wykonanych poprawnie.
+    pub fn handle_request(&mut self, req: Request) -> Option<Response> {
+        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. });
+        let r = self.handle(req);
+        if silent && !matches!(r, Response::Error { .. }) {
+            None
+        } else {
+            Some(r)
+        }
+    }
+
+    fn note_async(&mut self, r: Result<(), i32>) -> Response {
+        if let Err(code) = r {
+            if self.async_error == 0 {
+                self.async_error = code;
+            }
+        }
+        Response::U32(0)
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
@@ -134,6 +176,27 @@ impl<B: GpuBackend> Session<B> {
                     code: ERR_PROTOCOL,
                     message: "already authenticated".to_string(),
                 },
+                Request::Cmds { data } => {
+                    let r = self.backend.execute(&data);
+                    self.note_async(r)
+                }
+                Request::MemWrite { memory, offset, data } => {
+                    let r = self.backend.mem_write(memory, offset, &data);
+                    self.note_async(r)
+                }
+                Request::Query { data } => match self.backend.query(&data) {
+                    Ok(v) => Response::Data(v),
+                    Err(code) => Response::Error { code, message: "query error".to_string() },
+                },
+                Request::MemRead { memory, offset, len } => match self.backend.mem_read(memory, offset, len) {
+                    Ok(v) => Response::Data(v),
+                    Err(code) => Response::Error { code, message: "memory read error".to_string() },
+                },
+                Request::Sync => {
+                    let r = self.backend.sync();
+                    self.note_async(r);
+                    Response::Synced { error: std::mem::take(&mut self.async_error) }
+                }
                 Request::EnumInstanceVersion => match self.backend.instance_version() {
                     Ok(v) => Response::U32(v),
                     Err(code) => Response::Error {
@@ -612,6 +675,64 @@ mod tests {
         assert!(!is_err(
             &s.handle(Request::EnumDeviceExtensions { pdev: inst + 1 })
         ));
+    }
+
+    #[derive(Default)]
+    struct Stream {
+        batches: Vec<Vec<u8>>,
+        fail_on: Option<u8>,
+    }
+
+    impl GpuBackend for Stream {
+        fn instance_version(&mut self) -> Result<u32, i32> { Ok(0) }
+        fn instance_extensions(&mut self) -> Result<Vec<(String, u32)>, i32> { Ok(vec![]) }
+        fn create_instance(&mut self, _: u32, _: &[String]) -> Result<u64, i32> { Ok(1) }
+        fn destroy_instance(&mut self, _: u64) -> Result<(), i32> { Ok(()) }
+        fn enum_physical_devices(&mut self, _: u64) -> Result<Vec<u64>, i32> { Ok(vec![]) }
+        fn get_physical_device(&mut self, _: u64, _: PdFunc, _: u32, _: u32, _: &[u32]) -> Result<Vec<u8>, i32> { Ok(vec![]) }
+        fn device_extensions(&mut self, _: u64) -> Result<Vec<(String, u32)>, i32> { Ok(vec![]) }
+        fn execute(&mut self, b: &[u8]) -> Result<(), i32> {
+            self.batches.push(b.to_vec());
+            if b.first().copied() == self.fail_on && self.fail_on.is_some() { Err(-4) } else { Ok(()) }
+        }
+        fn query(&mut self, d: &[u8]) -> Result<Vec<u8>, i32> { Ok(d.iter().rev().copied().collect()) }
+        fn mem_read(&mut self, m: u64, o: u64, l: u32) -> Result<Vec<u8>, i32> { Ok(vec![m as u8, o as u8, l as u8]) }
+        fn mem_write(&mut self, _: u64, _: u64, d: &[u8]) -> Result<(), i32> { if d.is_empty() { Err(-5) } else { Ok(()) } }
+    }
+
+    fn stream_session(fail_on: Option<u8>) -> Session<Stream> {
+        let mut s = Session::new(Stream { fail_on, ..Default::default() }, b"t".to_vec());
+        assert!(s.handle_request(Request::Hello { version: PROTOCOL_VERSION, token: b"t".to_vec() }).is_some());
+        s
+    }
+
+    #[test]
+    fn cmds_and_memwrite_are_silent_and_sync_reports_the_first_async_error() {
+        let mut s = stream_session(Some(2));
+        assert_eq!(s.handle_request(Request::Cmds { data: vec![1] }), None);
+        assert_eq!(s.handle_request(Request::Cmds { data: vec![2] }), None, "błąd nie psuje ciszy");
+        assert_eq!(s.handle_request(Request::Cmds { data: vec![3] }), None);
+        assert_eq!(s.handle_request(Request::MemWrite { memory: 1, offset: 0, data: vec![] }), None);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: -4 }), "pierwszy błąd (-4), nie drugi (-5)");
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: 0 }), "Sync czyści błąd");
+    }
+
+    #[test]
+    fn query_and_memread_reply_and_unauthenticated_cmds_get_an_error_reply() {
+        let mut s = stream_session(None);
+        assert_eq!(s.handle_request(Request::Query { data: vec![1, 2, 3] }), Some(Response::Data(vec![3, 2, 1])));
+        assert_eq!(s.handle_request(Request::MemRead { memory: 7, offset: 8, len: 9 }), Some(Response::Data(vec![7, 8, 9])));
+        let mut u = Session::new(Stream::default(), b"t".to_vec());
+        assert!(matches!(u.handle_request(Request::Cmds { data: vec![1] }), Some(Response::Error { .. })));
+        assert!(u.backend.batches.is_empty(), "przed Hello nic nie dociera do backendu");
+    }
+
+    #[test]
+    fn default_backend_rejects_m2_requests_with_an_error() {
+        let (mut s, _) = authed();
+        assert_eq!(s.handle_request(Request::Cmds { data: vec![1] }), None);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }));
+        assert!(matches!(s.handle_request(Request::Query { data: vec![] }), Some(Response::Error { .. })));
     }
 
     #[test]

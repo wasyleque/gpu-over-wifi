@@ -109,7 +109,7 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
                 };
 
                 // Handle the request
-                let response = session.handle(req);
+                let Some(response) = session.handle_request(req) else { continue };
 
                 // Encode and send the response
                 let response_frame = Frame::new(

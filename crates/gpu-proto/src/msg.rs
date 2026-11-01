@@ -18,6 +18,8 @@ pub const MAX_CHAIN: usize = 64;
 pub const MAX_COUNT: u32 = 1024;
 /// Maksymalny rozmiar danych w odpowiedzi (bajty).
 pub const MAX_DATA: usize = 4 * 1024 * 1024;
+/// Maksymalny rozmiar jednej partii poleceń / jednego zapisu pamięci (M2).
+pub const MAX_BATCH: usize = 8 * 1024 * 1024;
 
 /// Którą funkcję `vkGetPhysicalDevice*` wywołać na serwerze.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +67,16 @@ pub enum Request {
     /// `chain`: wartości `sType` kolejnych struktur łańcucha `pNext` (dla wariantów `*2`).
     GetPhysicalDevice { pdev: u64, func: PdFunc, arg: u32, count: u32, chain: Vec<u32> },
     EnumDeviceExtensions { pdev: u64 },
+    /// Partia poleceń Vulkana (kod operacji u16 + parametry kodeka), wykonywana bez odpowiedzi.
+    Cmds { data: Vec<u8> },
+    /// Jedno polecenie z parametrami wyjściowymi: odpowiedź `Data` niesie wyniki.
+    Query { data: Vec<u8> },
+    /// Punkt synchronizacji: odpowiedź `Synced` po wykonaniu wszystkiego, co przyszło wcześniej.
+    Sync,
+    /// Zapis do pamięci serwera (bez odpowiedzi).
+    MemWrite { memory: u64, offset: u64, data: Vec<u8> },
+    /// Odczyt pamięci serwera.
+    MemRead { memory: u64, offset: u64, len: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +88,8 @@ pub enum Response {
     U32(u32),
     /// Surowe bajty wyniku (struktury właściwości itp.).
     Data(Vec<u8>),
+    /// Koniec `Sync`: pierwszy asynchroniczny błąd od poprzedniego `Sync` (0 = brak).
+    Synced { error: i32 },
     /// Błąd: kod `VkResult` (ujemny) lub 0 dla błędu protokołu, plus opis.
     Error { code: i32, message: String },
 }
@@ -140,6 +154,27 @@ impl Request {
                 e.put_u8(7);
                 e.put_u64(*pdev);
             }
+            Request::Cmds { data } => {
+                e.put_u8(8);
+                e.put_bytes(data);
+            }
+            Request::Query { data } => {
+                e.put_u8(9);
+                e.put_bytes(data);
+            }
+            Request::Sync => e.put_u8(10),
+            Request::MemWrite { memory, offset, data } => {
+                e.put_u8(11);
+                e.put_u64(*memory);
+                e.put_u64(*offset);
+                e.put_bytes(data);
+            }
+            Request::MemRead { memory, offset, len } => {
+                e.put_u8(12);
+                e.put_u64(*memory);
+                e.put_u64(*offset);
+                e.put_u32(*len);
+            }
         }
         e.finish()
     }
@@ -195,6 +230,37 @@ impl Request {
                 Request::GetPhysicalDevice { pdev, func, arg, count, chain }
             }
             7 => Request::EnumDeviceExtensions { pdev: d.get_u64()? },
+            8 | 9 => {
+                let op = bytes.first().copied().unwrap_or(0);
+                let data = d.get_bytes()?;
+                if data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("batch"));
+                }
+                if op == 8 {
+                    Request::Cmds { data: data.to_vec() }
+                } else {
+                    Request::Query { data: data.to_vec() }
+                }
+            }
+            10 => Request::Sync,
+            11 => {
+                let memory = d.get_u64()?;
+                let offset = d.get_u64()?;
+                let data = d.get_bytes()?;
+                if data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("memory write"));
+                }
+                Request::MemWrite { memory, offset, data: data.to_vec() }
+            }
+            12 => {
+                let memory = d.get_u64()?;
+                let offset = d.get_u64()?;
+                let len = d.get_u32()?;
+                if len as usize > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("memory read"));
+                }
+                Request::MemRead { memory, offset, len }
+            }
             op => return Err(MsgError::UnknownOp(op)),
         };
         match d.remaining() {
@@ -231,6 +297,10 @@ impl Response {
                 e.put_u8(4);
                 e.put_bytes(b);
             }
+            Response::Synced { error } => {
+                e.put_u8(6);
+                e.put_u32(*error as u32);
+            }
             Response::Error { code, message } => {
                 e.put_u8(5);
                 e.put_u32(*code as u32);
@@ -258,9 +328,10 @@ impl Response {
                 Response::Handles(hs)
             }
             3 => Response::U32(d.get_u32()?),
+            6 => Response::Synced { error: d.get_u32()? as i32 },
             4 => {
                 let b = d.get_bytes()?;
-                if b.len() > MAX_DATA {
+                if b.len() > MAX_BATCH {
                     return Err(MsgError::LimitExceeded("data"));
                 }
                 Response::Data(b.to_vec())
@@ -299,6 +370,12 @@ mod tests {
             Request::GetPhysicalDevice { pdev: 3, func: PdFunc::FormatProperties, arg: 37, count: 0, chain: vec![] },
             Request::GetPhysicalDevice { pdev: 3, func: PdFunc::QueueFamilyProperties2, arg: 0, count: 4, chain: vec![1000059005] },
             Request::EnumDeviceExtensions { pdev: 9 },
+            Request::Cmds { data: vec![1, 2, 3] },
+            Request::Cmds { data: vec![] },
+            Request::Query { data: vec![9; 40] },
+            Request::Sync,
+            Request::MemWrite { memory: 5, offset: 4096, data: vec![0xAA; 100] },
+            Request::MemRead { memory: 5, offset: 0, len: 4096 },
         ]
     }
 
@@ -311,6 +388,8 @@ mod tests {
             Response::U32(0x0040_3000),
             Response::Data(vec![1, 2, 3, 0, 255]),
             Response::Data(vec![]),
+            Response::Synced { error: 0 },
+            Response::Synced { error: -4 },
             Response::Error { code: -3, message: "VK_ERROR_INCOMPATIBLE_DRIVER".into() },
         ]
     }
@@ -336,7 +415,7 @@ mod tests {
         let mut distinct = ops.clone();
         distinct.sort();
         distinct.dedup();
-        assert!(distinct.len() >= 8, "każdy rodzaj żądania ma własny kod operacji: {ops:?}");
+        assert!(distinct.len() >= 13, "każdy rodzaj żądania ma własny kod operacji: {ops:?}");
     }
 
     #[test]
@@ -410,6 +489,12 @@ mod tests {
         // Za duża liczba elementów.
         let count = Request::GetPhysicalDevice { pdev: 1, func: PdFunc::QueueFamilyProperties, arg: 0, count: MAX_COUNT + 1, chain: vec![] }.encode();
         assert!(matches!(Request::decode(&count), Err(MsgError::LimitExceeded(_))));
+        let big = Request::Cmds { data: vec![0; MAX_BATCH + 1] }.encode();
+        assert!(matches!(Request::decode(&big), Err(MsgError::LimitExceeded(_))));
+        let bigw = Request::MemWrite { memory: 1, offset: 0, data: vec![0; MAX_BATCH + 1] }.encode();
+        assert!(matches!(Request::decode(&bigw), Err(MsgError::LimitExceeded(_))));
+        let bigr = Request::MemRead { memory: 1, offset: 0, len: MAX_BATCH as u32 + 1 }.encode();
+        assert!(matches!(Request::decode(&bigr), Err(MsgError::LimitExceeded(_))));
         // Granice dokładnie na limicie są dozwolone.
         let ok = Request::CreateInstance { api_version: 1, extensions: vec!["a".repeat(MAX_NAME_LEN); MAX_EXTENSIONS] }.encode();
         assert!(Request::decode(&ok).is_ok());
