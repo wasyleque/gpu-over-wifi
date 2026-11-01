@@ -1,0 +1,11 @@
+[package]
+name = "gpu-icd"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gpu-proto = { path = "../gpu-proto" }
+gpu-renderd = { path = "../gpu-renderd" }

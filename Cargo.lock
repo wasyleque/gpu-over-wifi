@@ -444,6 +444,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-icd"
+version = "0.1.0"
+dependencies = [
+ "gpu-proto",
+ "gpu-renderd",
+]
+
+[[package]]
 name = "gpu-proto"
 version = "0.1.0"
 dependencies = [
