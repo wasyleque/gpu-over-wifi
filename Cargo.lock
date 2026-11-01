@@ -460,6 +460,9 @@ dependencies = [
 [[package]]
 name = "gpu-nvenc"
 version = "0.1.0"
+dependencies = [
+ "gpu-h264",
+]
 
 [[package]]
 name = "gpu-proto"

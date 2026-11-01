@@ -3,5 +3,6 @@ pub mod api;
 pub mod consts;
 pub mod cuda;
 pub mod dl;
-#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all, rustdoc::all)]
+pub mod encoder;
+#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all, rustdoc::all, unpredictable_function_pointer_comparisons)]
 pub mod sys;

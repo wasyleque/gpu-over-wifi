@@ -42,7 +42,7 @@ pub fn status_name(s: NVENCSTATUS) -> String {
     format!("NV_ENC_ERR_{name}")
 }
 
-fn ck(what: &str, s: NVENCSTATUS) -> Result<(), String> {
+pub(crate) fn ck(what: &str, s: NVENCSTATUS) -> Result<(), String> {
     if s == 0 {
         Ok(())
     } else {
@@ -77,7 +77,7 @@ impl Nvenc {
     }
 
     /// Otwiera sesję kodowania na kontekście CUDA `cuda_ctx`.
-    pub fn open_session(&self, cuda_ctx: *mut c_void) -> Result<Session<'_>, String> {
+    pub fn open_session(&self, cuda_ctx: *mut c_void) -> Result<Session, String> {
         let open = self.fl.nvEncOpenEncodeSessionEx.ok_or("brak nvEncOpenEncodeSessionEx")?;
         let mut p = _NV_ENC_OPEN_ENCODE_SESSIONEX_PARAMS {
             version: NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
@@ -89,20 +89,24 @@ impl Nvenc {
         let mut enc: *mut c_void = std::ptr::null_mut();
         // SAFETY: struktura ma ustawioną wersję; kontekst CUDA jest ważny.
         ck("nvEncOpenEncodeSessionEx", unsafe { open(&mut p, &mut enc) })?;
-        Ok(Session { nv: self, enc })
+        Ok(Session { fl: self.fl, enc })
     }
 }
 
-pub struct Session<'a> {
-    nv: &'a Nvenc,
-    enc: *mut c_void,
+pub struct Session {
+    /// Kopia tablicy funkcji (wskaźniki są stałe do końca życia procesu), więc sesja nie pożycza `Nvenc`.
+    pub(crate) fl: NV_ENCODE_API_FUNCTION_LIST,
+    pub(crate) enc: *mut c_void,
 }
 
-impl Session<'_> {
+// SAFETY: sesja NVENC wolno używać z jednego wątku naraz (wymaga `&mut`/wyłączności po stronie wołającego).
+unsafe impl Send for Session {}
+
+impl Session {
     /// Lista GUID-ów obsługiwanych kodeków.
     pub fn codec_guids(&self) -> Result<Vec<GUID>, String> {
-        let count = self.nv.fl.nvEncGetEncodeGUIDCount.ok_or("brak nvEncGetEncodeGUIDCount")?;
-        let get = self.nv.fl.nvEncGetEncodeGUIDs.ok_or("brak nvEncGetEncodeGUIDs")?;
+        let count = self.fl.nvEncGetEncodeGUIDCount.ok_or("brak nvEncGetEncodeGUIDCount")?;
+        let get = self.fl.nvEncGetEncodeGUIDs.ok_or("brak nvEncGetEncodeGUIDs")?;
         let mut n = 0u32;
         // SAFETY: sesja jest ważna, wskaźniki wyjściowe poprawne.
         ck("nvEncGetEncodeGUIDCount", unsafe { count(self.enc, &mut n) })?;
@@ -116,7 +120,7 @@ impl Session<'_> {
 
     /// Wartość możliwości `cap` (np. `NV_ENC_CAPS_WIDTH_MAX`) dla kodeka `codec`.
     pub fn cap(&self, codec: GUID, cap: NV_ENC_CAPS) -> Result<i32, String> {
-        let f = self.nv.fl.nvEncGetEncodeCaps.ok_or("brak nvEncGetEncodeCaps")?;
+        let f = self.fl.nvEncGetEncodeCaps.ok_or("brak nvEncGetEncodeCaps")?;
         let mut p = NV_ENC_CAPS_PARAM { version: NV_ENC_CAPS_PARAM_VER, capsToQuery: cap, ..Default::default() };
         let mut val = 0i32;
         // SAFETY: struktura ma wersję; wskaźnik wyjściowy poprawny.
@@ -126,8 +130,8 @@ impl Session<'_> {
 
     /// Formaty wejściowe obsługiwane dla kodeka (wartości `NV_ENC_BUFFER_FORMAT_*`).
     pub fn input_formats(&self, codec: GUID) -> Result<Vec<u32>, String> {
-        let count = self.nv.fl.nvEncGetInputFormatCount.ok_or("brak nvEncGetInputFormatCount")?;
-        let get = self.nv.fl.nvEncGetInputFormats.ok_or("brak nvEncGetInputFormats")?;
+        let count = self.fl.nvEncGetInputFormatCount.ok_or("brak nvEncGetInputFormatCount")?;
+        let get = self.fl.nvEncGetInputFormats.ok_or("brak nvEncGetInputFormats")?;
         let mut n = 0u32;
         // SAFETY: jak wyżej.
         ck("nvEncGetInputFormatCount", unsafe { count(self.enc, codec, &mut n) })?;
@@ -140,9 +144,9 @@ impl Session<'_> {
     }
 }
 
-impl Drop for Session<'_> {
+impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(d) = self.nv.fl.nvEncDestroyEncoder {
+        if let Some(d) = self.fl.nvEncDestroyEncoder {
             // SAFETY: sesja pochodzi z `open_session` i jest niszczona raz.
             unsafe { d(self.enc) };
         }
