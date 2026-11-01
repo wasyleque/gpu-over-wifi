@@ -81,3 +81,66 @@ mod tests {
         assert!(src.matches("StypeEntry {").count() > 900, "za mało wierszy");
     }
 }
+
+/// Tablica rozszerzeń urządzenia: nazwa i polecenia, które rozszerzenie wprowadza (ze wszystkich bloków `require`).
+/// Rozszerzenie bez poleceń ma pustą listę. Tylko API `vulkan`, tylko `type="device"`.
+pub fn ext_table_source(xml: &str) -> Result<(String, usize), String> {
+    let doc = roxmltree::Document::parse_with_options(xml, roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() }).map_err(|e| e.to_string())?;
+    let mut rows: Vec<(String, Vec<String>)> = Vec::new();
+    for e in doc.descendants().filter(|n| n.is_element() && n.has_tag_name("extension")) {
+        if e.attribute("type") != Some("device") || !e.attribute("supported").is_some_and(|s| s.split(',').any(|t| t.trim() == "vulkan")) {
+            continue;
+        }
+        let Some(name) = e.attribute("name") else { continue };
+        let mut cmds: Vec<String> = e
+            .descendants()
+            .filter(|n| n.is_element() && n.has_tag_name("command"))
+            .filter(|n| n.ancestors().any(|a| a.has_tag_name("require")))
+            .filter_map(|n| n.attribute("name").map(str::to_string))
+            .collect();
+        cmds.sort();
+        cmds.dedup();
+        rows.push((name.to_string(), cmds));
+    }
+    rows.sort();
+    let mut src = String::from("//! GENEROWANY przez `gpu-vkgen --emit-ext-table`. Nie edytować ręcznie.\n\n/// Rozszerzenia urządzenia i polecenia, które wprowadzają.\npub static DEVICE_EXTENSIONS: &[(&str, &[&str])] = &[\n");
+    for (n, c) in &rows {
+        src.push_str(&format!("    (\"{n}\", &["));
+        src.push_str(&c.iter().map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(", "));
+        src.push_str("]),\n");
+    }
+    src.push_str("];\n\n/// Aliasy poleceń (np. `vkTrimCommandPoolKHR` -> `vkTrimCommandPool`), posortowane po aliasie.\npub static COMMAND_ALIASES: &[(&str, &str)] = &[\n");
+    let mut aliases: Vec<(String, String)> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.has_tag_name("command") && n.attribute("alias").is_some() && n.parent().is_some_and(|p| p.has_tag_name("commands")))
+        .filter(|n| n.attribute("api").is_none_or(|a| a.split(',').any(|t| t.trim() == "vulkan")))
+        .filter_map(|n| Some((n.attribute("name")?.to_string(), n.attribute("alias")?.to_string())))
+        .collect();
+    aliases.sort();
+    aliases.dedup();
+    for (a, t) in &aliases {
+        src.push_str(&format!("    (\"{a}\", \"{t}\"),\n"));
+    }
+    src.push_str("];\n");
+    Ok((src, rows.len()))
+}
+
+#[cfg(test)]
+mod ext_tests {
+    use super::*;
+
+    #[test]
+    fn extension_table_lists_device_extensions_with_their_commands() {
+        let xml = r#"<registry><extensions>
+          <extension name="VK_KHR_a" number="1" type="device" supported="vulkan"><require><command name="vkA"/><command name="vkB"/></require><require><command name="vkA"/></require></extension>
+          <extension name="VK_KHR_inst" number="2" type="instance" supported="vulkan"><require><command name="vkI"/></require></extension>
+          <extension name="VK_KHR_disabled" number="3" type="device" supported="disabled"><require><command name="vkD"/></require></extension>
+          <extension name="VK_KHR_none" number="4" type="device" supported="vulkan,vulkansc"><require><type name="X"/></require></extension>
+        </extensions></registry>"#;
+        let (src, n) = ext_table_source(xml).unwrap();
+        assert_eq!(n, 2);
+        assert!(src.contains("(\"VK_KHR_a\", &[\"vkA\", \"vkB\"]),"), "{src}");
+        assert!(src.contains("(\"VK_KHR_none\", &[]),"));
+        assert!(!src.contains("VK_KHR_inst") && !src.contains("disabled"));
+    }
+}

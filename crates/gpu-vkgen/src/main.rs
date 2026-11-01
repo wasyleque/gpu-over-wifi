@@ -181,6 +181,30 @@ fn main() {
         }
         return;
     }
+    if args.get(1).map(String::as_str) == Some("--emit-ext-table") {
+        let (Some(input), Some(output)) = (args.get(2), args.get(3)) else {
+            eprintln!("Użycie: gpu-vkgen --emit-ext-table <vk.xml> <wyjście.rs>");
+            std::process::exit(2);
+        };
+        let xml = std::fs::read_to_string(input).unwrap_or_else(|e| {
+            eprintln!("Nie można odczytać {input}: {e}");
+            std::process::exit(1);
+        });
+        match table::ext_table_source(&xml) {
+            Ok((src, n)) => {
+                if let Err(e) = std::fs::write(output, &src) {
+                    eprintln!("Nie można zapisać {output}: {e}");
+                    std::process::exit(1);
+                }
+                println!("zapisano {output}: {n} rozszerzeń urządzenia");
+            }
+            Err(e) => {
+                eprintln!("Błąd: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("--emit-stype-table") {
         let (Some(input), Some(output)) = (args.get(2), args.get(3)) else {
             eprintln!("Użycie: gpu-vkgen --emit-stype-table <vk.xml> <wyjście.rs>");

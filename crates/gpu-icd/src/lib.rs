@@ -18,6 +18,7 @@ use gpu_proto::stype::lookup;
 use gpu_renderd::client::Client;
 use gpu_renderd::handler::decode_extensions;
 
+mod exts;
 mod fwd;
 mod local;
 mod present;
@@ -466,7 +467,7 @@ unsafe extern "C" fn enumerate_device_extension_properties(p: *mut c_void, layer
             Ok(Response::Data(d)) => decode_extensions(&d)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|(n, _)| ADVERTISED_DEVICE_EXTENSIONS.contains(&n.as_str()))
+                .filter(|(n, _)| exts::is_advertisable(n))
                 .collect(),
             _ => return VK_ERROR_OUT_OF_HOST_MEMORY,
         }
@@ -649,9 +650,9 @@ pub fn proc_addr_by_name(name: &str) -> *const c_void {
     if !p.is_null() {
         return p;
     }
-    match gpu_proto::meta::find_command(name) {
+    match gpu_proto::meta::find_command(exts::resolve_alias(name)) {
         // Funkcje powierzchni, ekranu i swapchaina, których ICD nie implementuje lokalnie, NIE idą generycznie na serwer.
-        Some(_) if name.contains("Surface") || name.contains("Display") || name.contains("Swapchain") || name.contains("Present") => std::ptr::null(),
+        Some(_) if exts::is_local_only_command(name) => std::ptr::null(),
         Some((op, c)) if c.supported && !LOCAL_ONLY.contains(&name) => icd_table::ENTRIES[op as usize] as usize as *const c_void,
         _ => std::ptr::null(),
     }
