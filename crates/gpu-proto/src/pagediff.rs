@@ -1,7 +1,7 @@
 //! Śledzenie zmian pamięci w stronach 4 KiB: obie strony pamiętają skrót każdej strony w stanie, który druga strona już zna,
 //! i przesyłają tylko strony o zmienionym skrócie ("tylko różnice"). Nowa pamięć jest wyzerowana, więc zerowe strony nie są wysyłane.
 
-#![allow(clippy::chunks_exact_with_constant_chunk_size, clippy::manual_is_multiple_of)]
+#![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
 
 pub const PAGE: usize = 4096;
 
