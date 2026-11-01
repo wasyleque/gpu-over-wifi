@@ -449,6 +449,8 @@ version = "0.1.0"
 dependencies = [
  "gpu-proto",
  "gpu-renderd",
+ "gpu-vkcodec",
+ "gpu-wire",
 ]
 
 [[package]]

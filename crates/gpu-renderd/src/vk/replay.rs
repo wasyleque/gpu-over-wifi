@@ -112,11 +112,12 @@ impl Replayer {
             let rec = Recording { reg: &self.registry, seen: RefCell::new(Vec::new()) };
             let Some(dc) = decode_command(&mut dec, &rec).map_err(code)? else { return Ok(()) };
             let seen = rec.seen.into_inner();
-            self.run(&dc, &seen)?;
+            self.run(&dc, &seen, false)?;
         }
     }
 
-    /// Wykonuje jedno polecenie i zwraca zakodowane parametry wyjściowe.
+    /// Wykonuje jedno polecenie. Odpowiedź: kod wyniku (`i32` LE, także ujemny i dodatni jak `VK_NOT_READY`),
+    /// potem zakodowane parametry wyjściowe. Ujemny kod nie rejestruje uchwytów i nie koduje wyników.
     pub fn query(&mut self, data: &[u8]) -> Result<Vec<u8>, i32> {
         let mut dec = Decoder::new(data);
         let rec = Recording { reg: &self.registry, seen: RefCell::new(Vec::new()) };
@@ -125,14 +126,18 @@ impl Replayer {
         if dec.remaining() != 0 {
             return Err(ERR_UNKNOWN);
         }
-        self.run(&dc, &seen)?;
+        let result = self.run(&dc, &seen, true)?;
         let mut enc = Encoder::new();
-        // SAFETY: `dc.args` to świeżo odtworzone i wykonane parametry tego polecenia.
-        unsafe { encode_out_params(dc.command, dc.args.ptr, &mut enc, &Identity) }.map_err(code)?;
+        enc.put_u32(result as u32);
+        if result >= 0 {
+            // SAFETY: `dc.args` to świeżo odtworzone i wykonane parametry tego polecenia.
+            unsafe { encode_out_params(dc.command, dc.args.ptr, &mut enc, &Identity) }.map_err(code)?;
+        }
         Ok(enc.finish())
     }
 
-    fn run(&mut self, dc: &DecodedCommand, seen: &[u64]) -> Result<(), i32> {
+    /// Zwraca kod wyniku polecenia (0 dla `void`). `tolerate`: ujemny kod jest wynikiem, a nie błędem partii.
+    fn run(&mut self, dc: &DecodedCommand, seen: &[u64], tolerate: bool) -> Result<i32, i32> {
         let cmd = dc.command;
         let args = dc.args.ptr as *const u8;
         let f = self.func(dc.opcode, cmd.name)?;
@@ -158,8 +163,9 @@ impl Replayer {
         let size = if cmd.name == "vkAllocateMemory" { unsafe { arg_uint(cmd, args, "pAllocateInfo->allocationSize") }.unwrap_or(0) } else { 0 };
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
-        if cmd.ret == Ret::VkResult && (rax as u32 as i32) < 0 {
-            return Err(rax as u32 as i32);
+        let result = if cmd.ret == Ret::VkResult { rax as u32 as i32 } else { 0 };
+        if result < 0 {
+            return if tolerate { Ok(result) } else { Err(result) };
         }
         for ((kind, p, _), ids) in outs.iter().zip(ids) {
             for (i, id) in ids.iter().enumerate() {
@@ -169,7 +175,7 @@ impl Replayer {
             }
         }
         self.unregister_after(cmd, seen);
-        Ok(())
+        Ok(result)
     }
 
     /// `vkDestroy*` i `vkFree*` zdejmują obiekt z rejestru (identyfikatory z sieci, nie prawdziwe uchwyty).
@@ -177,6 +183,9 @@ impl Replayer {
         let n = cmd.name;
         let ids: &[u64] = if n == "vkFreeCommandBuffers" || n == "vkFreeDescriptorSets" {
             seen.get(2..).unwrap_or(&[])
+        } else if n == "vkDestroyDevice" || n == "vkDestroyInstance" {
+            // Niszczony obiekt jest parametrem 0 (nie ma obiektu nadrzędnego).
+            seen.get(..1).unwrap_or(&[])
         } else if n.starts_with("vkDestroy") || n == "vkFreeMemory" {
             seen.get(1..2).unwrap_or(&[])
         } else {

@@ -43,12 +43,17 @@ impl Client {
         }
     }
 
-    /// Wysyła żądanie i czeka na odpowiedź; `Response::Error` zamienia na `Err(Remote)`.
-    pub fn call(&mut self, req: &Request) -> Result<Response, ClientError> {
+    /// Wysyła żądanie bez czekania na odpowiedź (potokowanie; kolejność w strumieniu jest zachowana).
+    pub fn send(&mut self, req: &Request) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
         let frame = Frame::new(0, flags::CRC, self.seq, 0, req.encode()).map_err(ClientError::Frame)?;
         self.stream.write_all(&frame.encode())?;
-        let mut buf = [0u8; 8192];
+        Ok(())
+    }
+
+    /// Czeka na jedną odpowiedź; `Response::Error` zamienia na `Err(Remote)`.
+    pub fn recv(&mut self) -> Result<Response, ClientError> {
+        let mut buf = [0u8; 65536];
         loop {
             if let Some(f) = self.reader.next_frame().map_err(ClientError::Frame)? {
                 return match Response::decode(&f.payload).map_err(ClientError::Msg)? {
@@ -62,5 +67,11 @@ impl Client {
             }
             self.reader.push(&buf[..n]);
         }
+    }
+
+    /// Wysyła żądanie i czeka na odpowiedź.
+    pub fn call(&mut self, req: &Request) -> Result<Response, ClientError> {
+        self.send(req)?;
+        self.recv()
     }
 }

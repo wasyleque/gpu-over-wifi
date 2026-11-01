@@ -101,7 +101,8 @@ fn fill_buffer_on_the_real_gpu_through_the_command_stream() {
     let mut e = Encoder::new();
     unsafe { encode_command(op, args.as_ptr() as *const u8, &mut e, &Identity) }.unwrap();
     let out = b.query(&e.finish()).unwrap();
-    unsafe { decode_out_params(c, args.as_ptr() as *const u8, &mut Decoder::new(&out)) }.unwrap();
+    assert_eq!(u32_at(&out, 0), 0, "kod wyniku");
+    unsafe { decode_out_params(c, args.as_ptr() as *const u8, &mut Decoder::new(&out[4..])) }.unwrap();
     let (rsize, bits) = (u64::from_le_bytes(req.bytes()[0..8].try_into().unwrap()), u32_at(req.bytes(), 16));
     assert!(rsize >= SIZE && bits != 0xDEAD_BEEF && bits != 0, "wymagania: size {rsize}, bits {bits:#x}");
     let mt = host_visible(bits).expect("brak typu pamięci widocznego dla hosta");
@@ -146,6 +147,13 @@ fn fill_buffer_on_the_real_gpu_through_the_command_stream() {
     let mut again = Vec::new();
     cmd(&mut again, "vkDestroyBuffer", &[dev, buf, 0]);
     assert!(b.execute(&again).is_err(), "podwójne zniszczenie: uchwyt już nie istnieje");
+    // Zniszczone urządzenie znika z rejestru: ponowne użycie jest błędem, a nie wywołaniem na martwym uchwycie.
+    let mut batch = Vec::new();
+    cmd(&mut batch, "vkDestroyDevice", &[dev, 0]);
+    b.execute(&batch).unwrap();
+    let mut idle = Vec::new();
+    cmd(&mut idle, "vkDeviceWaitIdle", &[dev]);
+    assert!(b.execute(&idle).is_err(), "urządzenie powinno być wyrejestrowane");
     b.destroy_instance(inst).unwrap();
 }
 

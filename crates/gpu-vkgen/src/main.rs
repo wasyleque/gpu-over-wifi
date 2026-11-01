@@ -127,6 +127,36 @@ fn child_text(node: &roxmltree::Node, tag: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--emit-icd-table") {
+        let (Some(input), Some(output)) = (args.get(2), args.get(3)) else {
+            eprintln!("Użycie: gpu-vkgen --emit-icd-table <vk.xml> <wyjście.rs>");
+            std::process::exit(2);
+        };
+        let xml = std::fs::read_to_string(input).unwrap_or_else(|e| {
+            eprintln!("Nie można odczytać {input}: {e}");
+            std::process::exit(1);
+        });
+        match meta::compute_commands(&xml) {
+            Ok(cmds) => {
+                let mut src = String::from("//! GENEROWANY przez `gpu-vkgen --emit-icd-table`. Nie edytować ręcznie.\n\nuse crate::fwd::{entry, Entry};\n\n/// Punkt wejścia ICD dla każdego polecenia (indeks = kod operacji z `gpu_proto::meta::COMMANDS`).\npub static ENTRIES: [Entry; ");
+                src.push_str(&format!("{}] = [\n", cmds.len()));
+                for i in 0..cmds.len() {
+                    src.push_str(&format!("    entry::<{i}>,\n"));
+                }
+                src.push_str("];\n");
+                if let Err(e) = std::fs::write(output, src) {
+                    eprintln!("Nie można zapisać {output}: {e}");
+                    std::process::exit(1);
+                }
+                println!("zapisano {output}: {} punktów wejścia", cmds.len());
+            }
+            Err(e) => {
+                eprintln!("Błąd: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("--emit-meta") {
         let (Some(input), Some(output)) = (args.get(2), args.get(3)) else {
             eprintln!("Użycie: gpu-vkgen --emit-meta <vk.xml> <wyjście.rs>");

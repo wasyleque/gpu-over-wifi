@@ -9,3 +9,5 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 gpu-proto = { path = "../gpu-proto" }
 gpu-renderd = { path = "../gpu-renderd" }
+gpu-vkcodec = { path = "../gpu-vkcodec" }
+gpu-wire = { path = "../gpu-wire" }

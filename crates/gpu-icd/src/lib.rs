@@ -18,6 +18,10 @@ use gpu_proto::stype::lookup;
 use gpu_renderd::client::Client;
 use gpu_renderd::handler::decode_extensions;
 
+mod fwd;
+#[rustfmt::skip]
+mod icd_table;
+
 type VkResult = i32;
 const VK_SUCCESS: VkResult = 0;
 const VK_INCOMPLETE: VkResult = 5;
@@ -46,6 +50,8 @@ const ST_MEMORY2: u32 = 1_000_059_006;
 #[repr(C)]
 struct InstanceObj {
     loader_data: usize,
+    /// Identyfikator w protokole; zawsze pod offsetem 8 (tłumaczenie uchwytów dyspozycyjnych).
+    remote: u64,
     state: Mutex<InstState>,
 }
 
@@ -54,13 +60,26 @@ struct InstState {
     remote: u64,
     pdevs: Vec<*mut PdevObj>,
     cache: HashMap<(u64, u8, u32, u32), Vec<u8>>,
+    /// Zakodowane polecenia czekające na wysłanie (partia).
+    batch: Vec<u8>,
+    next_id: u64,
+    /// Rozmiary pamięci przydzielonych na serwerze i lokalne kopie (tylko odwzorowane).
+    mem_sizes: HashMap<u64, u64>,
+    mems: HashMap<u64, fwd::Shadow>,
+    /// Kolejki już wydane aplikacji: (urządzenie, rodzina, indeks) -> obiekt.
+    queues: HashMap<(u64, u32, u32), usize>,
+    device_lost: bool,
+    stats: fwd::Stats,
 }
+
+/// Jedyna instancja procesu (M2a); polecenia generyczne szukają przez nią połączenia.
+static CURRENT: std::sync::atomic::AtomicPtr<InstanceObj> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[repr(C)]
 struct PdevObj {
     loader_data: usize,
-    instance: *const InstanceObj,
     remote: u64,
+    instance: *const InstanceObj,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -186,8 +205,22 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
     let all = std::env::var("GPU_ICD_ALL_DEVICES").is_ok_and(|v| v == "1");
     let obj = Box::into_raw(Box::new(InstanceObj {
         loader_data: 0,
-        state: Mutex::new(InstState { client, remote, pdevs: Vec::new(), cache: HashMap::new() }),
+        remote,
+        state: Mutex::new(InstState {
+            client,
+            remote,
+            pdevs: Vec::new(),
+            cache: HashMap::new(),
+            batch: Vec::new(),
+            next_id: 1 << 20,
+            mem_sizes: HashMap::new(),
+            mems: HashMap::new(),
+            queues: HashMap::new(),
+            device_lost: false,
+            stats: fwd::Stats::default(),
+        }),
     }));
+    CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
     {
         let mut st = lock(&(*obj).state);
         for rp in remote_pds {
@@ -197,7 +230,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
                     continue;
                 }
             }
-            st.pdevs.push(Box::into_raw(Box::new(PdevObj { loader_data: 0, instance: obj, remote: rp })));
+            st.pdevs.push(Box::into_raw(Box::new(PdevObj { loader_data: 0, remote: rp, instance: obj })));
         }
     }
     *out = obj;
@@ -208,8 +241,13 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
     if inst.is_null() {
         return;
     }
+    CURRENT.store(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
     let obj = Box::from_raw(inst);
     let mut st = lock(&obj.state);
+    st.flush();
+    if std::env::var("GPU_ICD_STATS").is_ok() {
+        eprintln!("{}", st.stats.report());
+    }
     let remote = st.remote;
     let _ = st.client.call(&Request::DestroyInstance { instance: remote });
     for p in st.pdevs.drain(..) {
@@ -393,41 +431,8 @@ unsafe extern "C" fn get_sparse_image_format_properties(_p: *mut c_void, _f: u32
     }
 }
 
-/// Urządzenie logiczne M1: sam obiekt dla loadera (bez zdalnych zasobów i kolejek; to etap M2).
-#[repr(C)]
-struct DeviceObj {
-    loader_data: usize,
-    pdev: *const PdevObj,
-}
-
-unsafe extern "C" fn create_device(p: *mut c_void, _info: *const u8, _alloc: *const c_void, out: *mut *mut DeviceObj) -> VkResult {
-    if p.is_null() || out.is_null() {
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-    *out = Box::into_raw(Box::new(DeviceObj { loader_data: 0, pdev: p as *const PdevObj }));
-    VK_SUCCESS
-}
-
-unsafe extern "C" fn destroy_device(d: *mut DeviceObj, _alloc: *const c_void) {
-    if !d.is_null() {
-        drop(Box::from_raw(d));
-    }
-}
-
-unsafe extern "C" fn device_wait_idle(_d: *mut DeviceObj) -> VkResult {
-    VK_SUCCESS
-}
-
 unsafe extern "C" fn get_device_proc_addr(_d: *mut c_void, name: *const c_char) -> *const c_void {
-    if name.is_null() {
-        return std::ptr::null();
-    }
-    match CStr::from_ptr(name).to_str() {
-        Ok("vkGetDeviceProcAddr") => get_device_proc_addr as unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_void as usize as *const c_void,
-        Ok("vkDestroyDevice") => destroy_device as unsafe extern "C" fn(*mut DeviceObj, *const c_void) as usize as *const c_void,
-        Ok("vkDeviceWaitIdle") => device_wait_idle as unsafe extern "C" fn(*mut DeviceObj) -> VkResult as usize as *const c_void,
-        _ => std::ptr::null(),
-    }
+    vk_icdGetInstanceProcAddr(std::ptr::null_mut(), name)
 }
 
 // ---------- punkty wejścia ICD ----------
@@ -441,8 +446,22 @@ macro_rules! table {
     };
 }
 
-/// Adres funkcji o danej nazwie (instancyjnej lub globalnej) albo null.
+/// Adres funkcji o danej nazwie: ręczne (lokalne) albo generyczny punkt wejścia przekazujący do serwera.
 pub fn proc_addr_by_name(name: &str) -> *const c_void {
+    let p = local_proc_addr(name);
+    if !p.is_null() {
+        return p;
+    }
+    match gpu_proto::meta::find_command(name) {
+        Some((op, c)) if c.supported && !LOCAL_ONLY.contains(&name) => icd_table::ENTRIES[op as usize] as usize as *const c_void,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Polecenia, które ICD obsługuje wyłącznie lokalnie (nie przekazuje generycznie).
+const LOCAL_ONLY: &[&str] = &["vkCreateInstance", "vkDestroyInstance", "vkEnumeratePhysicalDevices", "vkEnumerateInstanceVersion", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties"];
+
+fn local_proc_addr(name: &str) -> *const c_void {
     table!(name,
         "vkEnumerateInstanceVersion" => enumerate_instance_version as unsafe extern "C" fn(*mut u32) -> VkResult,
         "vkEnumerateInstanceExtensionProperties" => enumerate_instance_extension_properties as unsafe extern "C" fn(*const c_char, *mut u32, *mut c_void) -> VkResult,
@@ -468,9 +487,11 @@ pub fn proc_addr_by_name(name: &str) -> *const c_void {
         "vkEnumerateDeviceLayerProperties" => enumerate_device_layer_properties as unsafe extern "C" fn(*mut c_void, *mut u32, *mut c_void) -> VkResult,
         "vkGetPhysicalDeviceImageFormatProperties" => get_image_format_properties as unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, *mut u8) -> VkResult,
         "vkGetPhysicalDeviceSparseImageFormatProperties" => get_sparse_image_format_properties as unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, *mut u32, *mut u8),
-        "vkCreateDevice" => create_device as unsafe extern "C" fn(*mut c_void, *const u8, *const c_void, *mut *mut DeviceObj) -> VkResult,
-        "vkDestroyDevice" => destroy_device as unsafe extern "C" fn(*mut DeviceObj, *const c_void),
         "vkGetDeviceProcAddr" => get_device_proc_addr as unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_void,
+        "vkMapMemory" => fwd::map_memory as unsafe extern "C" fn(u64, u64, u64, u64, u32, *mut *mut u8) -> VkResult,
+        "vkUnmapMemory" => fwd::unmap_memory as unsafe extern "C" fn(u64, u64),
+        "vkFlushMappedMemoryRanges" => fwd::flush_ranges as unsafe extern "C" fn(u64, u32, *const u8) -> VkResult,
+        "vkInvalidateMappedMemoryRanges" => fwd::invalidate_ranges as unsafe extern "C" fn(u64, u32, *const u8) -> VkResult,
     )
 }
 
@@ -510,7 +531,12 @@ mod tests {
         for n in ["vkCreateInstance", "vkEnumeratePhysicalDevices", "vkGetPhysicalDeviceProperties2", "vkEnumerateInstanceVersion", "vkGetPhysicalDeviceQueueFamilyProperties"] {
             assert!(!proc_addr_by_name(n).is_null(), "{n}");
         }
-        for n in ["vkCmdDraw", "vkQueueSubmit", "", "vkCreateInstanceX"] {
+        // Polecenia przekazywane generycznie do serwera.
+        for n in ["vkCmdDraw", "vkQueueSubmit", "vkCreateDevice", "vkCreateBuffer", "vkWaitForFences"] {
+            assert!(!proc_addr_by_name(n).is_null(), "{n}");
+        }
+        assert_ne!(proc_addr_by_name("vkCmdDraw"), proc_addr_by_name("vkCmdDrawIndexed"), "każde polecenie ma własny punkt wejścia");
+        for n in ["", "vkCreateInstanceX", "vkNieMaTakiego", "vkGetPhysicalDeviceXcbPresentationSupportKHR"] {
             assert!(proc_addr_by_name(n).is_null(), "{n}");
         }
     }
