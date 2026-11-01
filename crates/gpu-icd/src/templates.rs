@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn unsupported_types_and_absurd_counts_are_refused() {
-        let data = vec![0u8; 64];
+        let data = [0u8; 64];
         assert!(unsafe { build_writes(&[entry(0, 1, 1_000_138_000, 0, 0)], data.as_ptr(), 1) }.is_none(), "inline uniform block");
         assert!(unsafe { build_writes(&[entry(0, 1 << 20, 6, 0, 24)], data.as_ptr(), 1) }.is_none());
         assert_eq!(unsafe { build_writes(&[entry(0, 0, 6, 0, 24)], data.as_ptr(), 1) }.unwrap().count, 0);
