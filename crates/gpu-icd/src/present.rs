@@ -31,7 +31,7 @@ unsafe impl Send for Presenter {}
 
 /// Kopiuje klatkę RGBA do BGRA (zamiana kanałów R i B); długości muszą być równe i podzielne przez 4.
 pub fn rgba_to_bgra(src: &[u8], dst: &mut [u8]) -> bool {
-    if src.len() != dst.len() || src.len() % 4 != 0 {
+    if src.len() != dst.len() || !src.len().is_multiple_of(4) {
         return false;
     }
     for (s, d) in src.chunks(4).zip(dst.chunks_mut(4)) {

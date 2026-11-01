@@ -97,6 +97,125 @@ fn enum_mode() {
     unsafe { (f.destroy_instance)(inst, std::ptr::null()) };
 }
 
+/// Tryb `swapchain`: pełna ścieżka okna na powierzchni headless: swapchain, acquire, czyszczenie obrazu, present.
+fn swapchain_mode() {
+    let lib = LibVulkan::load().unwrap_or_else(|e| die(&format!("libvulkan: {e:?}")));
+    let g = GlobalFns::load(&lib).unwrap_or_else(|e| die(&format!("funkcje globalne: {e:?}")));
+    let names = [std::ffi::CString::new("VK_KHR_surface").unwrap(), std::ffi::CString::new("VK_EXT_headless_surface").unwrap()];
+    let ptrs: Vec<*const std::ffi::c_char> = names.iter().map(|c| c.as_ptr()).collect();
+    let mut info = [0u64; 8];
+    info[0] = 1;
+    info[6] = ptrs.len() as u64;
+    info[7] = ptrs.as_ptr() as u64;
+    let mut inst: *mut c_void = std::ptr::null_mut();
+    if unsafe { (g.create_instance)(info.as_ptr() as *const c_void, std::ptr::null(), &mut inst) } != 0 {
+        die("vkCreateInstance");
+    }
+    let f = unsafe { InstanceFns::load(&lib, inst) }.unwrap_or_else(|e| die(&format!("funkcje instancji: {e:?}")));
+    let func = |name: &str| -> *const c_void {
+        let c = std::ffi::CString::new(name).unwrap();
+        unsafe { lib.proc_addr(inst, &c) }.unwrap_or_else(|| die(&format!("loader nie zna {name}")))
+    };
+    let call = |name: &str, ints: &[u64]| -> i32 { unsafe { call_thunk(func(name), ints, &[]) }.unwrap() as u32 as i32 };
+    let mut n = 8u32;
+    let mut pds = vec![std::ptr::null_mut(); 8];
+    unsafe { (f.enumerate_physical_devices)(inst, &mut n, pds.as_mut_ptr()) };
+    let pd = pds[0] as u64;
+    let mut hinfo = [0u64; 3];
+    hinfo[0] = 1_000_256_000;
+    let mut surface: u64 = 0;
+    if call("vkCreateHeadlessSurfaceEXT", &[inst as u64, hinfo.as_ptr() as u64, 0, &mut surface as *mut u64 as u64]) != 0 {
+        die("vkCreateHeadlessSurfaceEXT");
+    }
+    let prio = [1.0f32];
+    let mut qci = S::new("VkDeviceQueueCreateInfo");
+    qci.u32("queueCount", 1).u64("pQueuePriorities", prio.as_ptr() as u64);
+    let ext = std::ffi::CString::new("VK_KHR_swapchain").unwrap();
+    let exts = [ext.as_ptr()];
+    let mut dci = S::new("VkDeviceCreateInfo");
+    dci.u32("queueCreateInfoCount", 1).u64("pQueueCreateInfos", qci.p()).u32("enabledExtensionCount", 1).u64("ppEnabledExtensionNames", exts.as_ptr() as u64);
+    let mut dev: u64 = 0;
+    let r = call("vkCreateDevice", &[pd, dci.p(), 0, &mut dev as *mut u64 as u64]);
+    if r != 0 {
+        die(&format!("vkCreateDevice(VK_KHR_swapchain) = {r}"));
+    }
+    let mut queue: u64 = 0;
+    call("vkGetDeviceQueue", &[dev, 0, 0, &mut queue as *mut u64 as u64]);
+    let (w, h) = (64u32, 48u32);
+    let mut sci = S::new("VkSwapchainCreateInfoKHR");
+    sci.u64("surface", surface).u32("minImageCount", 3).u32("imageFormat", 44).u32o("imageExtent", 0, w).u32o("imageExtent", 4, h);
+    sci.u32("imageArrayLayers", 1).u32("imageUsage", 0x12).u32("preTransform", 1).u32("compositeAlpha", 1).u32("presentMode", 2).u32("clipped", 1);
+    let mut sc: u64 = 0;
+    let r = call("vkCreateSwapchainKHR", &[dev, sci.p(), 0, &mut sc as *mut u64 as u64]);
+    if r != 0 || sc == 0 {
+        die(&format!("vkCreateSwapchainKHR = {r}"));
+    }
+    let mut cnt = 0u32;
+    call("vkGetSwapchainImagesKHR", &[dev, sc, &mut cnt as *mut u32 as u64, 0]);
+    let mut images = vec![0u64; cnt as usize];
+    call("vkGetSwapchainImagesKHR", &[dev, sc, &mut cnt as *mut u32 as u64, images.as_mut_ptr() as u64]);
+    println!("swapchain: {cnt} obrazy");
+    let sem_ci = S::new("VkSemaphoreCreateInfo");
+    let (mut sem_acq, mut sem_done) = (0u64, 0u64);
+    call("vkCreateSemaphore", &[dev, sem_ci.p(), 0, &mut sem_acq as *mut u64 as u64]);
+    call("vkCreateSemaphore", &[dev, sem_ci.p(), 0, &mut sem_done as *mut u64 as u64]);
+    let mut pci = S::new("VkCommandPoolCreateInfo");
+    pci.u32("flags", 2);
+    let mut pool: u64 = 0;
+    call("vkCreateCommandPool", &[dev, pci.p(), 0, &mut pool as *mut u64 as u64]);
+    let mut cai = S::new("VkCommandBufferAllocateInfo");
+    cai.u64("commandPool", pool).u32("commandBufferCount", 1);
+    let mut cb: u64 = 0;
+    call("vkAllocateCommandBuffers", &[dev, cai.p(), &mut cb as *mut u64 as u64]);
+    let color = [0.2f32, 0.4, 0.8, 1.0];
+    let mut range = S::new("VkImageSubresourceRange");
+    range.u32("aspectMask", 1).u32("levelCount", 1).u32("layerCount", 1);
+    let begin = S::new("VkCommandBufferBeginInfo");
+    for frame in 0..3 {
+        let mut idx = 99u32;
+        let r = call("vkAcquireNextImageKHR", &[dev, sc, u64::MAX, sem_acq, 0, &mut idx as *mut u32 as u64]);
+        if r != 0 || idx as usize >= images.len() {
+            die(&format!("vkAcquireNextImageKHR = {r}, indeks {idx}"));
+        }
+        let image = images[idx as usize];
+        let barrier = |old: u32, new: u32, src: u32, dst: u32| {
+            let mut b = S::new("VkImageMemoryBarrier");
+            b.u32("srcAccessMask", src).u32("dstAccessMask", dst).u32("oldLayout", old).u32("newLayout", new);
+            b.u32("srcQueueFamilyIndex", u32::MAX).u32("dstQueueFamilyIndex", u32::MAX).u64("image", image);
+            b.u32o("subresourceRange", 0, 1).u32o("subresourceRange", 8, 1).u32o("subresourceRange", 16, 1);
+            b
+        };
+        let (b1, b2) = (barrier(0, 7, 0, 0x1000), barrier(7, 1_000_001_002, 0x1000, 0));
+        call("vkResetCommandBuffer", &[cb, 0]);
+        call("vkBeginCommandBuffer", &[cb, begin.p()]);
+        call("vkCmdPipelineBarrier", &[cb, 0x1, 0x1000, 0, 0, 0, 0, 0, 1, b1.p()]);
+        call("vkCmdClearColorImage", &[cb, image, 7, color.as_ptr() as u64, 1, range.p()]);
+        call("vkCmdPipelineBarrier", &[cb, 0x1000, 0x2000, 0, 0, 0, 0, 0, 1, b2.p()]);
+        call("vkEndCommandBuffer", &[cb]);
+        let mask = [0x1000u32];
+        let mut si = S::new("VkSubmitInfo");
+        si.u32("waitSemaphoreCount", 1).u64("pWaitSemaphores", &sem_acq as *const u64 as u64).u64("pWaitDstStageMask", mask.as_ptr() as u64);
+        si.u32("commandBufferCount", 1).u64("pCommandBuffers", &cb as *const u64 as u64).u32("signalSemaphoreCount", 1).u64("pSignalSemaphores", &sem_done as *const u64 as u64);
+        let r = call("vkQueueSubmit", &[queue, 1, si.p(), 0]);
+        if r != 0 {
+            die(&format!("vkQueueSubmit = {r}"));
+        }
+        let mut pi = S::new("VkPresentInfoKHR");
+        pi.u32("waitSemaphoreCount", 1).u64("pWaitSemaphores", &sem_done as *const u64 as u64).u32("swapchainCount", 1);
+        pi.u64("pSwapchains", &sc as *const u64 as u64).u64("pImageIndices", &idx as *const u32 as u64);
+        let r = call("vkQueuePresentKHR", &[queue, pi.p()]);
+        if r != 0 && r != 1_000_001_003 {
+            die(&format!("vkQueuePresentKHR (klatka {frame}) = {r}"));
+        }
+    }
+    call("vkDeviceWaitIdle", &[dev]);
+    println!("OK: 3 klatki narysowane na zdalnej karcie przez swapchain i wyświetlone lokalnie");
+    call("vkDestroySwapchainKHR", &[dev, sc, 0]);
+    call("vkDestroyDevice", &[dev, 0]);
+    call("vkDestroySurfaceKHR", &[inst as u64, surface, 0]);
+    unsafe { (f.destroy_instance)(inst, std::ptr::null()) };
+}
+
 /// Tryb `surface`: powierzchnia headless przez loader i nasz ICD; zapytania o możliwości okna.
 fn surface_mode() {
     let lib = LibVulkan::load().unwrap_or_else(|e| die(&format!("libvulkan: {e:?}")));
@@ -162,6 +281,10 @@ fn surface_mode() {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("swapchain") {
+        swapchain_mode();
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("enum") {
         enum_mode();
         return;

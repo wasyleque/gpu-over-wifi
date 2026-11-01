@@ -21,6 +21,7 @@ use gpu_renderd::handler::decode_extensions;
 mod fwd;
 mod local;
 mod present;
+mod swapchain;
 mod sbuild;
 mod wsi;
 #[rustfmt::skip]
@@ -44,7 +45,7 @@ const VK_PHYSICAL_DEVICE_TYPE_CPU: u32 = 4;
 /// Rozszerzenia urządzenia, które ogłaszamy: tylko te, których funkcje ICD naprawdę implementuje.
 /// Serwer ma ich ~250 (m.in. Vulkan Video), ale ogłoszenie nieobsługiwanego rozszerzenia kończy się
 /// wskaźnikami null w loaderze i awarią aplikacji. Lista rośnie wraz z kolejnymi etapami (M2: swapchain itd.).
-pub const ADVERTISED_DEVICE_EXTENSIONS: &[&str] = &[];
+pub const ADVERTISED_DEVICE_EXTENSIONS: &[&str] = &["VK_KHR_swapchain"];
 
 const ST_FEATURES2: u32 = 1_000_059_000;
 const ST_PROPERTIES2: u32 = 1_000_059_001;
@@ -74,6 +75,9 @@ struct InstState {
     queues: HashMap<(u64, u32, u32), usize>,
     device_lost: bool,
     stats: fwd::Stats,
+    swapchains: HashMap<u64, swapchain::Swapchain>,
+    /// Urządzenie (identyfikator) -> zdalna karta fizyczna (do wyboru typów pamięci).
+    device_pdev: HashMap<u64, u64>,
 }
 
 /// Lokalny sterownik do prezentacji, otwierany leniwie (raz); `None` gdy go nie ma.
@@ -276,6 +280,8 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             queues: HashMap::new(),
             device_lost: false,
             stats: fwd::Stats::default(),
+            swapchains: HashMap::new(),
+            device_pdev: HashMap::new(),
         }),
     }));
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
@@ -690,6 +696,12 @@ fn local_proc_addr(name: &str) -> *const c_void {
         "vkGetPhysicalDeviceWaylandPresentationSupportKHR" => wayland_presentation_support as unsafe extern "C" fn(*mut c_void, u32, u64) -> u32,
         "vkGetPhysicalDeviceXcbPresentationSupportKHR" => xcb_presentation_support as unsafe extern "C" fn(*mut c_void, u32, u64, u32) -> u32,
         "vkGetPhysicalDeviceXlibPresentationSupportKHR" => xlib_presentation_support as unsafe extern "C" fn(*mut c_void, u32, u64, u64) -> u32,
+        "vkCreateSwapchainKHR" => swapchain::create_swapchain as unsafe extern "C" fn(u64, *const u8, *const c_void, *mut u64) -> VkResult,
+        "vkDestroySwapchainKHR" => swapchain::destroy_swapchain as unsafe extern "C" fn(u64, u64, *const c_void),
+        "vkGetSwapchainImagesKHR" => swapchain::get_swapchain_images as unsafe extern "C" fn(u64, u64, *mut u32, *mut u64) -> VkResult,
+        "vkAcquireNextImageKHR" => swapchain::acquire_next_image as unsafe extern "C" fn(u64, u64, u64, u64, u64, *mut u32) -> VkResult,
+        "vkAcquireNextImage2KHR" => swapchain::acquire_next_image2 as unsafe extern "C" fn(u64, *const u8, *mut u32) -> VkResult,
+        "vkQueuePresentKHR" => swapchain::queue_present as unsafe extern "C" fn(u64, *const u8) -> VkResult,
         "vkMapMemory" => fwd::map_memory as unsafe extern "C" fn(u64, u64, u64, u64, u32, *mut *mut u8) -> VkResult,
         "vkUnmapMemory" => fwd::unmap_memory as unsafe extern "C" fn(u64, u64),
         "vkFlushMappedMemoryRanges" => fwd::flush_ranges as unsafe extern "C" fn(u64, u32, *const u8) -> VkResult,
@@ -746,8 +758,11 @@ mod tests {
         for n in ["vkGetPhysicalDeviceSurfaceSupportKHR", "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR", "vkGetPhysicalDeviceSurfacePresentModesKHR"] {
             assert!(!proc_addr_by_name(n).is_null(), "{n}");
         }
+        for n in ["vkCreateSwapchainKHR", "vkDestroySwapchainKHR", "vkGetSwapchainImagesKHR", "vkAcquireNextImageKHR", "vkQueuePresentKHR"] {
+            assert!(!proc_addr_by_name(n).is_null(), "{n}");
+        }
         assert_ne!(proc_addr_by_name("vkCmdDraw"), proc_addr_by_name("vkCmdDrawIndexed"), "każde polecenie ma własny punkt wejścia");
-        for n in ["", "vkCreateInstanceX", "vkNieMaTakiego", "vkCreateDisplayPlaneSurfaceKHR", "vkGetPhysicalDeviceSurfaceCapabilities2KHR", "vkQueuePresentKHR"] {
+        for n in ["", "vkCreateInstanceX", "vkNieMaTakiego", "vkCreateDisplayPlaneSurfaceKHR", "vkGetPhysicalDeviceSurfaceCapabilities2KHR", "vkGetDeviceGroupPresentCapabilitiesKHR"] {
             assert!(proc_addr_by_name(n).is_null(), "{n}");
         }
     }

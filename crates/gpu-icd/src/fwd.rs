@@ -78,7 +78,7 @@ impl Ctx for IcdCtx {
 }
 
 impl InstState {
-    fn alloc_id(&mut self) -> u64 {
+    pub(crate) fn alloc_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
     }
@@ -122,7 +122,7 @@ impl InstState {
         }
     }
 
-    fn read_mem(&mut self, memory: u64, offset: u64, len: usize) -> Option<Vec<u8>> {
+    pub(crate) fn read_mem(&mut self, memory: u64, offset: u64, len: usize) -> Option<Vec<u8>> {
         self.flush();
         let mut out = Vec::with_capacity(len);
         while out.len() < len {
@@ -196,6 +196,17 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             }
         };
     }
+    exec(&mut st, op, &mut slots)
+}
+
+/// Wykonuje polecenie o kodzie `op` z gotowymi slotami parametrów (tak samo dla aplikacji i dla ICD, które wydaje własne polecenia).
+///
+/// # Safety
+/// Sloty muszą zawierać poprawne wartości parametrów polecenia (wskaźniki do żywej pamięci).
+pub(crate) unsafe fn exec(st: &mut InstState, op: u16, slots: &mut [u64]) -> u64 {
+    let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    let params = cmd.params();
+    let fail = |e: i32| -> u64 { e as u32 as u64 };
     let args = slots.as_ptr() as *const u8;
 
     // Kolejka wydana już wcześniej (to samo urządzenie, rodzina, indeks) wraca bez wysyłania.
@@ -232,6 +243,12 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             let mem_id = std::ptr::read_unaligned(slots[3] as *const u64);
             let _ = id;
             st.mem_sizes.insert(mem_id, size);
+        }
+    }
+    if cmd.name == "vkCreateDevice" {
+        if let (Some((_, dev_id)), true) = (disp_outs.first(), slots[0] != 0) {
+            // PdevObj: identyfikator zdalnej karty pod offsetem 8.
+            st.device_pdev.insert(*dev_id, std::ptr::read_unaligned((slots[0] as *const u8).add(8) as *const u64));
         }
     }
     // Obiekty dyspozycyjne: aplikacja dostaje wskaźnik na obiekt ICD, a w protokole obowiązuje jego identyfikator.
@@ -360,4 +377,22 @@ pub unsafe extern "C" fn invalidate_ranges(_dev: u64, count: u32, r: *const u8) 
         map.insert(mem, ());
     }
     0
+}
+
+/// Wykonuje polecenie po nazwie (dla kodu ICD wydającego własne polecenia, np. swapchain). Zwraca kod wyniku.
+///
+/// # Safety
+/// Jak `exec`.
+pub(crate) unsafe fn exec_named(st: &mut InstState, name: &str, slots: &mut [u64]) -> i32 {
+    match gpu_proto::meta::find_command(name) {
+        Some((op, c)) if c.params().len() == slots.len() => exec(st, op, slots) as u32 as i32,
+        _ => VK_ERROR_INITIALIZATION_FAILED,
+    }
+}
+
+impl InstState {
+    /// Właściwości pamięci zdalnej karty (`MemoryProperties2`, z pamięci podręcznej).
+    pub(crate) fn query_props(&mut self, pdev: u64) -> Option<Vec<u8>> {
+        self.query(pdev, gpu_proto::msg::PdFunc::MemoryProperties2, 0, 0, &[])
+    }
 }
