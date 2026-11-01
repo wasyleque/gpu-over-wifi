@@ -191,6 +191,17 @@ unsafe fn enc_ptr(meta: &StructMeta, m: &MemberMeta, base: *const u8, enc: &mut 
                 enc_struct(sm, p.add(i * m.elem_size as usize), enc, ctx, depth + 1, false)?;
             }
         }
+        (1, Elem::Union) => {
+            // Unie (np. VkClearColorValue) przechodzą jako surowe bloki; nie mogą zawierać wskaźników.
+            let um = meta_of(m.type_name)?;
+            if um.members().iter().any(|x| x.shape != Shape::Value) {
+                return Err(unsupported(meta, m, "unia ze wskaźnikiem"));
+            }
+            enc.put_varint(count);
+            for i in 0..count as usize {
+                enc.put_bytes(std::slice::from_raw_parts(p.add(i * m.elem_size as usize), m.elem_size as usize));
+            }
+        }
         (2, Elem::Char) if nt => {
             enc.put_varint(count);
             for i in 0..count as usize {
@@ -513,6 +524,23 @@ unsafe fn dec_ptr(meta: &StructMeta, m: &MemberMeta, dec: &mut Decoder, dst: *mu
             let p = arena.alloc(n as usize * m.elem_size as usize)?;
             for i in 0..n as usize {
                 dec_struct(sm, dec, p.add(i * m.elem_size as usize), arena, ctx, depth + 1, false)?;
+            }
+            put_ptr(dst, m.offset, p);
+        }
+        (1, Elem::Union) => {
+            let n = dec.get_varint()?;
+            check_count(meta, m, dst, n)?;
+            if n > dec.remaining() as u64 {
+                return Err(CodecError::Limit("liczba elementów ponad dane"));
+            }
+            let size = m.elem_size as usize;
+            let p = arena.alloc(n as usize * size)?;
+            for i in 0..n as usize {
+                let b = dec.get_bytes()?;
+                if b.len() != size {
+                    return Err(CodecError::Limit("rozmiar unii"));
+                }
+                std::ptr::copy_nonoverlapping(b.as_ptr(), p.add(i * size), size);
             }
             put_ptr(dst, m.offset, p);
         }

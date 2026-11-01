@@ -42,6 +42,12 @@ impl S {
         self.bytes()[o..o + 8].copy_from_slice(&v.to_le_bytes());
         self
     }
+    /// Pole zagnieżdżonej struktury: `member` + przesunięcie wewnątrz niej.
+    fn u32o(&mut self, m: &str, extra: usize, v: u32) -> &mut S {
+        let o = self.off(m) + extra;
+        self.bytes()[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        self
+    }
     fn p(&self) -> u64 {
         self.w.as_ptr() as u64
     }
@@ -200,6 +206,89 @@ fn main() {
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     println!("OK: GPU wypełniło bufor przez ICD ({reps} powtórzeń); czas obiegu submit+wait+odczyt: mediana {:.2} ms, min {:.2} ms", times[times.len() / 2], times[0]);
+
+    // ---------- obraz: clear + copy do bufora (bariery z 10 parametrami, unia VkClearColorValue) ----------
+    {
+        let (w, h) = (64u32, 64u32);
+        let mut ici = S::new("VkImageCreateInfo");
+        ici.u32("imageType", 1).u32("format", 37).u32o("extent", 0, w).u32o("extent", 4, h).u32o("extent", 8, 1);
+        ici.u32("mipLevels", 1).u32("arrayLayers", 1).u32("samples", 1).u32("usage", 0x3);
+        let mut image: u64 = 0;
+        let r = call("vkCreateImage", &[dev, ici.p(), 0, &mut image as *mut u64 as u64]);
+        if r != 0 {
+            die(&format!("vkCreateImage = {r}"));
+        }
+        let mut ireq = S::new("VkMemoryRequirements");
+        call("vkGetImageMemoryRequirements", &[dev, image, ireq.p()]);
+        let (isize_, ibits) = (u64::from_le_bytes(ireq.bytes()[0..8].try_into().unwrap()), u32_at(ireq.bytes(), 16));
+        let imt = (0..types.len()).find(|&i| ibits & (1 << i) != 0 && types[i] & 0x1 != 0).or_else(|| (0..types.len()).find(|&i| ibits & (1 << i) != 0)).unwrap_or_else(|| die("brak typu pamięci dla obrazu")) as u32;
+        let mut iai = S::new("VkMemoryAllocateInfo");
+        iai.u64("allocationSize", isize_).u32("memoryTypeIndex", imt);
+        let mut imem: u64 = 0;
+        let r = call("vkAllocateMemory", &[dev, iai.p(), 0, &mut imem as *mut u64 as u64]);
+        if r != 0 {
+            die(&format!("vkAllocateMemory(obraz) = {r}"));
+        }
+        call("vkBindImageMemory", &[dev, image, imem, 0]);
+        // bufor odczytu
+        let out_size = (w * h * 4) as u64;
+        let mut obci = S::new("VkBufferCreateInfo");
+        obci.u64("size", out_size).u32("usage", 0x2);
+        let mut obuf: u64 = 0;
+        call("vkCreateBuffer", &[dev, obci.p(), 0, &mut obuf as *mut u64 as u64]);
+        let mut oreq = S::new("VkMemoryRequirements");
+        call("vkGetBufferMemoryRequirements", &[dev, obuf, oreq.p()]);
+        let (osz, obits) = (u64::from_le_bytes(oreq.bytes()[0..8].try_into().unwrap()), u32_at(oreq.bytes(), 16));
+        let omt = (0..types.len()).find(|&i| obits & (1 << i) != 0 && types[i] & 0x6 == 0x6).unwrap_or_else(|| die("brak pamięci hosta dla odczytu")) as u32;
+        let mut oai = S::new("VkMemoryAllocateInfo");
+        oai.u64("allocationSize", osz).u32("memoryTypeIndex", omt);
+        let mut omem: u64 = 0;
+        call("vkAllocateMemory", &[dev, oai.p(), 0, &mut omem as *mut u64 as u64]);
+        call("vkBindBufferMemory", &[dev, obuf, omem, 0]);
+        let mut optr: *mut u8 = std::ptr::null_mut();
+        call("vkMapMemory", &[dev, omem, 0, u64::MAX, 0, &mut optr as *mut *mut u8 as u64]);
+
+        let range = |s: &mut S, name: &str| {
+            s.u32o(name, 0, 1).u32o(name, 8, 1).u32o(name, 16, 1); // aspectMask, levelCount, layerCount
+        };
+        let barrier = |old: u32, new: u32, src: u32, dst: u32| {
+            let mut b = S::new("VkImageMemoryBarrier");
+            b.u32("srcAccessMask", src).u32("dstAccessMask", dst).u32("oldLayout", old).u32("newLayout", new);
+            b.u32("srcQueueFamilyIndex", u32::MAX).u32("dstQueueFamilyIndex", u32::MAX).u64("image", image);
+            range(&mut b, "subresourceRange");
+            b
+        };
+        let to_dst = barrier(0, 7, 0, 0x1000); // UNDEFINED -> TRANSFER_DST_OPTIMAL
+        let to_src = barrier(7, 6, 0x1000, 0x800); // -> TRANSFER_SRC_OPTIMAL
+        let color = [0.25f32, 0.5, 0.75, 1.0];
+        let mut sub = S::new("VkImageSubresourceRange");
+        range(&mut sub, "aspectMask"); // aspectMask @0, levelCount @8, layerCount @16 względem początku struktury
+        let mut copy = S::new("VkBufferImageCopy");
+        copy.u32o("imageSubresource", 0, 1).u32o("imageSubresource", 12, 1).u32o("imageExtent", 0, w).u32o("imageExtent", 4, h).u32o("imageExtent", 8, 1);
+        call("vkResetCommandBuffer", &[cb, 0]);
+        call("vkBeginCommandBuffer", &[cb, cbi.p()]);
+        // vkCmdPipelineBarrier(cb, srcStage, dstStage, depFlags, memCount, pMem, bufCount, pBuf, imgCount, pImg): 10 parametrów
+        call("vkCmdPipelineBarrier", &[cb, 0x1, 0x1000, 0, 0, 0, 0, 0, 1, to_dst.p()]);
+        call("vkCmdClearColorImage", &[cb, image, 7, color.as_ptr() as u64, 1, sub.p()]);
+        call("vkCmdPipelineBarrier", &[cb, 0x1000, 0x1000, 0, 0, 0, 0, 0, 1, to_src.p()]);
+        call("vkCmdCopyImageToBuffer", &[cb, image, 6, obuf, 1, copy.p()]);
+        call("vkEndCommandBuffer", &[cb]);
+        let r = call("vkQueueSubmit", &[queue, 1, si.p(), fence]);
+        if r != 0 {
+            die(&format!("vkQueueSubmit(obraz) = {r}"));
+        }
+        let r = call("vkWaitForFences", &[dev, 1, &fence as *const u64 as u64, 1, u64::MAX]);
+        if r != 0 {
+            die(&format!("vkWaitForFences(obraz) = {r}"));
+        }
+        let px = unsafe { std::slice::from_raw_parts(optr, out_size as usize) };
+        let want = [64u8, 128, 191, 255];
+        let bad = px.chunks(4).filter(|c| c.iter().zip(want).any(|(a, b)| (*a as i32 - b as i32).abs() > 1)).count();
+        if bad != 0 {
+            die(&format!("obraz: {bad}/{} pikseli różni się od oczekiwanego {want:?}; pierwszy piksel {:?}", w * h, &px[..4]));
+        }
+        println!("OK: obraz {w}x{h} wyczyszczony na zdalnej karcie i odczytany (piksel {:?})", &px[..4]);
+    }
     call("vkDeviceWaitIdle", &[dev]);
     call("vkDestroyFence", &[dev, fence, 0]);
     call("vkDestroyBuffer", &[dev, buf, 0]);

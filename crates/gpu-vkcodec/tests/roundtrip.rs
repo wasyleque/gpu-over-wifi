@@ -15,6 +15,10 @@ fn st(name: &str) -> u32 {
 }
 
 impl C {
+    fn new_zeroed(name: &str) -> C {
+        let meta = find_struct(name).unwrap();
+        C { meta, words: vec![0u64; (meta.size as usize).div_ceil(8).max(1)] }
+    }
     fn new(name: &str) -> C {
         let meta = find_struct(name).unwrap();
         let mut c = C { meta, words: vec![0u64; (meta.size as usize).div_ceil(8).max(1)] };
@@ -470,5 +474,18 @@ fn random_command_streams_never_panic() {
         let len = (next() % 200) as usize;
         bytes.extend((0..len).map(|_| next() as u8));
         let _ = decode_command(&mut Decoder::new(&bytes), &Identity);
+    }
+}
+
+#[test]
+fn clear_color_union_pointer_roundtrips() {
+    let color = [0.25f32, 0.5, 0.75, 1.0];
+    let range = C::new_zeroed("VkImageSubresourceRange");
+    let args = slots(&[9, 5, 7, color.as_ptr() as u64, 1, range.ptr() as u64]);
+    let wire = enc_cmd("vkCmdClearColorImage", &args, &Identity);
+    let d = decode_command(&mut Decoder::new(&wire), &Identity).unwrap().unwrap();
+    unsafe {
+        let p = std::ptr::read_unaligned(d.args.ptr.add(24) as *const *const f32);
+        assert_eq!((*p, *p.add(1), *p.add(2), *p.add(3)), (0.25, 0.5, 0.75, 1.0));
     }
 }

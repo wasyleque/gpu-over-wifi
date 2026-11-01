@@ -9128,7 +9128,7 @@ pub const COMMANDS: &[CommandMeta] = &[
     CommandMeta { name: "vkCmdBuildMicromapsEXT", ret: Ret::Void, class: CmdClass::FireAndForget, supported: true, first: 247, count: 3 },
     CommandMeta { name: "vkCmdBuildPartitionedAccelerationStructuresNV", ret: Ret::Void, class: CmdClass::FireAndForget, supported: true, first: 250, count: 2 },
     CommandMeta { name: "vkCmdClearAttachments", ret: Ret::Void, class: CmdClass::FireAndForget, supported: true, first: 252, count: 5 },
-    CommandMeta { name: "vkCmdClearColorImage", ret: Ret::Void, class: CmdClass::FireAndForget, supported: false, first: 257, count: 6 },
+    CommandMeta { name: "vkCmdClearColorImage", ret: Ret::Void, class: CmdClass::FireAndForget, supported: true, first: 257, count: 6 },
     CommandMeta { name: "vkCmdClearDepthStencilImage", ret: Ret::Void, class: CmdClass::FireAndForget, supported: true, first: 263, count: 6 },
     CommandMeta { name: "vkCmdControlVideoCodingKHR", ret: Ret::Void, class: CmdClass::FireAndForget, supported: true, first: 269, count: 2 },
     CommandMeta { name: "vkCmdConvertCooperativeVectorMatrixNV", ret: Ret::Void, class: CmdClass::FireAndForget, supported: true, first: 271, count: 3 },

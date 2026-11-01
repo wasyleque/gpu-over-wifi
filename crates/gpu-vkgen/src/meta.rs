@@ -286,7 +286,7 @@ pub fn compute_commands(xml: &str) -> Result<Vec<CommandRow>, String> {
         let supported = params.iter().all(|p| match (p.shape, p.elem) {
             (_, "External") | (_, "FuncPtr") if p.shape == "Pointer" => false,
             ("Value", "Scalar") | ("Value", "Handle") => p.count == 1,
-            ("Pointer", "Scalar") | ("Pointer", "Char") | ("Pointer", "Void") | ("Pointer", "Handle") | ("Pointer", "Struct") => p.ptr_depth == 1 || (p.ptr_depth == 2 && p.elem == "Char"),
+            ("Pointer", "Scalar") | ("Pointer", "Char") | ("Pointer", "Void") | ("Pointer", "Handle") | ("Pointer", "Struct") | ("Pointer", "Union") => p.ptr_depth == 1 || (p.ptr_depth == 2 && p.elem == "Char"),
             _ => false,
         }) && ret != "Other";
         let class = match classes.get(name) {
