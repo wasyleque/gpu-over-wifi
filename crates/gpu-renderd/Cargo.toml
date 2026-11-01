@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 gpu-proto = { path = "../gpu-proto" }
 gpu-wire = { path = "../gpu-wire" }
+gpu-vkcodec = { path = "../gpu-vkcodec" }

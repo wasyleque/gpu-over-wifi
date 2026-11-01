@@ -15,6 +15,8 @@ use gpu_proto::stype::lookup;
 use crate::handler::{GpuBackend, ERR_UNKNOWN};
 use crate::vk::chain::{build_chain, PNEXT_OFFSET};
 use crate::vk::handles::{Handle, HandleTable};
+use crate::vk::registry::Entry;
+use crate::vk::replay::Replayer;
 use crate::vk::loader::{
     GlobalFns, InstanceFns, LibVulkan, VkExtensionProperties, VkInstance, VkPhysicalDevice, GLOBAL_CALLS,
 };
@@ -52,6 +54,7 @@ pub struct VulkanBackend {
     global: GlobalFns,
     instances: HandleTable<InstanceEntry>,
     pdevs: HandleTable<PdevEntry>,
+    replay: Replayer,
 }
 
 // SAFETY: surowe wskaźniki to uchwyty Vulkana, których funkcje instancyjne wolno wołać z dowolnego wątku
@@ -107,6 +110,7 @@ impl VulkanBackend {
         let lib = Arc::new(LibVulkan::load().map_err(|_| VK_ERROR_INITIALIZATION_FAILED)?);
         let global = GlobalFns::load(&lib).map_err(|_| VK_ERROR_INITIALIZATION_FAILED)?;
         Ok(VulkanBackend {
+            replay: Replayer::new(lib.clone()),
             lib,
             global,
             instances: HandleTable::with_tag(MAX_INSTANCES, 1),
@@ -240,7 +244,11 @@ impl GpuBackend for VulkanBackend {
             Err(_) => return Err(VK_ERROR_INITIALIZATION_FAILED),
         };
         match self.instances.insert(InstanceEntry { raw, fns, pdevs: Vec::new() }) {
-            Ok(h) => Ok(h.raw()),
+            Ok(h) => {
+                self.replay.set_instance(raw);
+                let _ = self.replay.registry.register(h.raw(), Entry { kind: "VkInstance", real: raw as u64, parent: 0, size: 0 });
+                Ok(h.raw())
+            }
             Err(_) => {
                 // SAFETY: instancja została dopiero co utworzona i nie ma jeszcze żadnych obiektów potomnych.
                 unsafe { (fns.destroy_instance)(raw, std::ptr::null()) };
@@ -251,8 +259,11 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_instance(&mut self, instance: u64) -> Result<(), i32> {
         let entry = self.instances.remove(Handle(instance)).ok_or(ERR_UNKNOWN)?;
+        self.replay.destroy_devices();
+        self.replay.registry.unregister(instance);
         for p in &entry.pdevs {
             self.pdevs.remove(*p);
+            self.replay.registry.unregister(p.raw());
         }
         // SAFETY: instancja jest ważna i wyjęta z tablicy, więc nikt jej już nie użyje.
         unsafe { (entry.fns.destroy_instance)(entry.raw, std::ptr::null()) };
@@ -278,6 +289,7 @@ impl GpuBackend for VulkanBackend {
         let mut handles = Vec::new();
         for p in v.into_iter().take(n as usize) {
             let h = self.pdevs.insert(PdevEntry { raw: p, instance: Handle(instance) }).map_err(|_| ERR_UNKNOWN)?;
+            let _ = self.replay.registry.register(h.raw(), Entry { kind: "VkPhysicalDevice", real: p as u64, parent: 0, size: 0 });
             handles.push(h);
         }
         if let Some(e) = self.instances.get_mut(Handle(instance)) {
@@ -296,6 +308,22 @@ impl GpuBackend for VulkanBackend {
             // Warianty bez `2` składa ICD z odpowiedzi `*2`.
             _ => Err(ERR_UNKNOWN),
         }
+    }
+
+    fn execute(&mut self, batch: &[u8]) -> Result<(), i32> {
+        self.replay.execute(batch)
+    }
+
+    fn query(&mut self, data: &[u8]) -> Result<Vec<u8>, i32> {
+        self.replay.query(data)
+    }
+
+    fn mem_write(&mut self, memory: u64, offset: u64, data: &[u8]) -> Result<(), i32> {
+        self.replay.mem_write(memory, offset, data)
+    }
+
+    fn mem_read(&mut self, memory: u64, offset: u64, len: u32) -> Result<Vec<u8>, i32> {
+        self.replay.mem_read(memory, offset, len)
     }
 
     fn device_extensions(&mut self, pdev: u64) -> Result<Vec<(String, u32)>, i32> {

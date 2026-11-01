@@ -243,6 +243,110 @@ pub unsafe fn encode_command(opcode: u16, args: *const u8, enc: &mut Encoder, ct
     encode_struct(&cmd.as_struct(), args, enc, ctx)
 }
 
+/// Wartość całkowita pod ścieżką (np. `pAllocateInfo->allocationSize`) w parametrach polecenia.
+///
+/// # Safety
+/// `args` musi wskazywać na sloty parametrów polecenia `cmd` z poprawnymi wskaźnikami.
+pub unsafe fn arg_uint(cmd: &gpu_proto::meta::CommandMeta, args: *const u8, path: &str) -> Option<u64> {
+    // Parametr-wartość (np. `size`) albo ścieżka przez wskaźnik; sloty mają 8 B, więc czytamy z maską rozmiaru.
+    let st = cmd.as_struct();
+    if let Some(v) = read_uint(&st, args, path) {
+        return Some(v);
+    }
+    let m = cmd.params().iter().find(|m| m.name == path && m.shape == Shape::Value && m.count == 1)?;
+    let v = std::ptr::read_unaligned(args.add(m.offset as usize) as *const u64);
+    Some(if m.elem_size >= 8 { v } else { v & ((1u64 << (m.elem_size * 8)) - 1) })
+}
+
+/// Wyjściowe uchwyty polecenia (parametry wskaźnikowe nie-const na uchwyty): (typ, adres tablicy, liczba).
+///
+/// # Safety
+/// Jak `arg_uint`.
+pub unsafe fn out_handles(cmd: &gpu_proto::meta::CommandMeta, args: *const u8) -> Result<Vec<(&'static str, *mut u64, usize)>, CodecError> {
+    let st = cmd.as_struct();
+    let mut out = Vec::new();
+    for m in cmd.params() {
+        if m.shape != Shape::Pointer || m.is_const || m.elem != Elem::Handle || m.ptr_depth != 1 {
+            continue;
+        }
+        let p = std::ptr::read_unaligned(args.add(m.offset as usize) as *const *mut u64);
+        if p.is_null() {
+            continue;
+        }
+        let get = |name: &str| read_uint(&st, args, name);
+        let n = if m.len.is_empty() { 1 } else { eval_len(m.len, &get)?.count.unwrap_or(1) };
+        if n > MAX_ELEMS {
+            return Err(CodecError::Limit("liczba elementów"));
+        }
+        out.push((m.type_name, p, n as usize));
+    }
+    Ok(out)
+}
+
+/// Koduje wyjściowe parametry danych (wskaźniki nie-const, poza uchwytami) po wykonaniu polecenia.
+///
+/// # Safety
+/// Jak `arg_uint`.
+pub unsafe fn encode_out_params(cmd: &gpu_proto::meta::CommandMeta, args: *const u8, enc: &mut Encoder, ctx: &dyn Ctx) -> Result<(), CodecError> {
+    let st = cmd.as_struct();
+    for m in cmd.params() {
+        if m.shape == Shape::Pointer && !m.is_const && m.elem != Elem::Handle && m.ptr_depth == 1 {
+            enc_ptr(&st, m, args, enc, ctx, 0)?;
+        }
+    }
+    Ok(())
+}
+
+/// Dekoduje wyniki z `encode_out_params` do pamięci klienta wskazanej przez parametry `args`.
+/// Obsługuje skalary, bajty i struktury bez wskaźników i bez łańcucha `pNext` (np. `VkMemoryRequirements`).
+///
+/// # Safety
+/// `args` musi wskazywać na sloty parametrów polecenia `cmd`; wskaźniki wyjściowe na zapisywalną pamięć klienta.
+pub unsafe fn decode_out_params(cmd: &gpu_proto::meta::CommandMeta, args: *const u8, dec: &mut Decoder) -> Result<(), CodecError> {
+    let st = cmd.as_struct();
+    for m in cmd.params() {
+        if !(m.shape == Shape::Pointer && !m.is_const && m.elem != Elem::Handle && m.ptr_depth == 1) {
+            continue;
+        }
+        if dec.get_u8()? == 0 {
+            continue;
+        }
+        let dst = std::ptr::read_unaligned(args.add(m.offset as usize) as *const *mut u8);
+        let get = |name: &str| read_uint(&st, args, name);
+        let n = if m.len.is_empty() { 1 } else { eval_len(m.len, &get)?.count.unwrap_or(1) };
+        match m.elem {
+            Elem::Scalar | Elem::Char | Elem::Void => {
+                let size = if m.elem == Elem::Void { 1 } else { m.elem_size as u64 };
+                let c = dec.get_varint()?;
+                let b = dec.get_bytes()?;
+                if c != n || b.len() as u64 != n * size {
+                    return Err(CodecError::Limit("rozmiar wyniku"));
+                }
+                std::ptr::copy_nonoverlapping(b.as_ptr(), dst, b.len());
+            }
+            Elem::Struct => {
+                let sm = meta_of(m.type_name)?;
+                let c = dec.get_varint()?;
+                if c != n {
+                    return Err(CodecError::Limit("liczba wyników"));
+                }
+                for i in 0..n as usize {
+                    let d = decode_struct(sm, dec, &Identity)?;
+                    // Tylko struktury bez wskaźników: kopiujemy ciało, zachowując sType i pNext klienta.
+                    if sm.members().iter().any(|x| x.shape == Shape::Pointer && std::ptr::read_unaligned(d.ptr.add(x.offset as usize) as *const usize) != 0) {
+                        return Err(CodecError::Unsupported(format!("wynik {} ze wskaźnikiem", sm.name)));
+                    }
+                    let header = if sm.members().first().is_some_and(|x| x.name == "sType") { 16 } else { 0 };
+                    let at = dst.add(i * m.elem_size as usize);
+                    std::ptr::copy_nonoverlapping(d.ptr.add(header), at.add(header), sm.size as usize - header);
+                }
+            }
+            _ => return Err(CodecError::Unsupported(format!("{}.{}: rodzaj wyniku", cmd.name, m.name))),
+        }
+    }
+    Ok(())
+}
+
 // ======================= dekoder =======================
 
 /// Pamięć, w której dekoder odtwarza struktury; adresy bloków są stabilne do zwolnienia areny.
