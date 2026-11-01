@@ -5,6 +5,7 @@
 
 mod layout;
 mod structs;
+mod stype;
 
 use std::collections::BTreeMap;
 

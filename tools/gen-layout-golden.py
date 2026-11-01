@@ -47,3 +47,27 @@ with tempfile.TemporaryDirectory() as d:
 os.makedirs(f"{ROOT}/crates/gpu-vkgen/tests/data", exist_ok=True)
 open(f"{ROOT}/crates/gpu-vkgen/tests/data/layout-golden.tsv", "w").write(out)
 print(f"struktur: {len(structs)}, linii: {out.count(chr(10))}, bajtow: {len(out)}")
+
+# --- wartości VK_STRUCTURE_TYPE_* z kompilatora (do weryfikacji tablicy sType) ---
+stypes = sorted(set(re.findall(r'^\s+(VK_STRUCTURE_TYPE_\w+)\s*=', core, re.M)))
+names = list(stypes)
+for _ in range(12):  # stałe z sekcji opcjonalnych (beta) kompilator zgłasza jako niezadeklarowane
+    c = ["#include <stdio.h>", '#include "vulkan/vulkan_core.h"', "int main(void) {"]
+    c += ['  printf("%s\\t%%u\\n", (unsigned)%s);' % (n, n) for n in names]
+    c.append("  return 0; }")
+    with tempfile.TemporaryDirectory() as d:
+        src, exe = f"{d}/s.c", f"{d}/s"
+        open(src, "w").write("\n".join(c))
+        r = subprocess.run(["gcc", "-std=c11", f"-I{HDR}", src, "-o", exe], capture_output=True, text=True)
+        if r.returncode == 0:
+            out2 = subprocess.run([exe], capture_output=True, text=True, check=True).stdout
+            break
+    missing = set(re.findall(r"[\u2018'](VK_STRUCTURE_TYPE_\w+)[\u2019'] undeclared", r.stderr))
+    if not missing:
+        print(r.stderr[:2000]); sys.exit(1)
+    names = [n for n in names if n not in missing]
+else:
+    print("nie udało się skompilować"); sys.exit(1)
+stypes = names
+open(f"{ROOT}/crates/gpu-vkgen/tests/data/stype-golden.tsv", "w").write(out2)
+print(f"stałych sType: {len(stypes)}")
