@@ -16,6 +16,8 @@ pub struct Member {
     /// Wymiary tablicy stałej długości w kolejności z XML: `[3][4]` => ["3", "4"],
     /// `[VK_UUID_SIZE]` => ["VK_UUID_SIZE"]. Pusta, gdy to nie tablica.
     pub array_dims: Vec<String>,
+    /// Szerokość pola bitowego (`mask:8` => Some(8)); `None` dla zwykłych pól.
+    pub bit_width: Option<u32>,
     /// Surowa wartość atrybutu `len`, np. `enabledLayerCount,null-terminated`.
     pub len: Option<String>,
     /// Pierwszy element atrybutu `optional` równy `true` (`false,true` => false).
@@ -84,6 +86,7 @@ pub fn parse_structs(xml: &str) -> Result<Vec<StructDef>, String> {
             let mut is_const = false;
             let mut ptr_depth = 0u8;
             let mut array_dims: Vec<String> = Vec::new();
+            let mut bit_width: Option<u32> = None;
             let len = member_node.attribute("len").map(|s| s.to_string());
             let optional = member_node
                 .attribute("optional")
@@ -144,6 +147,10 @@ pub fn parse_structs(xml: &str) -> Result<Vec<StructDef>, String> {
                         }
                     }
                     array_dims = dims;
+                    bit_width = array_text.trim_start().strip_prefix(':').and_then(|r| {
+                        let digits: String = r.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                        digits.parse().ok()
+                    });
                 }
             }
             
@@ -153,6 +160,7 @@ pub fn parse_structs(xml: &str) -> Result<Vec<StructDef>, String> {
                 ptr_depth,
                 is_const,
                 array_dims,
+                bit_width,
                 len,
                 optional,
                 values,
@@ -363,5 +371,20 @@ mod tests {
         assert!(all.len() >= 1700, "oczekiwano >= 1700 struktur i unii, jest {}", all.len());
         assert!(all.iter().filter(|s| s.alias_of.is_some()).count() >= 250);
         assert!(all.iter().all(|s| !s.name.is_empty() && s.members.iter().all(|m| !m.name.is_empty() && !m.ty.is_empty())));
+    }
+
+    #[test]
+    fn bitfield_width_is_parsed() {
+        let xml = r#"<registry><types><type category="struct" name="VkB">
+          <member><type>uint32_t</type> <name>index</name>:24</member>
+          <member><type>uint32_t</type> <name>mask</name>:8</member>
+          <member><type>uint32_t</type> <name>plain</name></member>
+        </type></types></registry>"#;
+        let all = parse_structs(xml).unwrap();
+        let b = &all[0];
+        assert_eq!(b.members[0].bit_width, Some(24));
+        assert_eq!(b.members[1].bit_width, Some(8));
+        assert_eq!(b.members[2].bit_width, None);
+        assert!(b.members[0].array_dims.is_empty());
     }
 }
