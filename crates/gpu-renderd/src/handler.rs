@@ -211,7 +211,14 @@ impl<B: GpuBackend> Session<B> {
                     code: ERR_PROTOCOL,
                     message: "already authenticated".to_string(),
                 },
-                Request::SessionId => Response::Handle(self.session_id),
+                Request::SessionId => {
+                    // Każde zapytanie tworzy świeży kanał wideo (nowy swapchain): poprzedni zamyka się razem z jego połączeniem.
+                    let (id, tx) = crate::videohub::new_session();
+                    crate::videohub::forget(self.session_id);
+                    self.session_id = id;
+                    self.video_tx = tx;
+                    Response::Handle(id)
+                }
                 Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
                 Request::PresentFrame { memory, len, seq, width, height, format } => {
                     let r = self.present_frame(memory, len, seq, width, height, format);
@@ -782,6 +789,19 @@ mod tests {
         assert_eq!((h.seq, h.width, h.height, h.format, h.codec, h.payload_len), (5, 2, 2, PixelFormat::Bgra8, Codec::Raw, 16));
         assert_eq!(&payload[28..], &[7u8; 16][..]);
         assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: 0 }));
+    }
+
+    #[test]
+    fn every_session_id_request_opens_a_fresh_video_channel_and_closes_the_previous_one() {
+        let mut s = stream_session(None);
+        let Some(Response::Handle(a)) = s.handle_request(Request::SessionId) else { panic!() };
+        let rx_a = crate::videohub::claim(a).unwrap();
+        let Some(Response::Handle(b)) = s.handle_request(Request::SessionId) else { panic!() };
+        assert_ne!(a, b);
+        assert!(rx_a.recv().is_err(), "stary kanał jest zamknięty, więc jego połączenie wideo się kończy");
+        let rx_b = crate::videohub::claim(b).unwrap();
+        s.handle_request(Request::PresentFrame { memory: 7, len: 4, seq: 1, width: 1, height: 1, format: 2 });
+        assert!(rx_b.try_recv().is_ok(), "ramki idą nowym kanałem");
     }
 
     #[test]

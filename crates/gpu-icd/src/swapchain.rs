@@ -8,7 +8,8 @@ use std::ffi::c_void;
 
 use gpu_proto::meta::find_struct;
 
-use crate::fwd::exec_named;
+use crate::fwd::{exec_named, exec_named_async};
+use crate::video::VideoThread;
 use crate::present::{rgba_to_bgra, Presenter};
 use crate::sbuild::S;
 use crate::{lock, with_local, InstState, InstanceObj, CURRENT};
@@ -35,6 +36,8 @@ pub struct Swapchain {
     surface: u64,
     next: usize,
     frames: u64,
+    /// Połączenie wideo (asynchroniczny `Present`); `None` = tryb synchroniczny (odczyt w wątku aplikacji).
+    video: Option<VideoThread>,
 }
 
 fn state() -> Option<&'static InstanceObj> {
@@ -156,8 +159,17 @@ unsafe fn create_inner(st: &mut InstState, dev: u64, info: *const u8) -> Result<
     let fci = S::new("VkFenceCreateInfo");
     let mut fence = 0u64;
     exec_named(st, "vkCreateFence", &mut [dev, fci.p(), 0, &mut fence as *mut u64 as u64]);
+    // Połączenie wideo: serwer wypycha ramki, a `Present` nie czeka na odczyt (zapas: GPU_ICD_SYNC_PRESENT=1).
+    let video = if std::env::var("GPU_ICD_SYNC_PRESENT").is_ok() {
+        None
+    } else {
+        match st.client.call(&gpu_proto::msg::Request::SessionId) {
+            Ok(gpu_proto::msg::Response::Handle(session)) => VideoThread::start(&st.addr, &st.token, session, surface, w, h).map_err(|e| eprintln!("gpu-icd: wideo niedostępne, tryb synchroniczny: {e}")).ok(),
+            _ => None,
+        }
+    };
     let id = st.alloc_id();
-    st.swapchains.insert(id, Swapchain { device: dev, queue, width: w, height: h, format, images, cbs, fence, readback_mem, presenter: None, surface, next: 0, frames: 0 });
+    st.swapchains.insert(id, Swapchain { device: dev, queue, width: w, height: h, format, images, cbs, fence, readback_mem, presenter: None, surface, next: 0, frames: 0, video });
     Ok(id)
 }
 
@@ -177,6 +189,13 @@ pub unsafe extern "C" fn destroy_swapchain(dev: u64, sc: u64, _alloc: *const c_v
     let Some(inst) = state() else { return };
     let mut st = lock(&inst.state);
     let Some(mut sw) = st.swapchains.remove(&sc) else { return };
+    if let Some(v) = sw.video.as_mut() {
+        st.flush();
+        let stats = v.stop();
+        if std::env::var("GPU_ICD_STATS").is_ok() {
+            eprintln!("gpu-icd: wideo zatrzymane po {} klatkach", stats.frames);
+        }
+    }
     exec_named(&mut st, "vkDeviceWaitIdle", &mut [dev]);
     exec_named(&mut st, "vkDestroyFence", &mut [dev, sw.fence, 0]);
     for img in &sw.images {
@@ -276,6 +295,21 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
     let mut si = S::new("VkSubmitInfo");
     si.u32("waitSemaphoreCount", nwait).u64("pWaitSemaphores", waits as u64).u64("pWaitDstStageMask", stages.as_ptr() as u64);
     si.u32("commandBufferCount", 1).u64("pCommandBuffers", &cb as *const u64 as u64);
+    if st.swapchains.get(&sc).is_some_and(|s| s.video.is_some()) {
+        // Asynchronicznie: submit kopii, oczekiwanie serwera na fence i polecenie wysłania ramki; aplikacja nie czeka.
+        let seq = st.swapchains.get_mut(&sc).map(|s| { s.frames += 1; s.frames as u32 }).unwrap_or(0);
+        if exec_named_async(st, "vkQueueSubmit", &mut [queue, 1, si.p(), fence]) < 0 {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        exec_named_async(st, "vkWaitForFences", &mut [dev, 1, &fence as *const u64 as u64, 1, WHOLE]);
+        exec_named_async(st, "vkResetFences", &mut [dev, 1, &fence as *const u64 as u64]);
+        st.flush();
+        let format = if matches!(fmt, 37 | 43) { 2u8 } else { 1u8 };
+        let req = gpu_proto::msg::Request::PresentFrame { memory: readback, len: (w * h * 4), seq, width: w as u16, height: h as u16, format };
+        st.stats.frames += 1;
+        st.stats.t_wait_ns += t0.elapsed().as_nanos() as u64;
+        return if st.client.send(&req).is_ok() { 0 } else { VK_ERROR_INITIALIZATION_FAILED };
+    }
     if exec_named(st, "vkQueueSubmit", &mut [queue, 1, si.p(), fence]) < 0 {
         return VK_ERROR_INITIALIZATION_FAILED;
     }

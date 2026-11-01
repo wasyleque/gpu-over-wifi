@@ -210,6 +210,15 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
 /// # Safety
 /// Sloty muszą zawierać poprawne wartości parametrów polecenia (wskaźniki do żywej pamięci).
 pub(crate) unsafe fn exec(st: &mut InstState, op: u16, slots: &mut [u64]) -> u64 {
+    exec_with(st, op, slots, false)
+}
+
+/// Jak `exec`; `force_async` wymusza drogę partii (bez odpowiedzi) także dla poleceń z oczekiwaniem (np. `vkWaitForFences`),
+/// gdy wynik nie jest potrzebny, a serwer ma je tylko wykonać w kolejności.
+///
+/// # Safety
+/// Jak `exec`.
+pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], force_async: bool) -> u64 {
     let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
     let params = cmd.params();
     let fail = |e: i32| -> u64 { e as u32 as u64 };
@@ -285,7 +294,7 @@ pub(crate) unsafe fn exec(st: &mut InstState, op: u16, slots: &mut [u64]) -> u64
 
     st.stats.commands += 1;
     let has_data_out = params.iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1);
-    if cmd.class != CmdClass::Sync && !has_data_out {
+    if force_async || (cmd.class != CmdClass::Sync && !has_data_out) {
         st.batch.extend(bytes);
         if st.batch.len() > BATCH_FLUSH {
             st.flush();
@@ -400,5 +409,16 @@ impl InstState {
     /// Właściwości pamięci zdalnej karty (`MemoryProperties2`, z pamięci podręcznej).
     pub(crate) fn query_props(&mut self, pdev: u64) -> Option<Vec<u8>> {
         self.query(pdev, gpu_proto::msg::PdFunc::MemoryProperties2, 0, 0, &[])
+    }
+}
+
+/// Jak `exec_named`, ale bez czekania na wynik (polecenie trafia do partii).
+///
+/// # Safety
+/// Jak `exec`.
+pub(crate) unsafe fn exec_named_async(st: &mut InstState, name: &str, slots: &mut [u64]) -> i32 {
+    match gpu_proto::meta::find_command(name) {
+        Some((op, c)) if c.params().len() == slots.len() => exec_with(st, op, slots, true) as u32 as i32,
+        _ => VK_ERROR_INITIALIZATION_FAILED,
     }
 }

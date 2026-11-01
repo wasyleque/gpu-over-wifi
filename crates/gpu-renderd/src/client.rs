@@ -43,6 +43,32 @@ impl Client {
         }
     }
 
+    /// Ustawia limit czasu odczytu (`None` = bez limitu, np. dla połączenia wideo).
+    pub fn set_read_timeout(&mut self, d: Option<Duration>) -> Result<(), ClientError> {
+        self.stream.set_read_timeout(d)?;
+        Ok(())
+    }
+
+    /// Kopia gniazda do zamknięcia połączenia z innego wątku (odblokowuje oczekujący `recv_frame`).
+    pub fn shutdown_handle(&self) -> Result<TcpStream, ClientError> {
+        Ok(self.stream.try_clone()?)
+    }
+
+    /// Czeka na jedną surową ramkę (np. ramkę obrazu z połączenia wideo), bez dekodowania jako `Response`.
+    pub fn recv_frame(&mut self) -> Result<Frame, ClientError> {
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            if let Some(f) = self.reader.next_frame().map_err(ClientError::Frame)? {
+                return Ok(f);
+            }
+            let n = self.stream.read(&mut buf)?;
+            if n == 0 {
+                return Err(ClientError::Closed);
+            }
+            self.reader.push(&buf[..n]);
+        }
+    }
+
     /// Wysyła żądanie bez czekania na odpowiedź (potokowanie; kolejność w strumieniu jest zachowana).
     pub fn send(&mut self, req: &Request) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);

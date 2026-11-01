@@ -22,6 +22,7 @@ mod fwd;
 mod local;
 mod present;
 mod swapchain;
+mod video;
 mod sbuild;
 mod wsi;
 #[rustfmt::skip]
@@ -78,6 +79,9 @@ struct InstState {
     swapchains: HashMap<u64, swapchain::Swapchain>,
     /// Urządzenie (identyfikator) -> zdalna karta fizyczna (do wyboru typów pamięci).
     device_pdev: HashMap<u64, u64>,
+    /// Adres i token demona (do otwarcia połączenia wideo).
+    addr: String,
+    token: Vec<u8>,
 }
 
 /// Lokalny sterownik do prezentacji, otwierany leniwie (raz); `None` gdy go nie ma.
@@ -282,6 +286,8 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             stats: fwd::Stats::default(),
             swapchains: HashMap::new(),
             device_pdev: HashMap::new(),
+            addr: addr.clone(),
+            token: token.clone(),
         }),
     }));
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
