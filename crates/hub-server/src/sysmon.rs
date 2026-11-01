@@ -118,7 +118,7 @@ mod tests {
         let p = cpu_percent(&prev, &cur);
         assert_eq!(p.len(), 3);
         assert!((p[0] - 75.0).abs() < 0.01, "zbiorczo: {}", p[0]); // 150 busy z 200
-        assert!((p[1] - 90.9).abs() < 0.1, "cpu0: {}", p[1]); // 150 z 165... (160+80-90)/(500+... )
+        assert!((p[1] - 93.75).abs() < 0.01, "cpu0: {}", p[1]); // busy 90->240 (+150), total 500->660 (+160)
         assert!(p[2].abs() < 0.01, "cpu1 bezczynny: {}", p[2]);
     }
 
