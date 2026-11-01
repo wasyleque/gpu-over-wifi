@@ -132,6 +132,42 @@ mod manifest_tests {
     }
 }
 
+/// Katalogi bibliotek sterowników hosta w kontenerze Steam Linux Runtime (pressure-vessel).
+const LIBRARY_DIRS: &[&str] = &["/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/run/host/usr/lib"];
+
+/// Kandydaci na ścieżkę biblioteki sterownika: nazwa z manifestu, a dla samej nazwy (bez `/`) także znane katalogi kontenera.
+fn library_candidates(lib_path: &Path) -> Vec<PathBuf> {
+    let mut v = vec![lib_path.to_path_buf()];
+    if let Some(name) = lib_path.to_str().filter(|n| !n.contains('/')) {
+        v.extend(LIBRARY_DIRS.iter().map(|d| Path::new(d).join(name)));
+    }
+    v
+}
+
+fn load_icd_library(lib_path: &Path) -> Result<LibVulkan, String> {
+    let mut errors = Vec::new();
+    for c in library_candidates(lib_path) {
+        match LibVulkan::load_from_symbol(&c.to_string_lossy(), c"vk_icdGetInstanceProcAddr") {
+            Ok(l) => return Ok(l),
+            Err(e) => errors.push(format!("{}: {e:?}", c.display())),
+        }
+    }
+    Err(errors.join(" | "))
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+
+    #[test]
+    fn bare_library_names_also_try_container_directories_but_paths_do_not() {
+        let c = library_candidates(Path::new("libvulkan_intel.so"));
+        assert_eq!(c[0], Path::new("libvulkan_intel.so"));
+        assert!(c.contains(&PathBuf::from("/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libvulkan_intel.so")));
+        assert_eq!(library_candidates(Path::new("/opt/x/libvulkan_intel.so")), vec![PathBuf::from("/opt/x/libvulkan_intel.so")]);
+    }
+}
+
 pub struct LocalVulkan {
     lib: LibVulkan,
     pub instance: VkInstance,
@@ -246,7 +282,7 @@ impl LocalVulkan {
         let json = std::fs::read_to_string(manifest).map_err(|e| e.to_string())?;
         let dir = manifest.parent().unwrap_or(Path::new("."));
         let lib_path = library_path_from_manifest(&json, dir).ok_or("brak library_path w manifeście")?;
-        let lib = LibVulkan::load_from_symbol(&lib_path.to_string_lossy(), c"vk_icdGetInstanceProcAddr").map_err(|e| format!("{e:?}"))?;
+        let lib = load_icd_library(&lib_path)?;
 
         // Rozszerzenia instancji (funkcja globalna: instancja null).
         let list = Self::fnptr(&lib, std::ptr::null_mut(), "vkEnumerateInstanceExtensionProperties").ok_or("brak vkEnumerateInstanceExtensionProperties")?;

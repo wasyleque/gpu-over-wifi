@@ -2,6 +2,11 @@
 //! Funkcje czyste, bez Vulkana, więc w pełni testowalne.
 
 /// Rozszerzenia instancji związane z powierzchnią: (nazwa, wersja specyfikacji).
+/// Rozszerzenia instancji ogłaszane zawsze. `VK_KHR_get_physical_device_properties2` jest potrzebne, żeby aplikacja (np. gra
+/// ze Steama, gdy lokalny sterownik jest dla niej ukryty) mogła je włączyć i dostać funkcje `vkGetPhysicalDevice*2KHR`,
+/// które ICD obsługuje.
+pub const BASE_INSTANCE_EXTENSIONS: &[(&str, u32)] = &[("VK_KHR_get_physical_device_properties2", 2)];
+
 pub const SURFACE_EXTENSIONS: &[(&str, u32)] = &[
     ("VK_KHR_surface", 25),
     ("VK_KHR_wayland_surface", 6),
@@ -29,6 +34,13 @@ pub fn advertised_surface_extensions(local: &[String]) -> Vec<(&'static str, u32
         return Vec::new();
     }
     SURFACE_EXTENSIONS.iter().filter(|(n, _)| local.iter().any(|l| l == n)).copied().collect()
+}
+
+/// Wszystkie ogłaszane rozszerzenia instancji: stałe plus powierzchnie dostępne lokalnie.
+pub fn advertised_instance_extensions(local: &[String]) -> Vec<(&'static str, u32)> {
+    let mut v: Vec<(&'static str, u32)> = BASE_INSTANCE_EXTENSIONS.to_vec();
+    v.extend(advertised_surface_extensions(local));
+    v
 }
 
 /// Formaty powierzchni: przecięcie z formatami 8-bitowymi, które rozumie DXVK; kolejność B8G8R8A8 pierwsza.
@@ -113,5 +125,19 @@ mod tests {
         assert!(!patch_capabilities(&mut [0u8; 51]));
         assert!(!patch_capabilities(&mut [0u8; 53]));
         assert!(!patch_capabilities(&mut []));
+    }
+}
+
+#[cfg(test)]
+mod instance_ext_tests {
+    use super::*;
+
+    #[test]
+    fn base_extension_is_always_there_and_surfaces_need_the_local_driver() {
+        let none = advertised_instance_extensions(&[]);
+        assert_eq!(none, vec![("VK_KHR_get_physical_device_properties2", 2)]);
+        let local = vec!["VK_KHR_surface".to_string(), "VK_KHR_xcb_surface".to_string()];
+        let names: Vec<&str> = advertised_instance_extensions(&local).iter().map(|e| e.0).collect();
+        assert_eq!(names, vec!["VK_KHR_get_physical_device_properties2", "VK_KHR_surface", "VK_KHR_xcb_surface"]);
     }
 }

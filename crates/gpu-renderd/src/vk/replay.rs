@@ -73,6 +73,18 @@ pub struct Replayer {
 // SAFETY: wskaźniki to uchwyty i adresy odwzorowań sterownika używane wyłącznie przez wątek sesji.
 unsafe impl Send for Replayer {}
 
+/// `GPU_RENDERD_TRACE=<plik>`: dopisuje nazwę każdego polecenia tuż PRZED wykonaniem w sterowniku, więc po awarii sterownika
+/// ostatnia linia wskazuje sprawcę (diagnostyka; wolne, tylko do debugowania).
+fn trace_command(name: &str) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(path) = PATH.get_or_init(|| std::env::var("GPU_RENDERD_TRACE").ok()) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{name}");
+        }
+    }
+}
+
 fn code(e: CodecError) -> i32 {
     eprintln!("replay: {e:?}");
     ERR_UNKNOWN
@@ -166,6 +178,7 @@ impl Replayer {
         let outs = unsafe { out_handles(cmd, args) }.map_err(code)?;
         let ids: Vec<Vec<u64>> = outs.iter().map(|(_, p, n)| (0..*n).map(|i| unsafe { std::ptr::read_unaligned(p.add(i)) }).collect()).collect();
         let size = if cmd.name == "vkAllocateMemory" { unsafe { arg_uint(cmd, args, "pAllocateInfo->allocationSize") }.unwrap_or(0) } else { 0 };
+        trace_command(cmd.name);
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
         self.last_ret = rax;

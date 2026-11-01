@@ -202,7 +202,20 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             }
         };
     }
-    exec(&mut st, op, &mut slots)
+    let r = exec(&mut st, op, &mut slots);
+    trace(cmd.name, r);
+    r
+}
+
+/// `GPU_ICD_TRACE=<plik>`: dopisuje nazwę każdego polecenia aplikacji i zwróconą wartość (diagnostyka awarii gier).
+fn trace(name: &str, ret: u64) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(path) = PATH.get_or_init(|| std::env::var("GPU_ICD_TRACE").ok()) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{name} -> {:#x}", ret as u32 as i32);
+        }
+    }
 }
 
 /// Wykonuje polecenie o kodzie `op` z gotowymi slotami parametrów (tak samo dla aplikacji i dla ICD, które wydaje własne polecenia).

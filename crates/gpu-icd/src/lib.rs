@@ -106,7 +106,7 @@ fn with_local<R>(f: impl FnOnce(&local::LocalVulkan) -> R) -> Option<R> {
 
 /// Rozszerzenia instancji, które ogłaszamy (powierzchnie okien, o ile ma je lokalny sterownik).
 fn instance_extensions() -> Vec<(&'static str, u32)> {
-    with_local(|l| wsi::advertised_surface_extensions(&l.enabled_instance_exts)).unwrap_or_default()
+    with_local(|l| wsi::advertised_instance_extensions(&l.enabled_instance_exts)).unwrap_or_else(|| wsi::advertised_instance_extensions(&[]))
 }
 
 /// Jedyna instancja procesu (M2a); polecenia generyczne szukają przez nią połączenia.
@@ -239,7 +239,23 @@ unsafe extern "C" fn enumerate_instance_extension_properties(layer: *const c_cha
     }
 }
 
+/// `GPU_ICD_LOG=<plik>`: przekierowuje stderr procesu do pliku (gry uruchamiane ze Steama nie pokazują terminala).
+fn redirect_stderr_to_log() {
+    extern "C" {
+        fn dup2(old: i32, new: i32) -> i32;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(path) = std::env::var("GPU_ICD_LOG") else { return };
+        let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(path) else { return };
+        use std::os::fd::AsRawFd;
+        // SAFETY: deskryptor pliku jest ważny; po dup2 stderr wskazuje na ten sam plik (oryginał zamyka Drop).
+        unsafe { dup2(f.as_raw_fd(), 2) };
+    });
+}
+
 unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out: *mut *mut InstanceObj) -> VkResult {
+    redirect_stderr_to_log();
     if info.is_null() || out.is_null() {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
