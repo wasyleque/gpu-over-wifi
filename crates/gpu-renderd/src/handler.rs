@@ -99,13 +99,13 @@ impl<B: GpuBackend> Session<B> {
                     {
                         return Response::Error {
                             code: ERR_PROTOCOL,
-                            message: "bad version or empty token".to_string(),
+                            message: "authentication failed".to_string(),
                         };
                     }
                     if self.token.len() != token.len() {
                         return Response::Error {
                             code: ERR_PROTOCOL,
-                            message: "token length mismatch".to_string(),
+                            message: "authentication failed".to_string(),
                         };
                     }
                     let equal = self
@@ -117,7 +117,7 @@ impl<B: GpuBackend> Session<B> {
                     if !equal {
                         return Response::Error {
                             code: ERR_PROTOCOL,
-                            message: "token mismatch".to_string(),
+                            message: "authentication failed".to_string(),
                         };
                     }
                     self.authed = true;
