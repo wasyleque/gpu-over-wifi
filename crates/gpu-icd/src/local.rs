@@ -81,13 +81,13 @@ fn ext_names(buf: &[u8], n: usize) -> Vec<String> {
 }
 
 impl LocalVulkan {
-    fn fnptr(lib: &LibVulkan, inst: VkInstance, name: &str) -> Option<*const c_void> {
+    pub(crate) fn fnptr(lib: &LibVulkan, inst: VkInstance, name: &str) -> Option<*const c_void> {
         let c = CString::new(name).ok()?;
         // SAFETY: `inst` jest null albo ważną instancją tego sterownika.
         unsafe { lib.proc_addr(inst, &c) }
     }
 
-    fn call(&self, name: &str, ints: &[u64]) -> Option<i32> {
+    pub(crate) fn call(&self, name: &str, ints: &[u64]) -> Option<i32> {
         let f = Self::fnptr(&self.lib, self.instance, name)?;
         // SAFETY: wskaźniki w `ints` żyją do końca wywołania; sygnatura zgodna z vk.xml.
         unsafe { call_thunk(f, ints, &[]) }.map(|r| r as u32 as i32)

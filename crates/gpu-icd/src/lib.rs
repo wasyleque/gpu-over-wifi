@@ -20,6 +20,8 @@ use gpu_renderd::handler::decode_extensions;
 
 mod fwd;
 mod local;
+mod present;
+mod sbuild;
 mod wsi;
 #[rustfmt::skip]
 mod icd_table;
