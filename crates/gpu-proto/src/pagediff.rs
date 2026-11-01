@@ -5,21 +5,25 @@
 
 pub const PAGE: usize = 4096;
 
-/// Szybki skrót strony (słowa 8-bajtowe, końcówka uzupełniona zerami). Musi być identyczny po obu stronach.
+/// Szybki skrót strony: cztery niezależne tory po 8 bajtów (bez łańcucha zależności, więc kilka razy szybszy niż jeden tor),
+/// końcówka uzupełniona zerami. Musi być identyczny po obu stronach.
 pub fn page_hash(page: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut chunks = page.chunks_exact(8); // stały rozmiar celowo: iterator + remainder
-    for c in &mut chunks {
-        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-        h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+    const K: u64 = 0x9E37_79B9_7F4A_7C15;
+    let word = |c: &[u8]| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+    let mut lanes = [0xcbf2_9ce4_8422_2325u64, 0x1000_0000_01b3, 0x9ae1_6a3b_2f90_404f, 0xc949_d7c7_509e_6557];
+    let mut blocks = page.chunks_exact(32);
+    for b in &mut blocks {
+        for (i, l) in lanes.iter_mut().enumerate() {
+            *l = (*l ^ word(&b[i * 8..])).wrapping_mul(K).rotate_left(29);
+        }
     }
-    let rest = chunks.remainder();
-    if !rest.is_empty() {
-        let mut buf = [0u8; 8];
-        buf[..rest.len()].copy_from_slice(rest);
-        h = (h ^ u64::from_le_bytes(buf)).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+    let rest = blocks.remainder();
+    let mut tail = [0u8; 32];
+    tail[..rest.len()].copy_from_slice(rest);
+    for (i, l) in lanes.iter_mut().enumerate() {
+        *l = (*l ^ word(&tail[i * 8..])).wrapping_mul(K).rotate_left(29);
     }
-    h
+    lanes.iter().fold(0u64, |h, l| (h ^ l).wrapping_mul(K).rotate_left(31))
 }
 
 /// Skróty stron wspólnie znane obu stronom dla jednego obszaru pamięci o stałym rozmiarze.
@@ -73,6 +77,20 @@ impl PageTracker {
             }
         }
         (out, false)
+    }
+
+    /// Zapis `data` pod `offset`: zapamiętuje skróty stron w całości objętych zapisem, liczone z `data` (bez czytania pamięci,
+    /// która po stronie serwera bywa wolna, bo write-combined). Strony częściowo objęte zapisem zostają bez zmian.
+    pub fn mark_data(&mut self, offset: usize, data: &[u8]) {
+        let end = offset + data.len();
+        let first = offset.div_ceil(PAGE);
+        for i in first..self.known.len() {
+            let (a, b) = self.page_range(i);
+            if b > end {
+                break;
+            }
+            self.known[i] = page_hash(&data[a - offset..b - offset]);
+        }
     }
 
     /// Strony zakresu `[from, to)` mają już u drugiej strony taką zawartość, jaką teraz ma `data` (po zapisie lub odczycie).
@@ -175,6 +193,18 @@ mod tests {
         assert!(decode_segments(&enc[..enc.len() - 1]).is_none());
         assert!(decode_segments(&[]).is_none());
         assert_eq!(decode_segments(&[0]).unwrap(), (false, vec![]));
+    }
+
+    #[test]
+    fn mark_data_records_only_fully_covered_pages_from_the_written_bytes() {
+        let mut mem = vec![0u8; PAGE * 4];
+        let mut t = PageTracker::new(mem.len());
+        // Zapis stron 1..3 (pełne) plus ogon strony 3 (niepełny).
+        let payload: Vec<u8> = (1..=255u8).cycle().take(PAGE * 2 + 100).collect();
+        mem[PAGE..PAGE + payload.len()].copy_from_slice(&payload);
+        t.mark_data(PAGE, &payload);
+        let (r, _) = t.changed(&mem, usize::MAX);
+        assert_eq!(r, vec![(PAGE * 3, PAGE * 4)], "pełne strony 1 i 2 są znane, niepełna strona 3 nie");
     }
 
     #[test]

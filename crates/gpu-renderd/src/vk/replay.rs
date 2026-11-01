@@ -308,9 +308,7 @@ impl Replayer {
         // SAFETY: zakres [offset, offset+len) mieści się w odwzorowanej pamięci o rozmiarze `e.size`.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), data.len()) };
         // Klient ma te strony w takim stanie, jaki właśnie wysłał: odczyt różnic nie odeśle ich z powrotem.
-        // SAFETY: cały odwzorowany obszar ma `e.size` bajtów.
-        let whole = unsafe { std::slice::from_raw_parts(ptr, e.size as usize) };
-        self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_synced(whole, offset as usize, end as usize);
+        self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_data(offset as usize, data);
         self.range_call("vkFlushMappedMemoryRanges", device, e.real)
     }
 

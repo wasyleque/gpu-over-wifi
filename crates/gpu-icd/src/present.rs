@@ -241,6 +241,11 @@ mod tests {
             eprintln!("POMINIĘTO: brak sterownika Intela");
             return;
         };
+        // Test sprawdza prezenter na sterowniku Mesa (laptop): sterownik NVIDII nie obsługuje tej ścieżki bez okna i pada.
+        if l.device_name.contains("NVIDIA") {
+            eprintln!("POMINIĘTO: test prezentera wymaga sterownika Mesa");
+            return;
+        }
         if !l.enabled_instance_exts.iter().any(|e| e == "VK_EXT_headless_surface") {
             eprintln!("POMINIĘTO: sterownik bez VK_EXT_headless_surface");
             return;

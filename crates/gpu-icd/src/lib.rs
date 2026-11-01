@@ -73,6 +73,8 @@ struct InstState {
     next_id: u64,
     /// Rozmiary pamięci przydzielonych na serwerze i lokalne kopie (tylko odwzorowane).
     mem_sizes: HashMap<u64, u64>,
+    /// Czy pamięć wolno odświeżać z serwera po oczekiwaniu (typ HOST_CACHED albo mała); duże pamięci write-combined czyta się wolno.
+    mem_refresh: HashMap<u64, bool>,
     /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
     gpu_dirty: bool,
     mems: HashMap<u64, fwd::Shadow>,
@@ -271,7 +273,8 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
     }
     if n_ext > 0 {
         let names = std::ptr::read_unaligned(info.add(56) as *const *const *const c_char);
-        let allowed = instance_extensions();
+        // Bez tablicy nazw żadne rozszerzenie nie jest poprawne, więc nie ruszamy lokalnego sterownika.
+        let allowed = if names.is_null() { Vec::new() } else { instance_extensions() };
         for i in 0..n_ext {
             let p = if names.is_null() { std::ptr::null() } else { *names.add(i) };
             let ok = !p.is_null() && CStr::from_ptr(p).to_str().is_ok_and(|n| allowed.iter().any(|(a, _)| *a == n));
@@ -302,6 +305,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             batch: Vec::new(),
             next_id: 1 << 20,
             mem_sizes: HashMap::new(),
+            mem_refresh: HashMap::new(),
             gpu_dirty: false,
             templates: HashMap::new(),
             mems: HashMap::new(),

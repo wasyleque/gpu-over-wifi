@@ -172,7 +172,7 @@ impl InstState {
         if !std::mem::take(&mut self.gpu_dirty) {
             return;
         }
-        let ids: Vec<u64> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, _)| *i).collect();
+        let ids: Vec<u64> = self.mems.iter().filter(|(i, s)| s.mapped && self.mem_refresh.get(i).copied().unwrap_or(true)).map(|(i, _)| *i).collect();
         for id in ids {
             loop {
                 self.flush();
@@ -320,6 +320,21 @@ unsafe fn pipeline_infos_have_flag(slots: &[u64], count_slot: usize, ptr_slot: u
     (0..count as usize).any(|i| std::ptr::read_unaligned((ptr as *const u8).add(i * size + 16) as *const u32) & PIPELINE_FAIL_ON_COMPILE_REQUIRED != 0)
 }
 
+/// Pamięci do tego rozmiaru zawsze odświeżamy po oczekiwaniu (tanie, a aplikacja może czytać wynik z dowolnego typu).
+const REFRESH_ALWAYS_BELOW: u64 = 16 * 1024 * 1024;
+
+/// Czy typ pamięci ma HOST_CACHED (0x8): z takiej pamięci aplikacje czytają wyniki GPU i ona jest szybka do odczytu.
+/// Duże pamięci bez tej flagi to sterty wysyłkowe (write-combined), z których CPU praktycznie nie czyta (natywnie też jest to wolne).
+unsafe fn is_cached_type(st: &mut InstState, slots: &[u64], cmd: &gpu_proto::meta::CommandMeta, args: *const u8) -> bool {
+    let Some(idx) = gpu_vkcodec::codec::arg_uint(cmd, args, "pAllocateInfo->memoryTypeIndex") else { return true };
+    let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
+    let Some(pdev) = st.device_pdev.get(&dev).copied() else { return true };
+    let Some(props) = st.query_props(pdev) else { return true };
+    let at = 20 + idx as usize * 8;
+    // Nieznany typ: bezpieczniej odświeżać (poprawność przed szybkością).
+    props.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8 != 0).unwrap_or(true)
+}
+
 /// Rozwija `vkUpdateDescriptorSetWithTemplate(device, set, template, pData)` do `vkUpdateDescriptorSets` z jawnymi zapisami.
 unsafe fn update_with_template(st: &mut InstState, slots: &[u64]) -> u64 {
     let (device, set, template, data) = (slots[0], slots[1], slots[2], slots[3] as *const u8);
@@ -394,6 +409,8 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let mem_id = std::ptr::read_unaligned(slots[3] as *const u64);
             let _ = id;
             st.mem_sizes.insert(mem_id, size);
+            let refresh = size <= REFRESH_ALWAYS_BELOW || is_cached_type(st, slots, cmd, args);
+            st.mem_refresh.insert(mem_id, refresh);
         }
     }
     if cmd.name == "vkCreateDescriptorUpdateTemplate" && slots[1] != 0 && slots[3] != 0 {
@@ -434,6 +451,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     if cmd.name == "vkFreeMemory" {
         st.mems.remove(&slots[1]);
         st.mem_sizes.remove(&slots[1]);
+        st.mem_refresh.remove(&slots[1]);
     }
 
     st.stats.commands += 1;
@@ -480,6 +498,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         if cmd.name == "vkAllocateMemory" && slots[3] != 0 {
             let id = std::ptr::read_unaligned(slots[3] as *const u64);
             st.mem_sizes.remove(&id);
+            st.mem_refresh.remove(&id);
             std::ptr::write_unaligned(slots[3] as *mut u64, 0);
         }
     }
