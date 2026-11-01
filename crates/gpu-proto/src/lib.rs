@@ -1,5 +1,8 @@
 //! Protokół przewodowy zdalnego GPU: ramki i tablica struktur Vulkana.
 pub mod frame;
+pub mod meta;
+#[rustfmt::skip]
+pub mod meta_table;
 pub mod msg;
 pub mod stype;
 #[rustfmt::skip]
