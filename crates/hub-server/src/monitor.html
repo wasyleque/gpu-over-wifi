@@ -1,1 +1,306 @@
-<!doctype html><meta charset="utf-8"><title>Monitor</title><body>placeholder</body>
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU Hub — monitor</title>
+<style>
+:root{--bg:#0a1017;--panel:#111a24;--panel2:#0e1620;--line:#1d2b3a;--text:#d8e4f0;--mut:#7b8ea2;
+--gpu:#3de0b0;--ram:#f2b441;--ssd:#4c7dff;--bad:#ff6b6b;--ok:#46d37a;--none:#0f1822}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;gap:16px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel2);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+.brand{font-weight:700;font-size:17px;letter-spacing:.3px}.brand small{color:var(--mut);font-weight:500;margin-left:8px}
+#model{color:var(--mut)}#model b{color:var(--text)}
+.spacer{flex:1}
+.live{font-size:12px;font-weight:700;padding:3px 10px;border-radius:99px;border:1px solid var(--line);color:var(--mut)}
+.live.on{color:var(--ok);border-color:#235a3a;background:#0d2418}.live.off{color:var(--bad);border-color:#5a2323}
+.tps{font-variant-numeric:tabular-nums}.tps b{font-size:22px;color:var(--gpu)}
+button,select,input,textarea{font:inherit;color:var(--text);background:#0d1720;border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+button{cursor:pointer;background:#16283a}button:hover{background:#1d3550}
+button.primary{background:var(--ram);color:#1a1200;border-color:var(--ram);font-weight:700}
+main{padding:16px 20px;max-width:1500px;margin:0 auto;display:grid;gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.card h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.9px;color:var(--mut);display:flex;justify-content:space-between;gap:8px}
+.card h3 span{color:var(--text);text-transform:none;letter-spacing:0;font-variant-numeric:tabular-nums}
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.big{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}.big small{font-size:13px;color:var(--mut);font-weight:500;margin-left:4px}
+.bar{height:14px;background:var(--none);border-radius:7px;overflow:hidden;display:flex;margin:8px 0;border:1px solid var(--line)}
+.bar>i{display:block;height:100%;transition:width .4s}
+.sub{color:var(--mut);font-size:12.5px}
+.k-ssd{color:var(--ssd)}.k-ram{color:var(--ram)}.k-gpu{color:var(--gpu)}
+.inf{display:grid;grid-template-columns:1fr 320px;gap:16px}
+.heatwrap{position:relative}
+canvas.heat{width:100%;display:block;image-rendering:pixelated;border-radius:8px;background:var(--none);border:1px solid var(--line)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--mut)}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;border:1px solid #0006}
+.axis{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:4px}
+.side{display:grid;gap:16px;align-content:start}
+.row{display:flex;justify-content:space-between;gap:10px;padding:2px 0}.row b{font-variant-numeric:tabular-nums}
+.charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:16px}
+canvas.ch{width:100%;height:120px;display:block}
+.cores{display:grid;grid-template-columns:repeat(16,1fr);gap:2px;margin-top:8px}.cores i{height:10px;border-radius:2px;background:var(--none)}
+.chat textarea{width:100%;min-height:68px;resize:vertical}
+.chat .ctl{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+#out{white-space:pre-wrap;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px;min-height:90px;max-height:380px;overflow:auto}
+#think{color:var(--mut);font-style:italic;white-space:pre-wrap;margin-bottom:8px}
+#auth{position:fixed;inset:0;background:#000b;display:none;place-items:center;z-index:20}
+#auth form{background:var(--panel);border:1px solid var(--line);padding:22px;border-radius:12px;width:min(420px,90vw);display:grid;gap:10px}
+.hide{display:none}
+@media(max-width:900px){.tiers,.inf{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">GPU Hub<small id="host">…</small></div>
+  <div id="model"></div>
+  <div class="spacer"></div>
+  <div class="tps" id="tpsBox"><b id="tps">0.0</b> <span class="sub">tok/s</span></div>
+  <div class="live" id="live">OFFLINE</div>
+  <button id="tokBtn" title="Zmień token">token</button>
+</header>
+<main>
+  <section class="tiers">
+    <div class="card"><h3>SSD <span id="ssdState">bezczynny</span></h3>
+      <div class="big"><span id="ssdRead">0.0</span><small>GB/s odczytu</small></div>
+      <div class="bar"><i id="ssdBar" style="background:var(--ssd);width:0"></i></div>
+      <div class="sub" id="ssdSub">cały model leży tutaj</div></div>
+    <div class="card"><h3>RAM <span id="ramTxt">–</span></h3>
+      <div class="big"><span id="ramUsed">0</span><small>GiB zajęte</small></div>
+      <div class="bar"><i id="ramBar" style="background:var(--ram);width:0"></i></div>
+      <div class="sub" id="ramSub">–</div></div>
+    <div class="card"><h3>GPU <span id="gpuTxt">–</span></h3>
+      <div class="big"><span id="gpuVram">0</span><small>GiB VRAM</small></div>
+      <div class="bar"><i id="gpuBar" style="background:var(--gpu);width:0"></i></div>
+      <div class="sub" id="gpuSub">–</div></div>
+  </section>
+
+  <section class="inf card" id="infSec">
+    <div>
+      <h3>Mapa ekspertów <span id="mapInfo">–</span></h3>
+      <div class="heatwrap"><canvas class="heat" id="heat" width="1152" height="360"></canvas></div>
+      <div class="axis"><span>ekspert 1</span><span>kolumna = ekspert · wiersz = warstwa</span><span id="axisR">ekspert N</span></div>
+      <div class="legend">
+        <span><i style="background:var(--none)"></i>jeszcze nieużyty</span>
+        <span><i style="background:#2f56b8"></i>z SSD</span>
+        <span><i style="background:#c98c1f"></i>z RAM</span>
+        <span><i style="background:var(--gpu)"></i>z GPU</span>
+        <span><i style="background:#fff"></i>użyty w tym tokenie</span>
+      </div>
+    </div>
+    <div class="side">
+      <div class="card"><h3>Ten token <span id="tokNo">–</span></h3>
+        <div class="big"><span id="tkExp">0</span><small>ekspertów</small></div>
+        <div class="bar" id="tkBar"></div>
+        <div class="row"><span class="k-gpu">GPU</span><b id="tkGpu">0</b></div>
+        <div class="row"><span class="k-ram">RAM</span><b id="tkRam">0</b></div>
+        <div class="row"><span class="k-ssd">SSD</span><b id="tkSsd">0</b></div>
+        <div class="sub" id="tkRead">0 MB z SSD</div></div>
+      <div class="card"><h3>Cała odpowiedź <span id="anTok">0 tokenów</span></h3>
+        <div class="row"><span>użytych ekspertów</span><b id="anExp">0</b></div>
+        <div class="bar" id="anBar"></div>
+        <div class="row"><span class="k-gpu">z GPU</span><b id="anGpu">0%</b></div>
+        <div class="row"><span class="k-ram">z RAM</span><b id="anRam">0%</b></div>
+        <div class="row"><span class="k-ssd">z SSD</span><b id="anSsd">0%</b></div>
+        <div class="sub" id="anRead">0 GB z SSD</div></div>
+    </div>
+  </section>
+
+  <section class="charts">
+    <div class="card"><h3>GPU: użycie i temperatura <span id="vGpu">–</span></h3><canvas class="ch" id="cGpu"></canvas></div>
+    <div class="card"><h3>VRAM <span id="vVram">–</span></h3><canvas class="ch" id="cVram"></canvas></div>
+    <div class="card"><h3>GPU: pobór mocy <span id="vPow">–</span></h3><canvas class="ch" id="cPow"></canvas></div>
+    <div class="card"><h3>CPU <span id="vCpu">–</span></h3><canvas class="ch" id="cCpu"></canvas><div class="cores" id="cores"></div></div>
+    <div class="card"><h3>RAM <span id="vRam">–</span></h3><canvas class="ch" id="cRam"></canvas></div>
+    <div class="card"><h3>Dysk (MB/s) <span id="vDisk">–</span></h3><canvas class="ch" id="cDisk"></canvas></div>
+    <div class="card"><h3>Sieć (Mb/s) <span id="vNet">–</span></h3><canvas class="ch" id="cNet"></canvas></div>
+    <div class="card"><h3>Tokeny na sekundę <span id="vTps">–</span></h3><canvas class="ch" id="cTps"></canvas></div>
+    <div class="card"><h3>Scheduler <span id="vSch">–</span></h3><canvas class="ch" id="cSch"></canvas></div>
+  </section>
+
+  <section class="card chat">
+    <h3>Zapytaj model <span id="chatInfo"></span></h3>
+    <textarea id="q" placeholder="Np. Dlaczego niebo jest niebieskie?  (Ctrl+Enter wysyła)"></textarea>
+    <div class="ctl">
+      <select id="mdl"></select>
+      <label><input type="checkbox" id="thinkOn"> rozumowanie</label>
+      <label>max tokenów <input type="number" id="maxTok" value="300" min="1" max="4000" style="width:84px"></label>
+      <button class="primary" id="ask">Zapytaj</button><button id="stop">Stop</button>
+    </div>
+    <div id="think" class="hide"></div>
+    <div id="out"></div>
+  </section>
+</main>
+
+<div id="auth"><form id="authForm"><b>Token huba</b>
+  <span class="sub">Wklej token (jest przechowywany tylko w tej przeglądarce).</span>
+  <input id="tokIn" type="password" autocomplete="off" placeholder="token">
+  <button class="primary">Połącz</button></form></div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const MAXPTS=300, POLL_MS=500;
+let token="", lastT=0, online=false, inf=null, abortCtl=null;
+const S={gpu:[],temp:[],vram:[],vramMax:1,pow:[],powLim:0,cpu:[],ram:[],ramMax:1,dR:[],dW:[],nRx:[],nTx:[],tps:[],q:[],fl:[]};
+const COL={gpu:"#3de0b0",ram:"#f2b441",ssd:"#4c7dff",hot:"#ff8a5c",mut:"#7b8ea2",bad:"#ff6b6b"};
+
+function push(a,v){a.push(v);if(a.length>MAXPTS)a.shift();}
+function fmt(n,d=1){return Number.isFinite(n)?n.toFixed(d):"–";}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+
+/* ---------- token ---------- */
+(function initToken(){
+  const u=new URL(location.href), t=u.searchParams.get("token");
+  if(t){localStorage.setItem("hubToken",t);u.searchParams.delete("token");history.replaceState(null,"",u.pathname+u.search);}
+  token=localStorage.getItem("hubToken")||"";
+})();
+function showAuth(){$("auth").style.display="grid";$("tokIn").focus();}
+$("tokBtn").onclick=showAuth;
+$("authForm").onsubmit=e=>{e.preventDefault();token=$("tokIn").value.trim();localStorage.setItem("hubToken",token);$("tokIn").value="";$("auth").style.display="none";lastT=0;resetSeries();};
+function authHdr(){return {"Authorization":"Bearer "+token};}
+function resetSeries(){for(const k in S)if(Array.isArray(S[k]))S[k].length=0;}
+
+/* ---------- wykresy ---------- */
+function setupCanvas(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;
+  if(c.width!==Math.round(r.width*d)||c.height!==Math.round(r.height*d)){c.width=Math.round(r.width*d);c.height=Math.round(r.height*d);}
+  const g=c.getContext("2d");g.setTransform(d,0,0,d,0,0);return [g,r.width,r.height];}
+function lineChart(id,sets,opt){
+  const c=$(id);if(!c)return;const [g,w,h]=setupCanvas(c);g.clearRect(0,0,w,h);
+  let max=opt.max;if(max==null){max=0;for(const s of sets)for(const v of s.data)if(v>max)max=v;max=Math.max(max*1.15,opt.minMax||1);}
+  g.strokeStyle="#1d2b3a";g.lineWidth=1;g.fillStyle="#7b8ea2";g.font="10px system-ui";
+  for(let i=0;i<=4;i++){const y=4+(h-12)*i/4;g.beginPath();g.moveTo(0,y);g.lineTo(w,y);g.stroke();
+    if(i<4)g.fillText(fmt(max*(1-i/4),max<10?1:0),3,y+10);}
+  for(const s of sets){const d=s.data;if(d.length<2)continue;
+    g.beginPath();g.lineWidth=1.6;g.strokeStyle=s.color;
+    for(let i=0;i<d.length;i++){const x=w*(i+(MAXPTS-d.length))/(MAXPTS-1),y=4+(h-12)*(1-clamp(d[i]/max,0,1));
+      if(i===0)g.moveTo(x,y);else g.lineTo(x,y);}
+    g.stroke();
+    if(s.fill){g.lineTo(w,h-8);g.lineTo(w*(MAXPTS-d.length)/(MAXPTS-1),h-8);g.closePath();g.fillStyle=s.color+"22";g.fill();}}
+}
+
+/* ---------- mapa ekspertów ---------- */
+const TIER_COL=["#0f1822","#2f56b8","#c98c1f","#3de0b0"];
+function drawHeat(v){
+  const c=$("heat"),g=c.getContext("2d"),L=v.layers,E=v.experts;if(!L||!E)return;
+  const cw=c.width/E,ch=c.height/L;g.fillStyle=TIER_COL[0];g.fillRect(0,0,c.width,c.height);
+  for(let l=0;l<L;l++)for(let e=0;e<E;e++){const t=v.heat.charCodeAt(l*E+e)-48;if(t>0){g.fillStyle=TIER_COL[t]||TIER_COL[1];g.fillRect(e*cw,l*ch,Math.ceil(cw),Math.ceil(ch)-1);}}
+  g.strokeStyle="#ffffff";g.lineWidth=1.4;
+  for(const [l,e] of v.picked)g.strokeRect(e*cw+.5,l*ch+.5,Math.max(cw-1,2),Math.max(ch-2,2));
+}
+function splitBar(id,gpu,ram,ssd){const t=Math.max(gpu+ram+ssd,1);
+  $(id).innerHTML="";for(const [n,c] of [[gpu,"var(--gpu)"],[ram,"var(--ram)"],[ssd,"var(--ssd)"]]){const i=document.createElement("i");i.style.background=c;i.style.width=(100*n/t)+"%";$(id).appendChild(i);}}
+
+/* ---------- renderowanie ---------- */
+function render(d){
+  $("host").textContent=d.host||"";
+  const m=d.model||{};$("model").innerHTML="";
+  if(m.name){const b=document.createElement("b");b.textContent=m.name;$("model").append(b," · "+fmt(m.size_bytes/1e9,0)+" GB");}
+  const smp=d.samples.length?d.samples[d.samples.length-1]:null;
+  for(const s of d.samples){
+    const g=s.gpus[0];
+    if(g){push(S.gpu,g.util_pct);push(S.temp,g.temp_c);push(S.vram,g.vram_used_mib/1024);S.vramMax=g.vram_total_mib/1024;push(S.pow,g.power_w);S.powLim=g.power_limit_w;}
+    push(S.cpu,s.cpu_pct);push(S.ram,s.ram_used_mib/1024);S.ramMax=s.ram_total_mib/1024;
+    let r=0,w=0;for(const k of s.disks){r+=k.read_mb_s;w+=k.write_mb_s;}push(S.dR,r);push(S.dW,w);
+    let rx=0,tx=0;for(const k of s.net){rx+=k.rx_mbit_s;tx+=k.tx_mbit_s;}push(S.nRx,rx);push(S.nTx,tx);
+    push(S.q,s.queue_len);push(S.fl,s.in_flight);
+  }
+  if(d.inference){inf=d.inference;push(S.tps,inf.tokens_per_sec*(inf.running?1:0));}
+  if(smp){
+    const g=smp.gpus[0];
+    $("ssdRead").textContent=fmt(S.dR[S.dR.length-1]/1000,2);
+    const run=inf&&inf.running;$("ssdState").textContent=run?"czyta eksperty":"bezczynny";
+    $("ssdBar").style.width=clamp(100*S.dR[S.dR.length-1]/4000,0,100)+"%";
+    $("ssdSub").textContent="zapis "+fmt(S.dW[S.dW.length-1],0)+" MB/s · model "+fmt((m.size_bytes||0)/1e9,0)+" GB";
+    $("ramUsed").textContent=fmt(smp.ram_used_mib/1024,1);$("ramTxt").textContent="z "+fmt(smp.ram_total_mib/1024,0)+" GiB";
+    $("ramBar").style.width=clamp(100*smp.ram_used_mib/Math.max(smp.ram_total_mib,1),0,100)+"%";
+    $("ramSub").textContent="cache dysku "+fmt(smp.ram_cached_mib/1024,1)+" GiB · swap "+fmt(smp.swap_used_mib/1024,1)+" GiB";
+    if(g){$("gpuVram").textContent=fmt(g.vram_used_mib/1024,1);$("gpuTxt").textContent=g.name.replace("NVIDIA GeForce ","");
+      $("gpuBar").style.width=clamp(100*g.vram_used_mib/Math.max(g.vram_total_mib,1),0,100)+"%";
+      $("gpuSub").textContent="użycie "+g.util_pct+"% · "+g.temp_c+"°C · "+fmt(g.power_w,0)+" W";}
+    $("vGpu").textContent=g?g.util_pct+"% · "+g.temp_c+"°C":"brak GPU";
+    $("vVram").textContent=g?fmt(g.vram_used_mib/1024,1)+" / "+fmt(g.vram_total_mib/1024,0)+" GiB":"–";
+    $("vPow").textContent=g?fmt(g.power_w,0)+" / "+fmt(g.power_limit_w,0)+" W":"–";
+    $("vCpu").textContent=fmt(smp.cpu_pct,0)+"%"+(smp.cpu_temp_c!=null?" · "+fmt(smp.cpu_temp_c,0)+"°C":"")+" · load "+fmt(smp.load1,2);
+    $("vRam").textContent=fmt(smp.ram_used_mib/1024,1)+" / "+fmt(smp.ram_total_mib/1024,0)+" GiB";
+    $("vDisk").textContent="↓"+fmt(S.dR[S.dR.length-1],0)+" ↑"+fmt(S.dW[S.dW.length-1],0);
+    $("vNet").textContent="↓"+fmt(S.nRx[S.nRx.length-1],0)+" ↑"+fmt(S.nTx[S.nTx.length-1],0);
+    $("vSch").textContent=(smp.active_backend||"–")+" · kolejka "+smp.queue_len+" · w toku "+smp.in_flight;
+    const cores=$("cores");if(cores.childElementCount!==smp.cpu_cores_pct.length){cores.innerHTML="";for(let i=0;i<smp.cpu_cores_pct.length;i++)cores.appendChild(document.createElement("i"));}
+    smp.cpu_cores_pct.forEach((p,i)=>{const e=cores.children[i];if(e)e.style.background="hsl("+(150-1.2*p)+",70%,"+(10+0.35*p)+"%)";});
+    lastT=smp.t;
+  }
+  lineChart("cGpu",[{data:S.gpu,color:COL.gpu,fill:1},{data:S.temp,color:COL.hot}],{max:100});
+  lineChart("cVram",[{data:S.vram,color:COL.gpu,fill:1}],{max:S.vramMax||24});
+  lineChart("cPow",[{data:S.pow,color:COL.ram,fill:1}],{max:Math.max(S.powLim,50)});
+  lineChart("cCpu",[{data:S.cpu,color:COL.ssd,fill:1}],{max:100});
+  lineChart("cRam",[{data:S.ram,color:COL.ram,fill:1}],{max:S.ramMax||64});
+  lineChart("cDisk",[{data:S.dR,color:COL.ssd,fill:1},{data:S.dW,color:COL.hot}],{minMax:100});
+  lineChart("cNet",[{data:S.nRx,color:COL.gpu,fill:1},{data:S.nTx,color:COL.ram}],{minMax:10});
+  lineChart("cTps",[{data:S.tps,color:COL.gpu,fill:1}],{minMax:5});
+  lineChart("cSch",[{data:S.q,color:COL.bad},{data:S.fl,color:COL.gpu}],{minMax:2});
+  if(inf){
+    $("tps").textContent=fmt(inf.running?inf.tokens_per_sec:0,1);$("vTps").textContent=fmt(inf.tokens_per_sec,2)+" tok/s";
+    $("infSec").classList.toggle("hide",!inf.layers);
+    let nG=0,nR=0,nS=0;for(let i=0;i<inf.heat.length;i++){const t=inf.heat.charCodeAt(i)-48;if(t===3)nG++;else if(t===2)nR++;else if(t===1)nS++;}
+    $("mapInfo").textContent=inf.layers+" warstw × "+inf.experts+" ekspertów · w GPU "+nG+", w RAM "+nR+", z SSD "+nS;
+    $("axisR").textContent="ekspert "+inf.experts;
+    drawHeat(inf);
+    const t=inf.last||inf.current;$("tokNo").textContent="#"+t.token;$("tkExp").textContent=t.experts;
+    $("tkGpu").textContent=t.gpu;$("tkRam").textContent=t.ram;$("tkSsd").textContent=t.ssd;splitBar("tkBar",t.gpu,t.ram,t.ssd);
+    $("tkRead").textContent=fmt(t.read_bytes/1e6,0)+" MB odczytano z SSD";
+    const a=inf.answer,te=Math.max(a.experts,1);$("anTok").textContent=a.tokens+" tokenów";$("anExp").textContent=a.experts;
+    $("anGpu").textContent=fmt(100*a.gpu/te,0)+"% ("+a.gpu+")";$("anRam").textContent=fmt(100*a.ram/te,0)+"% ("+a.ram+")";$("anSsd").textContent=fmt(100*a.ssd/te,0)+"% ("+a.ssd+")";
+    splitBar("anBar",a.gpu,a.ram,a.ssd);$("anRead").textContent=fmt(a.read_bytes/1e9,1)+" GB odczytano z SSD";
+  }
+}
+
+/* ---------- odpytywanie ---------- */
+async function poll(){
+  if(!token){showAuth();return;}
+  try{
+    const r=await fetch("/api/monitor?since="+lastT,{headers:authHdr(),cache:"no-store"});
+    if(r.status===401){online=false;showAuth();return;}
+    if(!r.ok)throw new Error(r.status);
+    render(await r.json());online=true;
+  }catch(e){online=false;}
+  $("live").textContent=online?"LIVE":"OFFLINE";$("live").className="live "+(online?"on":"off");
+}
+setInterval(poll,POLL_MS);poll();
+window.addEventListener("resize",()=>{});
+
+/* ---------- czat ---------- */
+async function loadModels(){
+  try{const r=await fetch("/v1/models",{headers:authHdr()});if(!r.ok)return;const j=await r.json();
+    const sel=$("mdl");sel.innerHTML="";const ids=(j.data||[]).map(m=>m.id).sort();
+    for(const id of ids){const o=document.createElement("option");o.value=id;o.textContent=id;sel.appendChild(o);}
+    const pref=ids.find(i=>i.startsWith("deepseek-v4"));if(pref)sel.value=pref;
+  }catch(e){}
+}
+setTimeout(loadModels,800);
+$("stop").onclick=()=>{if(abortCtl)abortCtl.abort();};
+$("ask").onclick=ask;
+$("q").addEventListener("keydown",e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey))ask();});
+async function ask(){
+  const q=$("q").value.trim();if(!q||!token)return;
+  if(abortCtl)abortCtl.abort();abortCtl=new AbortController();
+  $("out").textContent="";$("think").textContent="";$("think").classList.add("hide");$("chatInfo").textContent="łączenie…";
+  const body={model:$("mdl").value,stream:true,max_tokens:+$("maxTok").value||300,messages:[{role:"user",content:q}],chat_template_kwargs:{enable_thinking:$("thinkOn").checked}};
+  const t0=performance.now();let n=0;
+  try{
+    const r=await fetch("/v1/chat/completions",{method:"POST",headers:{...authHdr(),"Content-Type":"application/json"},body:JSON.stringify(body),signal:abortCtl.signal});
+    if(!r.ok){$("out").textContent="Błąd "+r.status;$("chatInfo").textContent="";return;}
+    const rd=r.body.getReader(),dec=new TextDecoder();let buf="";
+    for(;;){const {done,value}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});
+      let i;while((i=buf.indexOf("\n"))>=0){const line=buf.slice(0,i).trim();buf=buf.slice(i+1);
+        if(!line.startsWith("data:"))continue;const p=line.slice(5).trim();if(p==="[DONE]")continue;
+        try{const dl=JSON.parse(p).choices[0].delta||{};
+          if(dl.reasoning_content){$("think").classList.remove("hide");$("think").textContent+=dl.reasoning_content;}
+          if(dl.content){$("out").textContent+=dl.content;n++;const o=$("out");o.scrollTop=o.scrollHeight;
+            $("chatInfo").textContent=n+" fragm. · "+fmt(n/((performance.now()-t0)/1000),1)+"/s";}
+        }catch(_){}}}
+  }catch(e){if(e.name!=="AbortError")$("out").textContent+="\n[błąd: "+e.message+"]";}
+}
+</script>
+</body>
+</html>
