@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -111,6 +112,8 @@ pub struct Monitor {
     pub model: ModelInfo,
     history: Mutex<VecDeque<Sample>>,
     tap: Mutex<Tap>,
+    /// Czy kiedykolwiek napłynęły zdarzenia telemetrii (bez tego widok wnioskowania jest ukryty).
+    fed: AtomicBool,
 }
 
 pub fn unix_now() -> f64 {
@@ -124,6 +127,7 @@ impl Monitor {
             model,
             history: Mutex::new(VecDeque::with_capacity(HISTORY_LEN)),
             tap: Mutex::new(Tap::new(layers, experts)),
+            fed: AtomicBool::new(false),
         })
     }
 
@@ -145,6 +149,9 @@ impl Monitor {
     }
 
     pub fn feed_tap(&self, lines: &[String], now: f64) {
+        if !lines.is_empty() {
+            self.fed.store(true, Ordering::Relaxed);
+        }
         if let Ok(mut t) = self.tap.lock() {
             for l in lines {
                 t.feed_line(l, now);
@@ -159,6 +166,9 @@ impl Monitor {
     }
 
     pub fn inference(&self, now: f64) -> Option<InferenceView> {
+        if !self.fed.load(Ordering::Relaxed) {
+            return None;
+        }
         let snap = self.tap.lock().ok()?.snapshot(now);
         Some(InferenceView {
             layers: snap.layers,
@@ -343,6 +353,7 @@ mod tests {
     #[test]
     fn inference_view_encodes_heat_as_digits() {
         let m = monitor();
+        assert!(m.inference(0.0).is_none(), "bez zdarzeń widok wnioskowania jest ukryty");
         let line = r#"{"ev":"ssd.place.layer","decode":true,"layer":1,"token":0,"selected_experts":[0,3],"vram_hit":[true,false],"cache_hit":[false,true],"read_bytes":5}"#;
         m.feed_tap(&[line.to_string()], 100.0);
         let v = m.inference(100.5).unwrap();
