@@ -71,6 +71,11 @@ impl LibVulkan {
     }
 
     pub fn load_from(name: &str) -> Result<LibVulkan, LoadError> {
+        Self::load_from_symbol(name, c"vkGetInstanceProcAddr")
+    }
+
+    /// Jak `load_from`, ale punkt wejścia ma podaną nazwę (sterownik ICD eksportuje `vk_icdGetInstanceProcAddr`).
+    pub fn load_from_symbol(name: &str, symbol: &CStr) -> Result<LibVulkan, LoadError> {
         let c = CString::new(name).map_err(|_| LoadError::NotFound("nazwa z bajtem NUL".into()))?;
         // SAFETY: `c` jest poprawnym napisem C; flagi są stałymi glibc.
         let handle = unsafe { dlopen(c.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
@@ -78,7 +83,7 @@ impl LibVulkan {
             return Err(LoadError::NotFound(last_dlerror()));
         }
         // SAFETY: `handle` jest ważny; symbol to wskaźnik na funkcję o sygnaturze z specyfikacji Vulkana.
-        let sym = unsafe { dlsym(handle, c"vkGetInstanceProcAddr".as_ptr()) };
+        let sym = unsafe { dlsym(handle, symbol.as_ptr()) };
         if sym.is_null() {
             unsafe { dlclose(handle) };
             return Err(LoadError::NoEntryPoint);

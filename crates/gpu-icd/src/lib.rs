@@ -19,6 +19,7 @@ use gpu_renderd::client::Client;
 use gpu_renderd::handler::decode_extensions;
 
 mod fwd;
+mod local;
 #[rustfmt::skip]
 mod icd_table;
 

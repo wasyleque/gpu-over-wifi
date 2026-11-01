@@ -1,0 +1,209 @@
+//! Lokalny sterownik do prezentacji (Intel laptopa), ładowany BEZPOŚREDNIO jako ICD, z pominięciem loadera.
+//!
+//! Powód: aplikacja używa loadera z `VK_DRIVER_FILES` wskazującym tylko nasz ICD, a drugi `dlopen` loadera
+//! zwróciłby ten sam stan. Sterownik systemowy wołamy więc przez jego `vk_icdGetInstanceProcAddr`.
+#![allow(dead_code)]
+
+use std::ffi::{c_void, CStr, CString};
+use std::path::{Path, PathBuf};
+
+use gpu_renderd::vk::loader::{LibVulkan, VkInstance, VkPhysicalDevice};
+use gpu_renderd::vk::replay::call_thunk;
+
+const VK_API_1_1: u32 = 0x0040_1000;
+/// Rozszerzenia instancji potrzebne do powierzchni okna (włączamy te, które sterownik ma).
+const WANTED_INSTANCE_EXTS: &[&str] = &["VK_KHR_surface", "VK_KHR_wayland_surface", "VK_KHR_xcb_surface", "VK_KHR_xlib_surface"];
+
+/// Wyciąga `library_path` z manifestu ICD (bez zależności od biblioteki JSON). Ścieżki względne z `/` liczymy
+/// od katalogu manifestu, a goła nazwa pliku jest zostawiana dynamicznemu linkerowi.
+pub fn library_path_from_manifest(json: &str, manifest_dir: &Path) -> Option<PathBuf> {
+    let i = json.find("\"library_path\"")?;
+    let rest = &json[i + "\"library_path\"".len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let p = &rest[..end];
+    if p.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(p);
+    if path.is_absolute() || !p.contains('/') {
+        Some(path)
+    } else {
+        Some(manifest_dir.join(path))
+    }
+}
+
+/// Manifesty sterowników Intela (nie nasz ICD), posortowane tak, by nowszy `intel_icd` był przed `hasvk`.
+pub fn find_intel_manifests() -> Vec<PathBuf> {
+    if let Ok(p) = std::env::var("GPU_ICD_LOCAL_ICD") {
+        return vec![PathBuf::from(p)];
+    }
+    let mut dirs = vec![PathBuf::from("/usr/share/vulkan/icd.d"), PathBuf::from("/etc/vulkan/icd.d")];
+    if let Ok(h) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(h).join(".local/share/vulkan/icd.d"));
+    }
+    let mut out = Vec::new();
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.contains("intel") && name.ends_with(".json") {
+                out.push(e.path());
+            }
+        }
+    }
+    out.sort_by_key(|p| (p.to_string_lossy().contains("hasvk"), p.clone()));
+    out
+}
+
+pub struct LocalVulkan {
+    lib: LibVulkan,
+    pub instance: VkInstance,
+    pub pdev: VkPhysicalDevice,
+    pub device_name: String,
+    pub api_version: u32,
+    pub enabled_instance_exts: Vec<String>,
+    pub device_exts: Vec<String>,
+    pub manifest: PathBuf,
+}
+
+fn ext_names(buf: &[u8], n: usize) -> Vec<String> {
+    (0..n)
+        .filter_map(|i| {
+            let e = buf.get(i * 260..i * 260 + 256)?;
+            CStr::from_bytes_until_nul(e).ok().map(|c| c.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+impl LocalVulkan {
+    fn fnptr(lib: &LibVulkan, inst: VkInstance, name: &str) -> Option<*const c_void> {
+        let c = CString::new(name).ok()?;
+        // SAFETY: `inst` jest null albo ważną instancją tego sterownika.
+        unsafe { lib.proc_addr(inst, &c) }
+    }
+
+    fn call(&self, name: &str, ints: &[u64]) -> Option<i32> {
+        let f = Self::fnptr(&self.lib, self.instance, name)?;
+        // SAFETY: wskaźniki w `ints` żyją do końca wywołania; sygnatura zgodna z vk.xml.
+        unsafe { call_thunk(f, ints, &[]) }.map(|r| r as u32 as i32)
+    }
+
+    /// Otwiera pierwszy działający sterownik Intela z manifestów i wybiera jego pierwsze urządzenie.
+    pub fn open() -> Result<LocalVulkan, String> {
+        let mut last = "nie znaleziono manifestu sterownika Intela".to_string();
+        for m in find_intel_manifests() {
+            match Self::open_manifest(&m) {
+                Ok(l) => return Ok(l),
+                Err(e) => last = format!("{}: {e}", m.display()),
+            }
+        }
+        Err(last)
+    }
+
+    pub fn open_manifest(manifest: &Path) -> Result<LocalVulkan, String> {
+        let json = std::fs::read_to_string(manifest).map_err(|e| e.to_string())?;
+        let dir = manifest.parent().unwrap_or(Path::new("."));
+        let lib_path = library_path_from_manifest(&json, dir).ok_or("brak library_path w manifeście")?;
+        let lib = LibVulkan::load_from_symbol(&lib_path.to_string_lossy(), c"vk_icdGetInstanceProcAddr").map_err(|e| format!("{e:?}"))?;
+
+        // Rozszerzenia instancji (funkcja globalna: instancja null).
+        let list = Self::fnptr(&lib, std::ptr::null_mut(), "vkEnumerateInstanceExtensionProperties").ok_or("brak vkEnumerateInstanceExtensionProperties")?;
+        let mut n = 0u32;
+        // SAFETY: dwuwywołaniowy idiom z poprawnymi wskaźnikami wyjściowymi.
+        unsafe { call_thunk(list, &[0, &mut n as *mut u32 as u64, 0], &[]) };
+        let mut buf = vec![0u8; n as usize * 260];
+        unsafe { call_thunk(list, &[0, &mut n as *mut u32 as u64, buf.as_mut_ptr() as u64], &[]) };
+        let available = ext_names(&buf, n as usize);
+        let enabled: Vec<String> = WANTED_INSTANCE_EXTS.iter().filter(|w| available.iter().any(|a| a == *w)).map(|s| s.to_string()).collect();
+
+        let cnames: Vec<CString> = enabled.iter().filter_map(|s| CString::new(s.as_str()).ok()).collect();
+        let ptrs: Vec<*const std::ffi::c_char> = cnames.iter().map(|c| c.as_ptr()).collect();
+        let mut app = [0u64; 6];
+        app[5] = (VK_API_1_1 as u64) << 32; // apiVersion @44 (dolne 32 bity słowa 5)
+        let mut info = [0u64; 8];
+        info[0] = 1; // VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+        info[3] = app.as_ptr() as u64; // pApplicationInfo @24
+        info[6] = ptrs.len() as u64; // enabledExtensionCount @48
+        info[7] = ptrs.as_ptr() as u64; // ppEnabledExtensionNames @56
+        let create = Self::fnptr(&lib, std::ptr::null_mut(), "vkCreateInstance").ok_or("brak vkCreateInstance")?;
+        let mut inst: VkInstance = std::ptr::null_mut();
+        // SAFETY: struktury i tablica nazw żyją do końca wywołania.
+        let r = unsafe { call_thunk(create, &[info.as_ptr() as u64, 0, &mut inst as *mut VkInstance as u64], &[]) }.map(|r| r as u32 as i32).ok_or("thunk")?;
+        if r != 0 || inst.is_null() {
+            return Err(format!("vkCreateInstance = {r}"));
+        }
+        let mut me = LocalVulkan { lib, instance: inst, pdev: std::ptr::null_mut(), device_name: String::new(), api_version: 0, enabled_instance_exts: enabled, device_exts: Vec::new(), manifest: manifest.to_path_buf() };
+
+        let mut count = 0u32;
+        me.call("vkEnumeratePhysicalDevices", &[inst as u64, &mut count as *mut u32 as u64, 0]);
+        if count == 0 {
+            return Err("brak urządzeń fizycznych".into());
+        }
+        let mut pds = vec![std::ptr::null_mut::<c_void>(); count as usize];
+        me.call("vkEnumeratePhysicalDevices", &[inst as u64, &mut count as *mut u32 as u64, pds.as_mut_ptr() as u64]);
+        me.pdev = pds[0];
+        // VkPhysicalDeviceProperties (824 B): apiVersion @0, deviceName @20.
+        let mut props = vec![0u8; 832];
+        me.call("vkGetPhysicalDeviceProperties", &[me.pdev as u64, props.as_mut_ptr() as u64]);
+        me.api_version = u32::from_le_bytes([props[0], props[1], props[2], props[3]]);
+        me.device_name = CStr::from_bytes_until_nul(&props[20..276]).map(|c| c.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut dn = 0u32;
+        me.call("vkEnumerateDeviceExtensionProperties", &[me.pdev as u64, 0, &mut dn as *mut u32 as u64, 0]);
+        let mut dbuf = vec![0u8; dn as usize * 260];
+        me.call("vkEnumerateDeviceExtensionProperties", &[me.pdev as u64, 0, &mut dn as *mut u32 as u64, dbuf.as_mut_ptr() as u64]);
+        me.device_exts = ext_names(&dbuf, dn as usize);
+        Ok(me)
+    }
+}
+
+impl Drop for LocalVulkan {
+    fn drop(&mut self) {
+        if !self.instance.is_null() {
+            self.call("vkDestroyInstance", &[self.instance as u64, 0]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_path_forms() {
+        let dir = Path::new("/usr/share/vulkan/icd.d");
+        let bare = r#"{ "ICD": { "api_version": "1.4", "library_path": "libvulkan_intel.so" }, "file_format_version": "1.0.1" }"#;
+        assert_eq!(library_path_from_manifest(bare, dir), Some(PathBuf::from("libvulkan_intel.so")));
+        let rel = r#"{"ICD":{"library_path" : "../lib/x.so"}}"#;
+        assert_eq!(library_path_from_manifest(rel, dir), Some(dir.join("../lib/x.so")));
+        let abs = r#"{"ICD":{"library_path":"/opt/v/lib.so"}}"#;
+        assert_eq!(library_path_from_manifest(abs, dir), Some(PathBuf::from("/opt/v/lib.so")));
+        for bad in ["", "{}", r#"{"library_path": }"#, r#"{"library_path": ""}"#, r#"{"library_path": "x"#, r#"{"library_path" "x"}"#] {
+            assert_eq!(library_path_from_manifest(bad, dir), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn manifests_never_include_our_own_icd_and_hasvk_comes_last() {
+        std::env::remove_var("GPU_ICD_LOCAL_ICD");
+        let m = find_intel_manifests();
+        assert!(m.iter().all(|p| p.to_string_lossy().to_lowercase().contains("intel")));
+        if let (Some(a), Some(b)) = (m.iter().position(|p| p.to_string_lossy().contains("hasvk")), m.iter().position(|p| !p.to_string_lossy().contains("hasvk"))) {
+            assert!(b < a);
+        }
+    }
+
+    #[test]
+    fn opens_the_real_intel_driver_directly_and_sees_presentation_extensions() {
+        let Ok(l) = LocalVulkan::open() else {
+            eprintln!("POMINIĘTO: brak sterownika Intela w środowisku testowym");
+            return;
+        };
+        assert!(!l.device_name.is_empty());
+        assert!(l.api_version >= VK_API_1_1, "{:#x}", l.api_version);
+        assert!(l.enabled_instance_exts.iter().any(|e| e == "VK_KHR_surface"), "{:?}", l.enabled_instance_exts);
+        assert!(l.device_exts.iter().any(|e| e == "VK_KHR_swapchain"), "brak VK_KHR_swapchain");
+        eprintln!("lokalny sterownik: {} ({}), instancja: {:?}", l.device_name, l.manifest.display(), l.enabled_instance_exts);
+    }
+}
