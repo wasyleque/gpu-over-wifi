@@ -36,8 +36,9 @@ r = json.load(urllib.request.urlopen(req, timeout=3000))
 text = r["message"]["content"]
 i = text.find("```rust\n")
 code = text[i + 8:] if i >= 0 else text
-j = code.find("```")
-code = code[:j] if j >= 0 else code
+# Zamykające ogrodzenie to OSTATNIE: sam plik może zawierać ``` w komentarzach dokumentacyjnych.
+j = code.rfind("\n```")
+code = code[:j + 1] if j >= 0 else code
 open(target + ".llm", "w").write(code)
 secs, toks = time.time() - t, r.get("eval_count", 0)
 impl = code[:code.index(marker)] if marker in code else code

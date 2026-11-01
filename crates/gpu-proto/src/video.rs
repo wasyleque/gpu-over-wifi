@@ -53,36 +53,149 @@ pub struct VideoHeader {
 
 impl VideoHeader {
     pub fn encode(&self) -> [u8; HEADER_LEN] {
-        todo!()
+        let mut out = [0u8; HEADER_LEN];
+        out[0..8].copy_from_slice(&self.swapchain.to_le_bytes());
+        out[8..12].copy_from_slice(&self.image_index.to_le_bytes());
+        out[12..16].copy_from_slice(&self.seq.to_le_bytes());
+        out[16..18].copy_from_slice(&self.width.to_le_bytes());
+        out[18..20].copy_from_slice(&self.height.to_le_bytes());
+        out[20] = self.format as u8;
+        out[21] = self.codec as u8;
+        out[22] = 0;
+        out[23] = 0;
+        out[24..28].copy_from_slice(&self.payload_len.to_le_bytes());
+        out
     }
 
     /// Odczytuje i waliduje nagłówek z początku `bytes` (nadmiarowe bajty za nagłówkiem są dozwolone).
     /// Kolejność kontroli: długość, format, kodek, zarezerwowane, wymiary, rozmiar danych.
     pub fn decode(bytes: &[u8]) -> Result<VideoHeader, VideoError> {
-        todo!()
+        if bytes.len() < HEADER_LEN {
+            return Err(VideoError::Truncated);
+        }
+        let format_byte = bytes[20];
+        let format = match format_byte {
+            1 => PixelFormat::Bgra8,
+            2 => PixelFormat::Rgba8,
+            other => return Err(VideoError::BadFormat(other)),
+        };
+        let codec_byte = bytes[21];
+        let codec = match codec_byte {
+            0 => Codec::Raw,
+            1 => Codec::Hevc,
+            other => return Err(VideoError::BadCodec(other)),
+        };
+        if bytes[22] != 0 || bytes[23] != 0 {
+            return Err(VideoError::Reserved);
+        }
+        let width = u16::from_le_bytes([bytes[16], bytes[17]]);
+        let height = u16::from_le_bytes([bytes[18], bytes[19]]);
+        let payload_len = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+        if payload_len > MAX_PAYLOAD {
+            return Err(VideoError::TooLarge(payload_len));
+        }
+        if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
+            return Err(VideoError::BadSize);
+        }
+        if codec == Codec::Raw {
+            let expected = (width as u64)
+                .checked_mul(height as u64)
+                .and_then(|v| v.checked_mul(4))
+                .and_then(|v| u32::try_from(v).ok());
+            if expected != Some(payload_len) {
+                return Err(VideoError::BadSize);
+            }
+        }
+        let swapchain = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        let image_index = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let seq = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+        Ok(VideoHeader {
+            swapchain,
+            image_index,
+            seq,
+            width,
+            height,
+            format,
+            codec,
+            payload_len,
+        })
     }
 }
 
 /// Potwierdzenie klienta: ramka `seq` została zdekodowana i wyświetlona (4 B, little-endian).
 pub fn encode_ack(seq: u32) -> [u8; 4] {
-    todo!()
+    seq.to_le_bytes()
 }
 
 pub fn decode_ack(bytes: &[u8]) -> Result<u32, VideoError> {
-    todo!()
+    if bytes.len() < 4 {
+        return Err(VideoError::Truncated);
+    }
+    if bytes.len() > 4 {
+        return Err(VideoError::BadSize);
+    }
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 /// Pakuje wiersze obrazu z odstępem `stride` (bajty na wiersz w pamięci źródłowej) w ciasny bufor w * h * 4 B.
 /// Błąd `BadSize`, gdy wymiary są zerowe/za duże, `stride < w * 4` albo `pixels` jest za krótki
 /// (potrzeba `stride * (h - 1) + w * 4` bajtów). Nie panikuje; rachunki w u64 z kontrolą przepełnienia.
-pub fn pack_rows(pixels: &[u8], width: u16, height: u16, stride: usize) -> Result<Vec<u8>, VideoError> {
-    todo!()
+pub fn pack_rows(
+    pixels: &[u8],
+    width: u16,
+    height: u16,
+    stride: usize,
+) -> Result<Vec<u8>, VideoError> {
+    if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
+        return Err(VideoError::BadSize);
+    }
+    let row_bytes = (width as u64) * 4;
+    let stride_u64 = stride as u64;
+    if stride_u64 < row_bytes {
+        return Err(VideoError::BadSize);
+    }
+    let height_u64 = height as u64;
+    let needed = stride_u64
+        .checked_mul(height_u64.saturating_sub(1))
+        .and_then(|v| v.checked_add(row_bytes));
+    let needed = match needed {
+        Some(n) => n,
+        None => return Err(VideoError::BadSize),
+    };
+    if needed > pixels.len() as u64 {
+        return Err(VideoError::BadSize);
+    }
+    let out_len = (row_bytes * height_u64) as usize;
+    let mut out = vec![0u8; out_len];
+    for r in 0..height {
+        let src_start = (r as u64 * stride_u64) as usize;
+        let src_end = src_start + row_bytes as usize;
+        let dst_start = (r as u64 * row_bytes) as usize;
+        let dst_end = dst_start + row_bytes as usize;
+        out[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
+    }
+    Ok(out)
 }
 
 /// Zwraca dane surowej ramki (`Codec::Raw`) po sprawdzeniu, że `payload.len() == header.payload_len`
 /// oraz `== w * h * 4`. Dla innych kodeków `BadCodec`.
 pub fn raw_pixels<'a>(header: &VideoHeader, payload: &'a [u8]) -> Result<&'a [u8], VideoError> {
-    todo!()
+    if header.codec != Codec::Raw {
+        return Err(VideoError::BadCodec(header.codec as u8));
+    }
+    if payload.len() != header.payload_len as usize {
+        return Err(VideoError::BadSize);
+    }
+    let expected = (header.width as u64)
+        .checked_mul(header.height as u64)
+        .and_then(|v| v.checked_mul(4))
+        .and_then(|v| u32::try_from(v).ok());
+    if expected != Some(header.payload_len) {
+        return Err(VideoError::BadSize);
+    }
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -90,7 +203,16 @@ mod tests {
     use super::*;
 
     fn hdr() -> VideoHeader {
-        VideoHeader { swapchain: 0x1122_3344_5566_7788, image_index: 2, seq: 0xAABB_CCDD, width: 1920, height: 1080, format: PixelFormat::Bgra8, codec: Codec::Raw, payload_len: 1920 * 1080 * 4 }
+        VideoHeader {
+            swapchain: 0x1122_3344_5566_7788,
+            image_index: 2,
+            seq: 0xAABB_CCDD,
+            width: 1920,
+            height: 1080,
+            format: PixelFormat::Bgra8,
+            codec: Codec::Raw,
+            payload_len: 1920 * 1080 * 4,
+        }
     }
 
     #[test]
@@ -128,7 +250,11 @@ mod tests {
         v.extend([9, 9, 9]);
         assert_eq!(VideoHeader::decode(&v), Ok(hdr()));
         for cut in 0..HEADER_LEN {
-            assert_eq!(VideoHeader::decode(&v[..cut]), Err(VideoError::Truncated), "{cut}");
+            assert_eq!(
+                VideoHeader::decode(&v[..cut]),
+                Err(VideoError::Truncated),
+                "{cut}"
+            );
         }
     }
 
@@ -158,29 +284,53 @@ mod tests {
 
     #[test]
     fn dimensions_and_raw_payload_size_are_validated() {
-        for (w, h) in [(0u16, 100u16), (100, 0), (MAX_DIM + 1, 100), (100, MAX_DIM + 1), (u16::MAX, u16::MAX)] {
+        for (w, h) in [
+            (0u16, 100u16),
+            (100, 0),
+            (MAX_DIM + 1, 100),
+            (100, MAX_DIM + 1),
+            (u16::MAX, u16::MAX),
+        ] {
             let mut x = hdr();
             x.width = w;
             x.height = h;
             x.payload_len = 0;
-            assert_eq!(VideoHeader::decode(&x.encode()), Err(VideoError::BadSize), "{w}x{h}");
+            assert_eq!(
+                VideoHeader::decode(&x.encode()),
+                Err(VideoError::BadSize),
+                "{w}x{h}"
+            );
         }
         let mut x = hdr();
         x.payload_len -= 1;
-        assert_eq!(VideoHeader::decode(&x.encode()), Err(VideoError::BadSize), "dla Raw długość musi być równa w*h*4");
+        assert_eq!(
+            VideoHeader::decode(&x.encode()),
+            Err(VideoError::BadSize),
+            "dla Raw długość musi być równa w*h*4"
+        );
         let mut x = hdr();
         x.width = MAX_DIM;
         x.height = MAX_DIM;
         x.payload_len = u32::MAX;
-        assert_eq!(VideoHeader::decode(&x.encode()), Err(VideoError::TooLarge(u32::MAX)), "limit MAX_PAYLOAD przed porównaniem z wymiarami");
+        assert_eq!(
+            VideoHeader::decode(&x.encode()),
+            Err(VideoError::TooLarge(u32::MAX)),
+            "limit MAX_PAYLOAD przed porównaniem z wymiarami"
+        );
         let mut x = hdr();
         x.codec = Codec::Hevc;
         x.payload_len = MAX_PAYLOAD + 1;
-        assert_eq!(VideoHeader::decode(&x.encode()), Err(VideoError::TooLarge(MAX_PAYLOAD + 1)));
+        assert_eq!(
+            VideoHeader::decode(&x.encode()),
+            Err(VideoError::TooLarge(MAX_PAYLOAD + 1))
+        );
         x.payload_len = MAX_PAYLOAD;
         assert!(VideoHeader::decode(&x.encode()).is_ok());
         x.payload_len = 0;
-        assert!(VideoHeader::decode(&x.encode()).is_ok(), "pusty ładunek HEVC jest dozwolony przy poprawnych wymiarach");
+        assert!(
+            VideoHeader::decode(&x.encode()).is_ok(),
+            "pusty ładunek HEVC jest dozwolony przy poprawnych wymiarach"
+        );
     }
 
     #[test]
@@ -191,7 +341,11 @@ mod tests {
         assert_eq!(encode_ack(1), [1, 0, 0, 0]);
         assert_eq!(decode_ack(&[1, 2, 3]), Err(VideoError::Truncated));
         assert_eq!(decode_ack(&[]), Err(VideoError::Truncated));
-        assert_eq!(decode_ack(&[1, 2, 3, 4, 5]), Err(VideoError::BadSize), "nadmiarowe bajty potwierdzenia");
+        assert_eq!(
+            decode_ack(&[1, 2, 3, 4, 5]),
+            Err(VideoError::BadSize),
+            "nadmiarowe bajty potwierdzenia"
+        );
     }
 
     #[test]
@@ -223,11 +377,26 @@ mod tests {
         let px = vec![0u8; 64];
         assert_eq!(pack_rows(&px, 0, 4, 16), Err(VideoError::BadSize));
         assert_eq!(pack_rows(&px, 4, 0, 16), Err(VideoError::BadSize));
-        assert_eq!(pack_rows(&px, MAX_DIM + 1, 1, usize::MAX), Err(VideoError::BadSize));
-        assert_eq!(pack_rows(&px, 4, 4, 15), Err(VideoError::BadSize), "stride mniejszy niż w*4");
-        assert_eq!(pack_rows(&px, 4, 4, 16 + 1), Err(VideoError::BadSize), "za krótki bufor dla stride 17");
+        assert_eq!(
+            pack_rows(&px, MAX_DIM + 1, 1, usize::MAX),
+            Err(VideoError::BadSize)
+        );
+        assert_eq!(
+            pack_rows(&px, 4, 4, 15),
+            Err(VideoError::BadSize),
+            "stride mniejszy niż w*4"
+        );
+        assert_eq!(
+            pack_rows(&px, 4, 4, 16 + 1),
+            Err(VideoError::BadSize),
+            "za krótki bufor dla stride 17"
+        );
         assert_eq!(pack_rows(&px[..63], 4, 4, 16), Err(VideoError::BadSize));
-        assert_eq!(pack_rows(&px, 4, 4, usize::MAX), Err(VideoError::BadSize), "przepełnienie stride * (h-1)");
+        assert_eq!(
+            pack_rows(&px, 4, 4, usize::MAX),
+            Err(VideoError::BadSize),
+            "przepełnienie stride * (h-1)"
+        );
         assert!(pack_rows(&px, 4, 4, 16).is_ok());
     }
 
@@ -245,7 +414,11 @@ mod tests {
         assert_eq!(raw_pixels(&h, &long), Err(VideoError::BadSize));
         let mut inconsistent = h;
         inconsistent.payload_len = 33;
-        assert_eq!(raw_pixels(&inconsistent, &long), Err(VideoError::BadSize), "payload_len różne od w*h*4");
+        assert_eq!(
+            raw_pixels(&inconsistent, &long),
+            Err(VideoError::BadSize),
+            "payload_len różne od w*h*4"
+        );
         let mut hevc = h;
         hevc.codec = Codec::Hevc;
         assert_eq!(raw_pixels(&hevc, &payload), Err(VideoError::BadCodec(1)));
