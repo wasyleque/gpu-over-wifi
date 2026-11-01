@@ -2,6 +2,7 @@
 name = "gpu-proto"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
