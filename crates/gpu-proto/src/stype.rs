@@ -26,6 +26,20 @@ mod tests {
         assert_eq!(lookup(0).unwrap().name, "VkApplicationInfo");
     }
 
+    fn by_name(name: &str) -> &'static StypeEntry {
+        STYPE_TABLE.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("brak {name}"))
+    }
+
+    #[test]
+    fn output_pointer_flag_separates_safe_from_unsafe_structures() {
+        for safe in ["VkPhysicalDeviceProperties2", "VkPhysicalDeviceFeatures2", "VkPhysicalDeviceVulkan12Properties", "VkPhysicalDeviceMemoryProperties2", "VkQueueFamilyProperties2"] {
+            assert!(!by_name(safe).has_output_pointers, "{safe}");
+        }
+        for unsafe_ in ["VkInstanceCreateInfo", "VkPhysicalDeviceLayeredApiPropertiesListKHR"] {
+            assert!(by_name(unsafe_).has_output_pointers, "{unsafe_}");
+        }
+    }
+
     #[test]
     fn unknown_values_are_none_not_panic() {
         for v in [u32::MAX, 0x7FFF_FFFF, 12345, 999_999_999] {
