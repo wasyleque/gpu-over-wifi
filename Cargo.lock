@@ -451,6 +451,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-renderd"
+version = "0.1.0"
+dependencies = [
+ "gpu-proto",
+ "gpu-wire",
+]
+
+[[package]]
 name = "gpu-vkgen"
 version = "0.1.0"
 dependencies = [
