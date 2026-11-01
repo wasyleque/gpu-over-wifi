@@ -114,7 +114,7 @@ impl LocalVulkan {
         self.call("vkGetPhysicalDeviceSurfaceFormatsKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, 0])?;
         let mut buf = vec![0u8; n as usize * 8];
         let r = self.call("vkGetPhysicalDeviceSurfaceFormatsKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, buf.as_mut_ptr() as u64])?;
-        (r >= 0).then(|| buf.chunks_exact(8).take(n as usize).map(|c| (u32::from_le_bytes([c[0], c[1], c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]))).collect())
+        (r >= 0).then(|| buf.chunks(8).take(n as usize).map(|c| (u32::from_le_bytes([c[0], c[1], c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]))).collect())
     }
 
     pub fn present_modes(&self, surface: u64) -> Option<Vec<u32>> {
@@ -122,7 +122,7 @@ impl LocalVulkan {
         self.call("vkGetPhysicalDeviceSurfacePresentModesKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, 0])?;
         let mut buf = vec![0u8; n as usize * 4];
         let r = self.call("vkGetPhysicalDeviceSurfacePresentModesKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, buf.as_mut_ptr() as u64])?;
-        (r >= 0).then(|| buf.chunks_exact(4).take(n as usize).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        (r >= 0).then(|| buf.chunks(4).take(n as usize).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
     }
 
     /// Czy lokalna karta może prezentować na danej platformie (`kind`: nazwa funkcji `vkGetPhysicalDevice*PresentationSupportKHR`).
