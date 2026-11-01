@@ -68,6 +68,8 @@ pub struct Replayer {
     maps: HashMap<u64, *mut u8>,
     /// Surowa wartość zwrócona przez ostatnio wykonane polecenie (dla poleceń `Ret::U64`).
     last_ret: u64,
+    /// Nazwa ostatnio wykonanego polecenia (do komunikatów o błędzie dekodowania następnego).
+    last_name: &'static str,
 }
 
 // SAFETY: wskaźniki to uchwyty i adresy odwzorowań sterownika używane wyłącznie przez wątek sesji.
@@ -101,7 +103,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), last_ret: 0 }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), last_ret: 0, last_name: "" }
     }
 
     pub fn set_instance(&mut self, raw: VkInstance) {
@@ -133,7 +135,14 @@ impl Replayer {
         let mut dec = Decoder::new(batch);
         loop {
             let rec = Recording { reg: &self.registry, seen: RefCell::new(Vec::new()) };
-            let Some(dc) = decode_command(&mut dec, &rec).map_err(code)? else { return Ok(()) };
+            let dc = match decode_command(&mut dec, &rec) {
+                Ok(Some(dc)) => dc,
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    eprintln!("replay: błąd dekodowania polecenia następnego po {}", self.last_name);
+                    return Err(code(e));
+                }
+            };
             let seen = rec.seen.into_inner();
             self.run(&dc, &seen, false)?;
         }
@@ -187,6 +196,7 @@ impl Replayer {
         let outs = unsafe { out_handles(cmd, args) }.map_err(code)?;
         let ids: Vec<Vec<u64>> = outs.iter().map(|(_, p, n)| (0..*n).map(|i| unsafe { std::ptr::read_unaligned(p.add(i)) }).collect()).collect();
         let size = if cmd.name == "vkAllocateMemory" { unsafe { arg_uint(cmd, args, "pAllocateInfo->allocationSize") }.unwrap_or(0) } else { 0 };
+        self.last_name = cmd.name;
         trace_command(cmd.name);
         if cmd.name == "vkCreateGraphicsPipelines" && std::env::var("GPU_RENDERD_TRACE").is_ok() {
             // SAFETY: sloty parametrów (8 B każdy) leżą w arenie; parametr 3 to pCreateInfos, 2 to createInfoCount.
@@ -202,6 +212,7 @@ impl Replayer {
         self.last_ret = rax;
         let result = if cmd.ret == Ret::VkResult { rax as u32 as i32 } else { 0 };
         if result < 0 {
+            eprintln!("replay: {} zwróciło {result}", cmd.name);
             return if tolerate { Ok(result) } else { Err(result) };
         }
         for ((kind, p, _), ids) in outs.iter().zip(ids) {

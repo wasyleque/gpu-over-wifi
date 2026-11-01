@@ -133,8 +133,15 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
         }
         st.present_ns += t1.elapsed().as_nanos() as u64;
         st.frames += 1;
+        if std::env::var("GPU_ICD_DEBUG").is_ok() && (st.frames <= 3 || st.frames % 120 == 0) {
+            // Średnia jasność próbki pikseli: odróżnia czarne klatki od pustego strumienia.
+            let n = frame_bgra.len() / 4;
+            let (sum, cnt) = (0..n).step_by(97).fold((0u64, 0u64), |(s, c), i| (s + frame_bgra[i * 4..i * 4 + 3].iter().map(|b| *b as u64).sum::<u64>(), c + 3));
+            eprintln!("gpu-icd wideo: klatka {} ({}x{}, {:?}), średnia jasność {:.1}, {} B", st.frames, width, height, h.codec, sum as f64 / cnt.max(1) as f64, frame.payload.len());
+        }
         st.bytes += frame.payload.len() as u64;
-        if let (Ok(path), 1) = (std::env::var("GPU_ICD_DUMP_FRAME"), st.frames) {
+        let dump_at: u64 = std::env::var("GPU_ICD_DUMP_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        if let (Ok(path), true) = (std::env::var("GPU_ICD_DUMP_FRAME"), st.frames == dump_at) {
             let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
             for p in frame_bgra.chunks(4) {
                 ppm.extend([p[2], p[1], p[0]]);
