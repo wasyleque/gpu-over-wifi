@@ -28,3 +28,19 @@ log_file = "/home/wasyl/gpu-hub/inferssd.log"
 # alias widoczny dla klientów -> pierwszy shard pliku GGUF (pobrany wcześniej, np. przez `inferssd cli -hf ...`)
 [backend.model_paths]
 "deepseek-v4.1-flash" = "/ścieżka/do/DeepSeek-V4.1-Flash-1017-Q8_0-00001-of-000NN.gguf"
+
+# --- Szybszy wariant: tryb launch z expert packiem (zmierzone: +40% wobec serve na surowym GGUF) ---
+# [[backend]]
+# name = "inferssd"
+# kind = "inferssd"
+# mode = "launch"
+# binary = "/home/USER/.local/bin/inferssd"
+# resources = "/home/USER/.local/share/inferssd/releases/source.XXXX/engine-resources.json"
+# settings = "/home/USER/gpu-hub/inferssd-settings.ssd"   # inferssd-settings 1 + expert.source = ["/ścieżka/model.expert-pack"]
+# port = 18080
+# context = 16384
+# batch = 2048
+# ubatch = 2048
+# memory_budget_bytes = 65180786688                        # ~ pamięć RAM serwera
+# run_dir = "/home/USER/gpu-hub/runs"                      # na politykę i logi; każdy start tworzy nowy podkatalog
+# Pack zbudujesz: create-moe-expert-pack.py '<shardy>*.gguf' -o model.expert-pack --align 4096 (NumPy + PyYAML)

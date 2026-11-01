@@ -27,3 +27,22 @@ Kryterium: zapis liczb przed/po w tym pliku.
 ## Ograniczenia
 - Zaleceń z dokumentacji nie traktujemy jako faktów o tym sprzęcie: benchmarki producenta robiono na RTX 5090/5060 Ti z dyskami PCIe 4/5 i 32 GB RAM.
 - Wadliwy dysk Kingston (…6387) nie bierze udziału; po wymianie RAID0 może zmienić wyniki.
+
+## WYNIKI (2026-11-01) — gpu-hub (RTX 3090 Ti, jeden Kingston NVMe, kontekst 16384, temperature 0, rozumowanie wyłączone, 3-4 powtórzenia)
+| Konfiguracja | Generowanie | Prompt | Uwagi |
+|---|---|---|---|
+| `serve`, surowe GGUF (stan bazowy) | **3,37 tok/s** | 5,7 | całe 220 tokenów: 73-77 s |
+| `launch`, GGUF, ubatch 2048 | 3,5 (po rozgrzewce) | 2,8-5,8 | +4%, w granicach szumu |
+| `launch`, **expert pack**, ubatch 2048 | **4,76 tok/s** | **8,1** | **+41% / +40%**; 52 s na 220 tokenów |
+| pack + `vram.budget` 18 GB / 21 GB | 4,41 / 4,45 | 8,0 | bez zysku: VRAM i tak zapełnia się do 24 GB po rozgrzaniu |
+| pack + `prefetch.depth=4` | 4,56 | 8,0 | bez zysku (odczyt z dysku 10,2% → 8,4%, w szumie) |
+| **przez hub** (`mode="launch"`, pack, ubatch 2048) | **4,66 tok/s** | **8,0** | wdrożone na gpu-hub |
+| `launch` z ubatch/batch 16384 | serwer padł przy 1. żądaniu | | przyczyna nieustalona (`serve` z tymi liczbami działał) |
+
+Telemetria (na token, warstwy ekspertów): GGUF 783 ms (oczekiwanie na dysk 599 ms = 77%); **pack 377 ms (197 ms = 52%)** — pack skrócił czekanie na dysk 3x; obliczenia ~140 ms bez zmian; trafienia VRAM ~68%, RAM ~20-24%, dysk ~8-13%.
+
+## Wnioski
+- **Expert pack to jedyna zmiana z istotnym efektem** (+36-41%). Odpowiada trikowi "przepakowanie plików modelu pod SSD" z transkrypcji.
+- Pozostałe ~50% czasu to czekanie na jeden dysk. Następny skok da sprzęt: RAID0 z dwóch Kingstonów po wymianie wadliwego (odczyt ~2x) — wtedy przebudować/skopiować model i pack na macierz.
+- Wdrożenie: hub `mode = "launch"` (patrz `docs/hub.example.toml`), pack 269 GiB w `/srv/models/DeepSeek-V4.1-Flash-1017/model.expert-pack`, plik ustawień `~/gpu-hub/inferssd-settings.ssd`. Budowa packa: 9 min 8 s (~650 MB/s).
+- Rozumowanie wyłączać parametrem żądania `chat_template_kwargs.enable_thinking=false` dla generowania dokumentów i kodu.
