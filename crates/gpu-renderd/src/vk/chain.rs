@@ -19,8 +19,8 @@ pub enum ChainError {
 }
 
 pub struct ChainBuf {
-    // Pola wybiera implementacja: bufor `Vec<u64>`, offsety struktur w bajtach i ich `sType`.
-    _private: (),
+    buf: Vec<u64>,
+    offsets: Vec<usize>,
 }
 
 /// Buduje łańcuch w kolejności z `chain`. Każda struktura leży w offsecie wyrównanym do
@@ -28,33 +28,83 @@ pub struct ChainBuf {
 /// Pusta lista daje pusty łańcuch (`head_ptr()` == null). Walidacja przed jakąkolwiek alokacją
 /// zależną od danych klienta: długość > MAX_CHAIN, duplikat sType, nieznany sType, wskaźniki wyjściowe.
 pub fn build_chain(chain: &[u32]) -> Result<ChainBuf, ChainError> {
-    todo!()
+    if chain.len() > MAX_CHAIN {
+        return Err(ChainError::TooLong);
+    }
+    let mut offsets = Vec::with_capacity(chain.len());
+    let mut total = 0usize;
+    for (i, &st) in chain.iter().enumerate() {
+        if chain.get(..i).is_some_and(|prev| prev.contains(&st)) {
+            return Err(ChainError::Duplicate(st));
+        }
+        let entry = lookup(st).ok_or(ChainError::Unknown(st))?;
+        if entry.has_output_pointers {
+            return Err(ChainError::UnsupportedOutputPointers(st));
+        }
+        let align = (entry.align as usize).max(8);
+        let start = total.div_ceil(align) * align;
+        offsets.push(start);
+        total = start + entry.size as usize;
+    }
+    let mut out = ChainBuf { buf: vec![0u64; total.div_ceil(8)], offsets };
+    let base = out.buf.as_ptr() as usize;
+    for (i, &st) in chain.iter().enumerate() {
+        let Some(&off) = out.offsets.get(i) else { continue };
+        out.put(off, &st.to_le_bytes());
+        if let Some(&next) = out.offsets.get(i + 1) {
+            out.put(off + PNEXT_OFFSET, &((base + next) as u64).to_le_bytes());
+        }
+    }
+    Ok(out)
 }
 
 impl ChainBuf {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `u64` nie ma wypełnienia, każdy wzorzec bajtów jest poprawny, a długość w bajtach to
+        // dokładnie 8 * liczba słów; odwołanie pożycza `self` na czas życia wyniku.
+        unsafe { std::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut u8, self.buf.len() * 8) }
+    }
+
+    fn put(&mut self, offset: usize, data: &[u8]) {
+        if let Some(dst) = self.bytes_mut().get_mut(offset..offset + data.len()) {
+            dst.copy_from_slice(data);
+        }
+    }
+
     /// Adres pierwszej struktury (do wstawienia w `pNext` głowy zapytania) albo null dla pustego łańcucha.
     pub fn head_ptr(&mut self) -> *mut c_void {
-        todo!()
+        if self.offsets.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            self.buf.as_mut_ptr() as *mut c_void
+        }
     }
 
     /// Liczba struktur w łańcuchu.
     pub fn len(&self) -> usize {
-        todo!()
+        self.offsets.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.offsets.is_empty()
     }
 
     /// Cały bufor jako bajty (struktury jedna po drugiej, z wypełnieniem).
     pub fn as_bytes(&self) -> &[u8] {
-        todo!()
+        // SAFETY: jak w `bytes_mut`, tylko do odczytu.
+        unsafe { std::slice::from_raw_parts(self.buf.as_ptr() as *const u8, self.buf.len() * 8) }
     }
 
     /// Bajty do odpowiedzi dla klienta: kopia bufora, w której `pNext` KAŻDEJ struktury jest wyzerowany
     /// (klient nie może dostać adresów serwera).
     pub fn into_response_bytes(self) -> Vec<u8> {
-        todo!()
+        let mut bytes = self.as_bytes().to_vec();
+        for &off in &self.offsets {
+            if let Some(p) = bytes.get_mut(off + PNEXT_OFFSET..off + PNEXT_OFFSET + 8) {
+                p.fill(0);
+            }
+        }
+        bytes
     }
 }
 
