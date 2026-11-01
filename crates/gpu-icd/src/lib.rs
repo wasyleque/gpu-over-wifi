@@ -23,6 +23,7 @@ mod fwd;
 mod local;
 mod present;
 mod swapchain;
+mod templates;
 mod video;
 mod sbuild;
 mod wsi;
@@ -77,6 +78,8 @@ struct InstState {
     queues: HashMap<(u64, u32, u32), usize>,
     device_lost: bool,
     stats: fwd::Stats,
+    /// Szablony aktualizacji deskryptorów (identyfikator -> wpisy), potrzebne do rozwinięcia `vkUpdateDescriptorSetWithTemplate`.
+    templates: HashMap<u64, Vec<templates::Entry>>,
     swapchains: HashMap<u64, swapchain::Swapchain>,
     /// Urządzenie (identyfikator) -> zdalna karta fizyczna (do wyboru typów pamięci).
     device_pdev: HashMap<u64, u64>,
@@ -297,6 +300,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             batch: Vec::new(),
             next_id: 1 << 20,
             mem_sizes: HashMap::new(),
+            templates: HashMap::new(),
             mems: HashMap::new(),
             queues: HashMap::new(),
             device_lost: false,

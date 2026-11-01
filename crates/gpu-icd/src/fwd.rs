@@ -260,6 +260,22 @@ unsafe fn pipeline_infos_have_flag(slots: &[u64], count_slot: usize, ptr_slot: u
     (0..count as usize).any(|i| std::ptr::read_unaligned((ptr as *const u8).add(i * size + 16) as *const u32) & PIPELINE_FAIL_ON_COMPILE_REQUIRED != 0)
 }
 
+/// Rozwija `vkUpdateDescriptorSetWithTemplate(device, set, template, pData)` do `vkUpdateDescriptorSets` z jawnymi zapisami.
+unsafe fn update_with_template(st: &mut InstState, slots: &[u64]) -> u64 {
+    let (device, set, template, data) = (slots[0], slots[1], slots[2], slots[3] as *const u8);
+    let Some(entries) = st.templates.get(&template).cloned() else { return 0 };
+    let Some(w) = crate::templates::build_writes(&entries, data, set) else {
+        eprintln!("gpu-icd: szablon deskryptorów z nieobsługiwanym typem (inline uniform block?)");
+        return 0;
+    };
+    let Some((op, _)) = gpu_proto::meta::find_command("vkUpdateDescriptorSets") else { return 0 };
+    if w.count == 0 {
+        return 0;
+    }
+    let mut args = [device, w.count as u64, w.bytes.as_ptr() as u64, 0, 0];
+    exec(st, op, &mut args)
+}
+
 /// Wykonuje polecenie o kodzie `op` z gotowymi slotami parametrów (tak samo dla aplikacji i dla ICD, które wydaje własne polecenia).
 ///
 /// # Safety
@@ -279,6 +295,10 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     let fail = |e: i32| -> u64 { e as u32 as u64 };
     let args = slots.as_ptr() as *const u8;
 
+    // Aktualizacja deskryptorów szablonem: dane zawierają uchwyty, więc rozwijamy ją do zwykłego vkUpdateDescriptorSets.
+    if cmd.name == "vkUpdateDescriptorSetWithTemplate" {
+        return update_with_template(st, slots);
+    }
     // Kolejka wydana już wcześniej (to samo urządzenie, rodzina, indeks) wraca bez wysyłania.
     if cmd.name == "vkGetDeviceQueue" {
         let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
@@ -314,6 +334,14 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let _ = id;
             st.mem_sizes.insert(mem_id, size);
         }
+    }
+    if cmd.name == "vkCreateDescriptorUpdateTemplate" && slots[1] != 0 && slots[3] != 0 {
+        // Identyfikator szablonu został już wpisany w pamięć aplikacji; zapamiętujemy jego wpisy.
+        let id = std::ptr::read_unaligned(slots[3] as *const u64);
+        st.templates.insert(id, crate::templates::parse_entries(slots[1] as *const u8));
+    }
+    if cmd.name == "vkDestroyDescriptorUpdateTemplate" {
+        st.templates.remove(&slots[1]);
     }
     if cmd.name == "vkCreateDevice" {
         if let (Some((_, dev_id)), true) = (disp_outs.first(), slots[0] != 0) {
