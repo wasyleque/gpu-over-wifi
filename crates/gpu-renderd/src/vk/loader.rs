@@ -120,6 +120,7 @@ type FnGetPdevFormat2 = unsafe extern "C" fn(VkPhysicalDevice, u32, *mut c_void)
 type FnGetQueueFamilies2 = unsafe extern "C" fn(VkPhysicalDevice, *mut u32, *mut c_void);
 
 /// Funkcje globalne (instancja null).
+#[derive(Clone, Copy)]
 pub struct GlobalFns {
     pub enumerate_instance_version: FnEnumInstanceVersion,
     pub enumerate_instance_extension_properties: FnEnumInstanceExt,
@@ -127,6 +128,7 @@ pub struct GlobalFns {
 }
 
 /// Funkcje instancyjne M1.
+#[derive(Clone, Copy)]
 pub struct InstanceFns {
     pub destroy_instance: FnDestroyInstance,
     pub enumerate_physical_devices: FnEnumPhysical,

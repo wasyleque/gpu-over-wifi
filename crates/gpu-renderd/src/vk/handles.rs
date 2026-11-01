@@ -28,6 +28,8 @@ pub struct HandleTable<T> {
     free_head: u32,
     /// Globalna generacja: rośnie przy każdym `insert`, nigdy nie przyjmuje wartości 0.
     generation: u32,
+    /// Znacznik rodzaju tablicy w górnych 4 bitach generacji: uchwyt z innej tablicy nigdy nie pasuje.
+    tag: u32,
     max: usize,
     live: usize,
 }
@@ -40,7 +42,12 @@ impl<T> HandleTable<T> {
 
     /// Tablica, która przyjmie co najwyżej `max` jednocześnie żywych wpisów.
     pub fn with_limit(max: usize) -> Self {
-        HandleTable { slots: Vec::new(), free_head: u32::MAX, generation: 0, max, live: 0 }
+        Self::with_tag(max, 0)
+    }
+
+    /// Jak `with_limit`, ale uchwyty niosą znacznik `tag` (0..=15) i są ważne tylko w tej tablicy.
+    pub fn with_tag(max: usize, tag: u8) -> Self {
+        HandleTable { slots: Vec::new(), free_head: u32::MAX, generation: 0, tag: (tag as u32 & 0xF) << 28, max, live: 0 }
     }
 
     /// Wyłącznie do testów: generacja, od której zaczyna się liczenie.
@@ -49,12 +56,13 @@ impl<T> HandleTable<T> {
         HandleTable { generation, ..Self::with_limit(max) }
     }
 
+    /// Licznik ma 28 bitów (górne 4 to znacznik tablicy) i nigdy nie daje 0.
     fn next_generation(&mut self) -> u32 {
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = self.generation.wrapping_add(1) & 0x0FFF_FFFF;
         if self.generation == 0 {
             self.generation = 1;
         }
-        self.generation
+        self.tag | self.generation
     }
 
     /// Wstawia wartość i zwraca świeży uchwyt (nigdy 0, nigdy równy żadnemu wcześniej wydanemu
@@ -226,6 +234,19 @@ mod tests {
         t.remove(hs[1]);
         assert!(t.insert(9).is_ok());
         assert_eq!(t.insert(10), Err(TableFull));
+    }
+
+    #[test]
+    fn handles_from_a_differently_tagged_table_never_match() {
+        let mut a: HandleTable<u8> = HandleTable::with_tag(10, 1);
+        let mut b: HandleTable<u8> = HandleTable::with_tag(10, 2);
+        let ha = a.insert(1).unwrap();
+        let hb = b.insert(2).unwrap();
+        assert_ne!(ha, hb, "ten sam slot i licznik, ale różne znaczniki");
+        assert_eq!(a.get(hb), None);
+        assert_eq!(b.get(ha), None);
+        assert_eq!(a.remove(hb), None);
+        assert_eq!(a.get(ha), Some(&1));
     }
 
     #[test]
