@@ -24,6 +24,7 @@ mod backend;
 mod inferssd;
 mod proxy;
 mod scheduler;
+mod sysmon;
 mod tap;
 
 /// Domyślny adres API Ollamy.
