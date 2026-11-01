@@ -446,6 +446,9 @@ dependencies = [
 [[package]]
 name = "gpu-proto"
 version = "0.1.0"
+dependencies = [
+ "gpu-wire",
+]
 
 [[package]]
 name = "gpu-vkgen"

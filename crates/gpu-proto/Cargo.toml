@@ -4,3 +4,4 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+gpu-wire = { path = "../gpu-wire" }
