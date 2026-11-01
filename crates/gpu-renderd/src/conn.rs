@@ -10,6 +10,8 @@ use crate::handler::{GpuBackend, Session, ERR_PROTOCOL};
 
 /// Jedyny strumień używany w M1: sterowanie (żądanie -> odpowiedź).
 pub const STREAM_CONTROL: u8 = 0;
+/// Strumień ramek obrazu serwer -> klient (połączenie wideo).
+pub const STREAM_VIDEO: u8 = 1;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServeError {
@@ -33,6 +35,26 @@ impl From<std::io::Error> for ServeError {
     fn from(e: std::io::Error) -> Self {
         ServeError::Io(e.kind())
     }
+}
+
+fn send_reply<W: Write>(writer: &mut W, req_frame: &Frame, response: &Response) -> Result<(), ServeError> {
+    let f = Frame::new(req_frame.header.stream, flags::CRC, req_frame.header.seq, req_frame.header.epoch, response.encode())?;
+    writer.write_all(&f.encode())?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Pętla połączenia wideo: wysyła ramki sesji (strumień 1, bez CRC: TCP chroni dane, a suma kosztuje 1,9 MB na klatkę)
+/// aż kanał się zamknie (sesja sterująca skończyła) albo zapis się nie powiedzie (klient odszedł).
+fn video_loop<W: Write>(rx: std::sync::mpsc::Receiver<Vec<u8>>, writer: &mut W) -> Result<(), ServeError> {
+    let mut seq = 0u16;
+    while let Ok(payload) = rx.recv() {
+        let f = Frame::new(STREAM_VIDEO, 0, seq, 0, payload)?;
+        writer.write_all(&f.encode())?;
+        writer.flush()?;
+        seq = seq.wrapping_add(1);
+    }
+    Ok(())
 }
 
 /// Obsługuje połączenie aż do czystego EOF (na granicy ramki => `Ok`) albo błędu.
@@ -109,6 +131,18 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
                 };
 
                 // Handle the request
+                // Połączenie wideo: po uwierzytelnieniu `AttachVideo` zamienia to połączenie w strumień ramek sesji sterującej.
+                if let (Request::AttachVideo { session: sid }, true) = (&req, session.is_authenticated()) {
+                    let reply = match crate::videohub::claim(*sid) {
+                        Some(rx) => {
+                            send_reply(writer, &frame, &Response::U32(0))?;
+                            return video_loop(rx, writer);
+                        }
+                        None => Response::Error { code: ERR_PROTOCOL, message: "unknown or already attached session".to_string() },
+                    };
+                    send_reply(writer, &frame, &reply)?;
+                    continue;
+                }
                 let Some(response) = session.handle_request(req) else { continue };
 
                 // Encode and send the response
@@ -180,6 +214,9 @@ mod tests {
         }
         fn device_extensions(&mut self, _: u64) -> Result<Vec<(String, u32)>, i32> {
             Ok(vec![])
+        }
+        fn mem_read(&mut self, _: u64, _: u64, len: u32) -> Result<Vec<u8>, i32> {
+            Ok(vec![9; len as usize])
         }
     }
 
@@ -408,6 +445,51 @@ mod tests {
             serve_connection(&mut s, &mut Cursor::new(z), &mut Vec::new()),
             Err(ServeError::Unsupported)
         );
+    }
+
+    #[test]
+    fn attach_video_turns_the_connection_into_a_frame_stream_that_ends_with_the_control_session() {
+        let (mut control, _) = session();
+        control.handle_request(hello());
+        let Some(Response::Handle(id)) = control.handle_request(Request::SessionId) else { panic!() };
+        control.handle_request(Request::PresentFrame { memory: 7, len: 4, seq: 3, width: 1, height: 1, format: 1 });
+        drop(control); // sesja sterująca kończy się: kanał się zamyka po opróżnieniu
+        let (mut video, _) = session();
+        let mut input = req_frame(1, 0, &hello());
+        input.extend(req_frame(2, 0, &Request::AttachVideo { session: id }));
+        let mut out = Vec::new();
+        assert_eq!(serve_connection(&mut video, &mut Cursor::new(input), &mut out), Ok(()));
+        let mut fr = FrameReader::new();
+        fr.push(&out);
+        let a = fr.next_frame().unwrap().unwrap();
+        assert_eq!(Response::decode(&a.payload).unwrap(), Response::HelloOk { version: PROTOCOL_VERSION });
+        let b = fr.next_frame().unwrap().unwrap();
+        assert_eq!(Response::decode(&b.payload).unwrap(), Response::U32(0), "odpowiedź na AttachVideo");
+        let c = fr.next_frame().unwrap().unwrap();
+        assert_eq!(c.header.stream, STREAM_VIDEO);
+        assert_eq!(c.header.flags & flags::CRC, 0);
+        let h = gpu_proto::video::VideoHeader::decode(&c.payload[..28]).unwrap();
+        assert_eq!((h.seq, h.width, h.height), (3, 1, 1));
+        assert!(fr.next_frame().unwrap().is_none());
+    }
+
+    #[test]
+    fn attach_video_to_an_unknown_or_already_claimed_session_is_an_error_reply() {
+        let (mut v, _) = session();
+        let mut input = req_frame(1, 0, &hello());
+        input.extend(req_frame(2, 0, &Request::AttachVideo { session: 0xBAD }));
+        let mut out = Vec::new();
+        assert_eq!(serve_connection(&mut v, &mut Cursor::new(input), &mut out), Ok(()));
+        let r = parse_responses(&out);
+        assert!(matches!(r[1].1, Response::Error { .. }));
+    }
+
+    #[test]
+    fn attach_video_before_hello_is_rejected_and_closes() {
+        let (mut v, _) = session();
+        let mut out = Vec::new();
+        let input = req_frame(1, 0, &Request::AttachVideo { session: 1 });
+        assert_eq!(serve_connection(&mut v, &mut Cursor::new(input), &mut out), Err(ServeError::AuthFailed));
     }
 
     #[test]

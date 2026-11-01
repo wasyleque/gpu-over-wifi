@@ -96,11 +96,17 @@ pub struct Session<B: GpuBackend> {
     instances: Vec<(u64, Vec<u64>)>,
     /// Pierwszy błąd z poleceń bez odpowiedzi od ostatniego `Sync` (0 = brak).
     async_error: i32,
+    /// Identyfikator sesji i nadajnik ramek obrazu na jej połączenie wideo.
+    session_id: u64,
+    video_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
 }
 
 impl<B: GpuBackend> Session<B> {
     pub fn new(backend: B, token: Vec<u8>) -> Self {
+        let (session_id, video_tx) = crate::videohub::new_session();
         Session {
+            session_id,
+            video_tx,
             backend,
             token,
             authed: false,
@@ -115,13 +121,42 @@ impl<B: GpuBackend> Session<B> {
 
     /// Jak `handle`, ale `None` dla poleceń bez odpowiedzi (`Cmds`, `MemWrite`) wykonanych poprawnie.
     pub fn handle_request(&mut self, req: Request) -> Option<Response> {
-        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. });
+        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::PresentFrame { .. });
         let r = self.handle(req);
         if silent && !matches!(r, Response::Error { .. }) {
             None
         } else {
             Some(r)
         }
+    }
+
+    /// Czyta obraz z pamięci urządzenia i wypycha go jako ramkę na połączenie wideo (surowy BGRA/RGBA).
+    fn present_frame(&mut self, memory: u64, len: u32, seq: u32, width: u16, height: u16, format: u8) -> Result<(), i32> {
+        use gpu_proto::video::{Codec, PixelFormat, VideoHeader};
+        let format = match format {
+            1 => PixelFormat::Bgra8,
+            2 => PixelFormat::Rgba8,
+            _ => return Err(ERR_UNKNOWN),
+        };
+        let header = VideoHeader { swapchain: 0, image_index: 0, seq, width, height, format, codec: Codec::Raw, payload_len: len };
+        // Nagłówek sam się waliduje (rozmiar surowej ramki = w*h*4): niepoprawna ramka nie wychodzi z serwera.
+        let hb = header.encode();
+        VideoHeader::decode(&hb).map_err(|_| ERR_UNKNOWN)?;
+        let data = self.backend.mem_read(memory, 0, len)?;
+        if data.len() != len as usize {
+            return Err(ERR_UNKNOWN);
+        }
+        let mut payload = Vec::with_capacity(hb.len() + data.len());
+        payload.extend_from_slice(&hb);
+        payload.extend_from_slice(&data);
+        // Blokuje, gdy odbiorca nie nadąża (backpressure); brak odbiorcy (odłączone wideo) nie jest błędem sesji.
+        let _ = self.video_tx.send(payload);
+        Ok(())
+    }
+
+    /// Identyfikator sesji (do podłączenia połączenia wideo).
+    pub fn session_id(&self) -> u64 {
+        self.session_id
     }
 
     fn note_async(&mut self, r: Result<(), i32>) -> Response {
@@ -176,6 +211,12 @@ impl<B: GpuBackend> Session<B> {
                     code: ERR_PROTOCOL,
                     message: "already authenticated".to_string(),
                 },
+                Request::SessionId => Response::Handle(self.session_id),
+                Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
+                Request::PresentFrame { memory, len, seq, width, height, format } => {
+                    let r = self.present_frame(memory, len, seq, width, height, format);
+                    self.note_async(r)
+                }
                 Request::Cmds { data } => {
                     let r = self.backend.execute(&data);
                     self.note_async(r)
@@ -336,6 +377,7 @@ impl<B: GpuBackend> Session<B> {
 
     /// Wywoływane po rozłączeniu: niszczy wszystkie instancje, które sesja jeszcze trzyma.
     pub fn cleanup(&mut self) {
+        crate::videohub::forget(self.session_id);
         for (handle, _) in self.instances.drain(..) {
             let _ = self.backend.destroy_instance(handle);
         }
@@ -696,7 +738,7 @@ mod tests {
             if b.first().copied() == self.fail_on && self.fail_on.is_some() { Err(-4) } else { Ok(()) }
         }
         fn query(&mut self, d: &[u8]) -> Result<Vec<u8>, i32> { Ok(d.iter().rev().copied().collect()) }
-        fn mem_read(&mut self, m: u64, o: u64, l: u32) -> Result<Vec<u8>, i32> { Ok(vec![m as u8, o as u8, l as u8]) }
+        fn mem_read(&mut self, m: u64, o: u64, l: u32) -> Result<Vec<u8>, i32> { if o != 0 { Ok(vec![m as u8, o as u8, l as u8]) } else { Ok(vec![m as u8; l as usize]) } }
         fn mem_write(&mut self, _: u64, _: u64, d: &[u8]) -> Result<(), i32> { if d.is_empty() { Err(-5) } else { Ok(()) } }
     }
 
@@ -725,6 +767,43 @@ mod tests {
         let mut u = Session::new(Stream::default(), b"t".to_vec());
         assert!(matches!(u.handle_request(Request::Cmds { data: vec![1] }), Some(Response::Error { .. })));
         assert!(u.backend.batches.is_empty(), "przed Hello nic nie dociera do backendu");
+    }
+
+    #[test]
+    fn present_frame_is_pushed_to_the_video_channel_with_a_valid_header() {
+        use gpu_proto::video::{Codec, PixelFormat, VideoHeader};
+        let mut s = stream_session(None);
+        let Some(Response::Handle(id)) = s.handle_request(Request::SessionId) else { panic!() };
+        assert_eq!(id, s.session_id());
+        let rx = crate::videohub::claim(id).unwrap();
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 5, width: 2, height: 2, format: 1 }), None);
+        let payload = rx.try_recv().unwrap();
+        let h = VideoHeader::decode(&payload[..28]).unwrap();
+        assert_eq!((h.seq, h.width, h.height, h.format, h.codec, h.payload_len), (5, 2, 2, PixelFormat::Bgra8, Codec::Raw, 16));
+        assert_eq!(&payload[28..], &[7u8; 16][..]);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: 0 }));
+    }
+
+    #[test]
+    fn present_frame_with_inconsistent_geometry_or_format_is_an_async_error_and_sends_nothing() {
+        let mut s = stream_session(None);
+        let Some(Response::Handle(id)) = s.handle_request(Request::SessionId) else { panic!() };
+        let rx = crate::videohub::claim(id).unwrap();
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 15, seq: 0, width: 2, height: 2, format: 1 }), None);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }));
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 0, width: 2, height: 2, format: 9 }), None);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }));
+        assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 0, width: 0, height: 2, format: 1 }), None);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: ERR_UNKNOWN }));
+        assert!(rx.try_recv().is_err(), "żadna niepoprawna ramka nie wyszła");
+    }
+
+    #[test]
+    fn unauthenticated_present_frame_and_attach_are_rejected() {
+        let mut u = Session::new(Stream::default(), b"t".to_vec());
+        assert!(matches!(u.handle_request(Request::PresentFrame { memory: 1, len: 4, seq: 0, width: 1, height: 1, format: 1 }), Some(Response::Error { .. })));
+        let mut a = stream_session(None);
+        assert!(matches!(a.handle_request(Request::AttachVideo { session: 1 }), Some(Response::Error { .. })), "attach działa tylko na poziomie połączenia");
     }
 
     #[test]

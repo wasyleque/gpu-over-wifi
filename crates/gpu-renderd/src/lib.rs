@@ -3,4 +3,5 @@ pub mod client;
 pub mod conn;
 pub mod handler;
 pub mod server;
+pub mod videohub;
 pub mod vk;
