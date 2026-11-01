@@ -200,6 +200,14 @@ impl Replayer {
         let size = if cmd.name == "vkAllocateMemory" { unsafe { arg_uint(cmd, args, "pAllocateInfo->allocationSize") }.unwrap_or(0) } else { 0 };
         self.last_name = cmd.name;
         trace_command(cmd.name);
+        if std::env::var("GPU_RENDERD_TRACE").is_ok() && (cmd.name == "vkCreateDescriptorPool" || cmd.name == "vkAllocateDescriptorSets") {
+            // SAFETY: parametr 1 to wskaźnik na zdekodowaną strukturę w arenie.
+            unsafe {
+                let ptr = std::ptr::read_unaligned(args.add(8) as *const u64) as *const u8;
+                let d = if cmd.name == "vkCreateDescriptorPool" { gpu_proto::debug::describe_descriptor_pool_info(ptr) } else { gpu_proto::debug::describe_descriptor_set_alloc(ptr) };
+                trace_text(&format!("  {} {d}", cmd.name));
+            }
+        }
         if cmd.name == "vkCreateGraphicsPipelines" && std::env::var("GPU_RENDERD_TRACE").is_ok() {
             // SAFETY: sloty parametrów (8 B każdy) leżą w arenie; parametr 3 to pCreateInfos, 2 to createInfoCount.
             unsafe {
@@ -213,6 +221,11 @@ impl Replayer {
         let t0 = std::time::Instant::now();
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
         trace_text(&format!("  t {} {}us", cmd.name, t0.elapsed().as_micros()));
+        if cmd.name == "vkCreateDescriptorPool" && std::env::var("GPU_RENDERD_TRACE").is_ok() {
+            // SAFETY: parametr 3 to wskaźnik wyjściowy na uchwyt puli (sterownik właśnie go wpisał).
+            let pool = unsafe { std::ptr::read_unaligned(std::ptr::read_unaligned(args.add(24) as *const u64) as *const u64) };
+            trace_text(&format!("  pool utworzona: {pool:#x}"));
+        }
         self.last_ret = rax;
         let result = if cmd.ret == Ret::VkResult { rax as u32 as i32 } else { 0 };
         if result < 0 {
