@@ -61,6 +61,34 @@ pub struct VulkanBackend {
 // (zewnętrzna synchronizacja dotyczy tylko jednego obiektu naraz, a sesja ma wyłączny dostęp do swoich).
 unsafe impl Send for VulkanBackend {}
 
+/// Instancja trzymana do końca procesu. Loader Vulkana wyładowuje biblioteki ICD, gdy znika ostatnia instancja, a
+/// sterownik NVIDIA po kilku takich cyklach ładowania/wyładowania przestaje widzieć kartę (zostaje llvmpipe). Zawsze żywa
+/// instancja sprawia, że ICD ładuje się raz.
+fn ensure_keeper_instance(global: &GlobalFns) {
+    static KEEPER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    KEEPER.get_or_init(|| {
+        let Ok(_g) = GLOBAL_CALLS.lock() else { return 0 };
+        let mut info = Words::zeroed(64);
+        write_u32(info.bytes_mut(), 0, ST_INSTANCE_CREATE_INFO);
+        let mut raw: VkInstance = std::ptr::null_mut();
+        // SAFETY: minimalna poprawna VkInstanceCreateInfo (bez rozszerzeń i warstw); wynik celowo nigdy nie jest niszczony.
+        let r = unsafe { (global.create_instance)(info.ptr() as *const c_void, std::ptr::null(), &mut raw) };
+        if r >= 0 { raw as usize } else { 0 }
+    });
+}
+
+/// Zerwane połączenie (np. zabity klient) nie przechodzi przez `vkDestroyInstance`: sterownik NVIDIA po kilkunastu
+/// nieposprzątanych instancjach przestaje widzieć kartę (zostaje tylko llvmpipe), więc sprzątamy wszystko przy zamknięciu sesji.
+impl Drop for VulkanBackend {
+    fn drop(&mut self) {
+        self.replay.destroy_devices();
+        for e in self.instances.drain_all() {
+            // SAFETY: instancja została wyjęta z tablicy, więc nikt jej już nie użyje; urządzenia zniszczone powyżej.
+            unsafe { (e.fns.destroy_instance)(e.raw, std::ptr::null()) };
+        }
+    }
+}
+
 fn vk_ok(r: i32) -> Result<(), i32> {
     if r >= 0 {
         Ok(())
@@ -109,6 +137,7 @@ impl VulkanBackend {
     pub fn new() -> Result<VulkanBackend, i32> {
         let lib = Arc::new(LibVulkan::load().map_err(|_| VK_ERROR_INITIALIZATION_FAILED)?);
         let global = GlobalFns::load(&lib).map_err(|_| VK_ERROR_INITIALIZATION_FAILED)?;
+        ensure_keeper_instance(&global);
         Ok(VulkanBackend {
             replay: Replayer::new(lib.clone()),
             lib,

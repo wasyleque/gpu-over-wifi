@@ -178,3 +178,17 @@ fn hostile_streams_are_rejected_without_touching_the_driver() {
     assert!(b.mem_read(12345, 0, 16).is_err());
     b.destroy_instance(inst).unwrap();
 }
+
+#[test]
+fn abandoned_sessions_do_not_leak_instances_in_the_driver() {
+    // Klient, który znika bez vkDestroyInstance, nie może z czasem odbierać kolejnym sesjom kart (NVIDIA: po ~20 wyciekach
+    // widać tylko llvmpipe). Każda sesja musi widzieć tyle samo urządzeń.
+    let mut counts = Vec::new();
+    for _ in 0..40 {
+        let Ok(mut b) = VulkanBackend::new() else { return };
+        let inst = b.create_instance(0x0040_1000, &[]).unwrap();
+        counts.push(b.enum_physical_devices(inst).unwrap().len());
+        // brak destroy_instance: sprząta Drop
+    }
+    assert!(counts.iter().all(|c| *c == counts[0]), "liczba urządzeń zmienia się między sesjami: {counts:?}");
+}
