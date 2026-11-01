@@ -315,7 +315,7 @@ fn decoder_rejects_oversized_chain_and_unknown_stype() {
     let mut w = honest.clone();
     // Ostatni bajt uczciwego strumienia to licznik łańcucha (0); zamieniamy go na 65.
     *w.last_mut().unwrap() = 65;
-    assert!(matches!(decode_struct(f2, &mut Decoder::new(&w), &Identity), Err(_)));
+    assert!(decode_struct(f2, &mut Decoder::new(&w), &Identity).is_err());
     let mut w2 = honest.clone();
     *w2.last_mut().unwrap() = 1;
     w2.extend(0x7FFF_0000u32.to_le_bytes());
