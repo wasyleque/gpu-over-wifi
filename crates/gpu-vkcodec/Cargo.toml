@@ -1,0 +1,8 @@
+[package]
+name = "gpu-vkcodec"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gpu-proto = { path = "../gpu-proto" }
+gpu-wire = { path = "../gpu-wire" }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-proto", "crates/hub-server", "crates/hub-client", "crates/gpu-vkgen", "crates/gpu-wire", "crates/gpu-proto", "crates/gpu-renderd", "crates/gpu-icd"]
+members = ["crates/hub-proto", "crates/hub-server", "crates/hub-client", "crates/gpu-vkgen", "crates/gpu-wire", "crates/gpu-proto", "crates/gpu-renderd", "crates/gpu-icd", "crates/gpu-vkcodec"]
 
 [workspace.package]
 version = "0.1.0"
