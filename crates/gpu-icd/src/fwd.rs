@@ -202,9 +202,24 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             }
         };
     }
+    if cmd.name == "vkCreateGraphicsPipelines" && std::env::var("GPU_ICD_TRACE").is_ok() {
+        for i in 0..slots.get(2).copied().unwrap_or(0).min(8) as usize {
+            let info = (slots[3] as *const u8).add(i * 144);
+            trace_text(&format!("  pipeline[{i}] app: {}", gpu_proto::debug::describe_graphics_pipeline_info(info)));
+        }
+    }
     let r = exec(&mut st, op, &mut slots);
     trace(cmd.name, r);
     r
+}
+
+fn trace_text(line: &str) {
+    if let Ok(path) = std::env::var("GPU_ICD_TRACE") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
 }
 
 /// `GPU_ICD_TRACE=<plik>`: dopisuje nazwę każdego polecenia aplikacji i zwróconą wartość (diagnostyka awarii gier).

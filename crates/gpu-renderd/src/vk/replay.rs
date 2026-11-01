@@ -85,6 +85,15 @@ fn trace_command(name: &str) {
     }
 }
 
+fn trace_text(line: &str) {
+    if let Ok(path) = std::env::var("GPU_RENDERD_TRACE") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 fn code(e: CodecError) -> i32 {
     eprintln!("replay: {e:?}");
     ERR_UNKNOWN
@@ -179,6 +188,15 @@ impl Replayer {
         let ids: Vec<Vec<u64>> = outs.iter().map(|(_, p, n)| (0..*n).map(|i| unsafe { std::ptr::read_unaligned(p.add(i)) }).collect()).collect();
         let size = if cmd.name == "vkAllocateMemory" { unsafe { arg_uint(cmd, args, "pAllocateInfo->allocationSize") }.unwrap_or(0) } else { 0 };
         trace_command(cmd.name);
+        if cmd.name == "vkCreateGraphicsPipelines" && std::env::var("GPU_RENDERD_TRACE").is_ok() {
+            // SAFETY: sloty parametrów (8 B każdy) leżą w arenie; parametr 3 to pCreateInfos, 2 to createInfoCount.
+            unsafe {
+                let slot = |i: usize| std::ptr::read_unaligned(args.add(i * 8) as *const u64);
+                for i in 0..slot(2).min(8) as usize {
+                    trace_text(&format!("  pipeline[{i}] server: {}", gpu_proto::debug::describe_graphics_pipeline_info((slot(3) as *const u8).add(i * 144))));
+                }
+            }
+        }
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
         self.last_ret = rax;
