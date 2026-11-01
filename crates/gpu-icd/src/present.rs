@@ -10,6 +10,21 @@ const FMT_B8G8R8A8_UNORM: u32 = 44;
 const LAYOUT_TRANSFER_DST: u32 = 7;
 const LAYOUT_PRESENT_SRC: u32 = 1_000_001_002;
 
+const MODE_IMMEDIATE: u32 = 0;
+const MODE_MAILBOX: u32 = 1;
+const MODE_FIFO: u32 = 2;
+
+/// Tryb prezentacji z ustawienia `GPU_ICD_PRESENT` (`auto`, `fifo`, `mailbox`, `immediate`) spośród obsługiwanych przez sterownik.
+/// `auto` = mailbox (bez czekania na vsync, najmniejsze opóźnienie), a gdy go brak, FIFO (wymagany przez specyfikację).
+fn choose_present_mode(setting: &str, supported: &[u32]) -> u32 {
+    let want = match setting.trim().to_ascii_lowercase().as_str() {
+        "fifo" => MODE_FIFO,
+        "immediate" => MODE_IMMEDIATE,
+        _ => MODE_MAILBOX,
+    };
+    if supported.contains(&want) { want } else { MODE_FIFO }
+}
+
 pub struct Presenter {
     dev: u64,
     queue: u64,
@@ -83,12 +98,13 @@ impl Presenter {
             eprintln!("[gpu-icd] Intel caps: min {} max {} extent {}x{} usage {:#x} transforms {:#x} current {:#x} alpha {:#x}", w(0), w(4), w(8), w(12), w(48), w(36), w(40), w(44));
             eprintln!("[gpu-icd] Intel formaty: {:?}, tryby: {:?}", l.surface_formats(surface), l.present_modes(surface));
         }
-        let min_images = u32::from_le_bytes([caps[0], caps[1], caps[2], caps[3]]).max(2);
+        let mode = choose_present_mode(&std::env::var("GPU_ICD_PRESENT").unwrap_or_default(), &l.present_modes(surface).unwrap_or_default());
+        let min_images = u32::from_le_bytes([caps[0], caps[1], caps[2], caps[3]]).max(if mode == MODE_MAILBOX { 3 } else { 2 });
         let transform = u32::from_le_bytes([caps[40], caps[41], caps[42], caps[43]]);
         let mut sci = S::new("VkSwapchainCreateInfoKHR");
         sci.u64("surface", surface).u32("minImageCount", min_images).u32("imageFormat", FMT_B8G8R8A8_UNORM).u32("imageColorSpace", 0);
         sci.u32o("imageExtent", 0, width).u32o("imageExtent", 4, height).u32("imageArrayLayers", 1).u32("imageUsage", 0x2);
-        sci.u32("preTransform", if transform == 0 { 1 } else { transform }).u32("compositeAlpha", 1).u32("presentMode", 2).u32("clipped", 1);
+        sci.u32("preTransform", if transform == 0 { 1 } else { transform }).u32("compositeAlpha", 1).u32("presentMode", mode).u32("clipped", 1);
         ck("vkCreateSwapchainKHR", l.call("vkCreateSwapchainKHR", &[dev, sci.p(), 0, &mut me.swapchain as *mut u64 as u64]))?;
         let mut n = 0u32;
         l.call("vkGetSwapchainImagesKHR", &[dev, me.swapchain, &mut n as *mut u32 as u64, 0]);
@@ -197,6 +213,17 @@ impl Presenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn present_mode_choice_prefers_mailbox_and_falls_back_to_fifo() {
+        assert_eq!(choose_present_mode("", &[0, 1, 2]), MODE_MAILBOX);
+        assert_eq!(choose_present_mode("auto", &[2]), MODE_FIFO);
+        assert_eq!(choose_present_mode("fifo", &[0, 1, 2]), MODE_FIFO);
+        assert_eq!(choose_present_mode("Immediate", &[0, 2]), MODE_IMMEDIATE);
+        assert_eq!(choose_present_mode("immediate", &[2]), MODE_FIFO);
+        assert_eq!(choose_present_mode("mailbox", &[]), MODE_FIFO);
+        assert_eq!(choose_present_mode("bzdura", &[1, 2]), MODE_MAILBOX);
+    }
 
     #[test]
     fn rgba_to_bgra_swaps_red_and_blue() {
