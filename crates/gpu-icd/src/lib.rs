@@ -507,42 +507,39 @@ unsafe extern "C" fn get_sparse_image_format_properties(_p: *mut c_void, _f: u32
 
 const VK_TRUE_U32: u32 = 1;
 
-/// `vkCreate*SurfaceKHR`: ICD tworzy własny uchwyt (struktura w układzie VkIcdSurface), który loader odsyła w zapytaniach.
-unsafe fn make_surface(info: *const u8, out: *mut u64, platform: u32, a_off: usize, b_off: usize, b_wide: bool) -> VkResult {
+/// `vkCreate*SurfaceKHR`: powierzchnię tworzy lokalny sterownik (Mesa wymaga własnego obiektu), a jego uchwyt oddajemy loaderowi.
+unsafe fn make_surface(fn_name: &str, info: *const u8, out: *mut u64) -> VkResult {
     if out.is_null() {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    let (a, b) = if info.is_null() {
-        (0, 0)
-    } else {
-        let a = std::ptr::read_unaligned(info.add(a_off) as *const u64);
-        let b = if b_off == 0 { 0 } else if b_wide { std::ptr::read_unaligned(info.add(b_off) as *const u64) } else { std::ptr::read_unaligned(info.add(b_off) as *const u32) as u64 };
-        (a, b)
-    };
-    *out = Box::into_raw(wsi::icd_surface(platform, a, b)) as u64;
-    VK_SUCCESS
+    match with_local(|l| l.create_surface(fn_name, info as u64)).flatten() {
+        Some(h) => {
+            *out = h;
+            VK_SUCCESS
+        }
+        None => VK_ERROR_INITIALIZATION_FAILED,
+    }
 }
 
 unsafe extern "C" fn create_wayland_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
-    make_surface(info, out, wsi::PLATFORM_WAYLAND, 24, 32, true) // display @24, surface @32
+    make_surface("vkCreateWaylandSurfaceKHR", info, out)
 }
 
 unsafe extern "C" fn create_xcb_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
-    make_surface(info, out, wsi::PLATFORM_XCB, 24, 32, false) // connection @24, window (u32) @32
+    make_surface("vkCreateXcbSurfaceKHR", info, out)
 }
 
 unsafe extern "C" fn create_xlib_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
-    make_surface(info, out, wsi::PLATFORM_XLIB, 24, 32, true) // dpy @24, window @32
+    make_surface("vkCreateXlibSurfaceKHR", info, out)
 }
 
 unsafe extern "C" fn create_headless_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
-    let _ = info;
-    make_surface(std::ptr::null(), out, wsi::PLATFORM_HEADLESS, 0, 0, true)
+    make_surface("vkCreateHeadlessSurfaceEXT", info, out)
 }
 
 unsafe extern "C" fn destroy_surface(_i: u64, surface: u64, _a: *const c_void) {
     if surface != 0 {
-        drop(Box::from_raw(surface as *mut [u64; 3]));
+        with_local(|l| l.destroy_surface(surface));
     }
 }
 

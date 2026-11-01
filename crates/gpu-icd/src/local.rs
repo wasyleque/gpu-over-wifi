@@ -89,8 +89,23 @@ impl LocalVulkan {
 
     pub(crate) fn call(&self, name: &str, ints: &[u64]) -> Option<i32> {
         let f = Self::fnptr(&self.lib, self.instance, name)?;
+        if std::env::var("GPU_ICD_DEBUG_LOCAL").is_ok() {
+            eprintln!("[gpu-icd] lokalnie: {name}({ints:x?})");
+        }
         // SAFETY: wskaźniki w `ints` żyją do końca wywołania; sygnatura zgodna z vk.xml.
         unsafe { call_thunk(f, ints, &[]) }.map(|r| r as u32 as i32)
+    }
+
+    /// Tworzy powierzchnię PRZEZ lokalny sterownik (`vkCreate*SurfaceKHR` z create info aplikacji). Sterownik (Mesa) wymaga
+    /// własnego, większego obiektu powierzchni; ręcznie złożona struktura `VkIcdSurface*` wystarcza tylko do zapytań o możliwości.
+    pub fn create_surface(&self, fn_name: &str, info: u64) -> Option<u64> {
+        let mut out = 0u64;
+        let r = self.call(fn_name, &[self.instance as u64, info, 0, &mut out as *mut u64 as u64])?;
+        (r >= 0 && out != 0).then_some(out)
+    }
+
+    pub fn destroy_surface(&self, surface: u64) {
+        self.call("vkDestroySurfaceKHR", &[self.instance as u64, surface, 0]);
     }
 
     /// Czy lokalna karta potrafi prezentować na `surface` z rodziny kolejek `qf`.

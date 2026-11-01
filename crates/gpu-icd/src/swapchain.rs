@@ -30,7 +30,9 @@ pub struct Swapchain {
     cbs: Vec<u64>,
     fence: u64,
     readback_mem: u64,
-    presenter: Presenter,
+    /// Lokalny prezenter tworzymy leniwie przy pierwszym `Present` (poza callbackami okna aplikacji).
+    presenter: Option<Presenter>,
+    surface: u64,
     next: usize,
     frames: u64,
 }
@@ -92,10 +94,6 @@ unsafe fn create_inner(st: &mut InstState, dev: u64, info: *const u8) -> Result<
     if w == 0 || h == 0 || w > 16384 || h > 16384 {
         return Err(VK_ERROR_INITIALIZATION_FAILED);
     }
-    let presenter = with_local(|l| Presenter::new(l, surface, w, h)).ok_or(VK_ERROR_INITIALIZATION_FAILED)?.map_err(|e| {
-        eprintln!("gpu-icd: lokalny prezenter: {e}");
-        VK_ERROR_INITIALIZATION_FAILED
-    })?;
     let props = remote_pdev_props(st, dev).ok_or(VK_ERROR_INITIALIZATION_FAILED)?;
 
     let mut images = Vec::new();
@@ -157,7 +155,7 @@ unsafe fn create_inner(st: &mut InstState, dev: u64, info: *const u8) -> Result<
     let mut fence = 0u64;
     exec_named(st, "vkCreateFence", &mut [dev, fci.p(), 0, &mut fence as *mut u64 as u64]);
     let id = st.alloc_id();
-    st.swapchains.insert(id, Swapchain { device: dev, queue, width: w, height: h, format, images, cbs, fence, readback_mem, presenter, next: 0, frames: 0 });
+    st.swapchains.insert(id, Swapchain { device: dev, queue, width: w, height: h, format, images, cbs, fence, readback_mem, presenter: None, surface, next: 0, frames: 0 });
     Ok(id)
 }
 
@@ -182,7 +180,9 @@ pub unsafe extern "C" fn destroy_swapchain(dev: u64, sc: u64, _alloc: *const c_v
     for img in &sw.images {
         exec_named(&mut st, "vkDestroyImage", &mut [dev, *img, 0]);
     }
-    with_local(|l| sw.presenter.destroy(l));
+    if let Some(p) = sw.presenter.as_mut() {
+        with_local(|l| p.destroy(l));
+    }
 }
 
 pub unsafe extern "C" fn get_swapchain_images(_dev: u64, sc: u64, count: *mut u32, out: *mut u64) -> i32 {
@@ -297,7 +297,19 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         }
         let _ = std::fs::write(path, ppm);
     }
-    match with_local(|l| sw.presenter.present(l, &frame)) {
+    if sw.presenter.is_none() {
+        let (surface, w, h) = (sw.surface, sw.width, sw.height);
+        match with_local(|l| Presenter::new(l, surface, w, h)) {
+            Some(Ok(p)) => sw.presenter = Some(p),
+            Some(Err(e)) => {
+                eprintln!("gpu-icd: lokalny prezenter: {e}");
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+            None => return VK_ERROR_INITIALIZATION_FAILED,
+        }
+    }
+    let Some(p) = sw.presenter.as_mut() else { return VK_ERROR_INITIALIZATION_FAILED };
+    match with_local(|l| p.present(l, &frame)) {
         Some(Ok(r)) => r,
         _ => VK_ERROR_INITIALIZATION_FAILED,
     }

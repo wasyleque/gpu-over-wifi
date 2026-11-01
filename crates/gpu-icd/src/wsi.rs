@@ -16,17 +16,6 @@ pub const SWAPCHAIN_IMAGES: u32 = 3;
 /// Użycia obrazów, które potrafi zdalna karta (obrazy żyją na serwerze): kopiowanie, próbkowanie, zapis, kolor.
 pub const SUPPORTED_USAGE: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x80;
 
-pub const PLATFORM_WAYLAND: u32 = 1;
-pub const PLATFORM_XCB: u32 = 3;
-pub const PLATFORM_XLIB: u32 = 4;
-pub const PLATFORM_HEADLESS: u32 = 9;
-
-/// Powierzchnia ICD w układzie zgodnym z `VkIcdSurface*` (platforma @0, dwa wskaźniki/uchwyty @8 i @16).
-/// Taki sam układ rozumie sterownik lokalny, więc przekazujemy mu ją bez konwersji.
-pub fn icd_surface(platform: u32, a: u64, b: u64) -> Box<[u64; 3]> {
-    Box::new([platform as u64, a, b])
-}
-
 const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37;
 const VK_FORMAT_R8G8B8A8_SRGB: u32 = 43;
 const VK_FORMAT_B8G8R8A8_UNORM: u32 = 44;
@@ -81,21 +70,6 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
-    }
-
-    #[test]
-    fn icd_surface_has_the_vkicdsurface_layout() {
-        let s = icd_surface(PLATFORM_WAYLAND, 0xD15, 0x5F);
-        let p = s.as_ptr() as *const u8;
-        unsafe {
-            assert_eq!(std::ptr::read_unaligned(p as *const u32), 1, "platforma @0");
-            assert_eq!(std::ptr::read_unaligned(p.add(8) as *const u64), 0xD15, "wl_display @8");
-            assert_eq!(std::ptr::read_unaligned(p.add(16) as *const u64), 0x5F, "wl_surface @16");
-        }
-        let xcb = icd_surface(PLATFORM_XCB, 1, 7);
-        // SAFETY: bufor ma 24 bajty; czytamy u32 pod offsetem 16.
-        assert_eq!(unsafe { std::ptr::read_unaligned((xcb.as_ptr() as *const u8).add(16) as *const u32) }, 7, "okno XCB (u32) @16");
-        assert_eq!(icd_surface(PLATFORM_HEADLESS, 0, 0)[0], 9);
     }
 
     #[test]

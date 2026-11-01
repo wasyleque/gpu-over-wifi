@@ -44,6 +44,9 @@ pub fn rgba_to_bgra(src: &[u8], dst: &mut [u8]) -> bool {
 }
 
 fn ck(name: &str, r: Option<i32>) -> Result<i32, String> {
+    if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        eprintln!("[gpu-icd] prezenter: {name} -> {r:?}");
+    }
     match r {
         Some(c) if c >= 0 => Ok(c),
         Some(c) => Err(format!("{name} = {c}")),
@@ -75,6 +78,11 @@ impl Presenter {
 
         let mut caps = vec![0u8; 56];
         ck("surface caps", l.call("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", &[pd, surface, caps.as_mut_ptr() as u64]))?;
+        if std::env::var("GPU_ICD_DEBUG").is_ok() {
+            let w = |o: usize| u32::from_le_bytes([caps[o], caps[o + 1], caps[o + 2], caps[o + 3]]);
+            eprintln!("[gpu-icd] Intel caps: min {} max {} extent {}x{} usage {:#x} transforms {:#x} current {:#x} alpha {:#x}", w(0), w(4), w(8), w(12), w(48), w(36), w(40), w(44));
+            eprintln!("[gpu-icd] Intel formaty: {:?}, tryby: {:?}", l.surface_formats(surface), l.present_modes(surface));
+        }
         let min_images = u32::from_le_bytes([caps[0], caps[1], caps[2], caps[3]]).max(2);
         let transform = u32::from_le_bytes([caps[40], caps[41], caps[42], caps[43]]);
         let mut sci = S::new("VkSwapchainCreateInfoKHR");
@@ -189,7 +197,6 @@ impl Presenter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wsi::{icd_surface, PLATFORM_HEADLESS};
 
     #[test]
     fn rgba_to_bgra_swaps_red_and_blue() {
@@ -211,8 +218,10 @@ mod tests {
             eprintln!("POMINIĘTO: sterownik bez VK_EXT_headless_surface");
             return;
         }
-        let surface = icd_surface(PLATFORM_HEADLESS, 0, 0);
-        let sh = surface.as_ptr() as u64;
+        let info = [0u64; 3];
+        let mut hinfo = info;
+        hinfo[0] = 1_000_256_000; // VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT
+        let sh = l.create_surface("vkCreateHeadlessSurfaceEXT", hinfo.as_ptr() as u64).expect("powierzchnia headless");
         let (w, h) = (64u32, 48u32);
         let mut p = Presenter::new(&l, sh, w, h).expect("prezenter");
         for n in 0..5u8 {
@@ -222,5 +231,6 @@ mod tests {
         }
         assert!(p.present(&l, &[0u8; 10]).is_err(), "zły rozmiar klatki");
         p.destroy(&l);
+        l.destroy_surface(sh);
     }
 }
