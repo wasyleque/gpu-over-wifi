@@ -458,6 +458,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-nvenc"
+version = "0.1.0"
+
+[[package]]
 name = "gpu-proto"
 version = "0.1.0"
 dependencies = [
