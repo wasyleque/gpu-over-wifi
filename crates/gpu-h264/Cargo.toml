@@ -1,0 +1,6 @@
+[package]
+name = "gpu-h264"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -444,6 +444,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-h264"
+version = "0.1.0"
+
+[[package]]
 name = "gpu-icd"
 version = "0.1.0"
 dependencies = [
