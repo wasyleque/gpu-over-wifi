@@ -20,6 +20,7 @@ def main():
         print(f"Błąd odczytu pliku: {e}")
         sys.exit(1)
     
+    micros = {}
     commands = []  # lista (numer_linii, nazwa, wynik_hex)
     for i, line in enumerate(lines, start=1):
         stripped = line.strip()
@@ -33,6 +34,10 @@ def main():
             parts = stripped.split(' -> ', 1)
             name = parts[0].strip()
             result_hex = parts[1].strip()
+            if ' [' in result_hex:
+                result_hex, t = result_hex.split(' [', 1)
+                result_hex = result_hex.strip()
+                micros[name] = micros.get(name, 0) + int(t.rstrip('us]') or 0)
         else:
             name = stripped
             result_hex = None
@@ -70,6 +75,10 @@ def main():
         for lineno, name, result_hex in negative_lines[:20]:
             print(f"    linia {lineno}: {name} -> {result_hex}")
     
+    if micros:
+        print('(3b) Łączny czas (ms) wg polecenia, top 8:')
+        for n, us in sorted(micros.items(), key=lambda x: -x[1])[:8]:
+            print(f'    {n}: {us/1000:.0f} ms')
     # (4) ostatnie 5 poleceń
     print("(4) Ostatnie 5 poleceń:")
     last5 = commands[-5:]

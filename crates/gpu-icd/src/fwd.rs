@@ -208,8 +208,9 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             trace_text(&format!("  pipeline[{i}] app: {}", gpu_proto::debug::describe_graphics_pipeline_info(info)));
         }
     }
+    let t0 = std::time::Instant::now();
     let r = exec(&mut st, op, &mut slots);
-    trace(cmd.name, r);
+    trace(cmd.name, r, t0.elapsed().as_micros());
     r
 }
 
@@ -223,12 +224,12 @@ fn trace_text(line: &str) {
 }
 
 /// `GPU_ICD_TRACE=<plik>`: dopisuje nazwę każdego polecenia aplikacji i zwróconą wartość (diagnostyka awarii gier).
-fn trace(name: &str, ret: u64) {
+fn trace(name: &str, ret: u64, micros: u128) {
     static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     if let Some(path) = PATH.get_or_init(|| std::env::var("GPU_ICD_TRACE").ok()) {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(f, "{name} -> {:#x}", ret as u32 as i32);
+            let _ = writeln!(f, "{name} -> {:#x} [{micros}us]", ret as u32 as i32);
         }
     }
 }

@@ -208,7 +208,9 @@ impl Replayer {
             }
         }
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
+        let t0 = std::time::Instant::now();
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
+        trace_text(&format!("  t {} {}us", cmd.name, t0.elapsed().as_micros()));
         self.last_ret = rax;
         let result = if cmd.ret == Ret::VkResult { rax as u32 as i32 } else { 0 };
         if result < 0 {
