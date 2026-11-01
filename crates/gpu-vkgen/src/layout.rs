@@ -44,7 +44,7 @@ mod tests {
     <type category="basetype">typedef <type>uint32_t</type> <name>VkBool32</name>;</type>
     <type category="handle" objtypeenum="VK_OBJECT_TYPE_INSTANCE"><type>VK_DEFINE_HANDLE</type>(<name>VkInstance</name>)</type>
     <type category="handle" objtypeenum="VK_OBJECT_TYPE_BUFFER"><type>VK_DEFINE_NON_DISPATCHABLE_HANDLE</type>(<name>VkBuffer</name>)</type>
-    <type category="funcpointer">typedef void (VKAPI_PTR *<name>PFN_vkFoo</name>)(void);</type>
+    <type category="funcpointer"><proto><type>void</type> <name>PFN_vkFoo</name></proto></type>
     <type requires="VkFooFlagBits" category="bitmask">typedef <type>VkFlags</type> <name>VkFooFlags</name>;</type>
     <type category="enum" name="VkFormat"/>
     <type category="struct" name="VkPad">
