@@ -482,6 +482,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-vaapi"
+version = "0.1.0"
+dependencies = [
+ "gpu-h264",
+]
+
+[[package]]
 name = "gpu-vkcodec"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,7 @@
+[package]
+name = "gpu-vaapi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gpu-h264 = { path = "../gpu-h264" }
