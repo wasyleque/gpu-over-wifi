@@ -142,7 +142,7 @@ impl VaDecoder {
             let mut cfg = 0u32;
             for profile in [VAProfileH264High, VAProfileH264Main] {
                 // SAFETY: atrybut i wskaźnik wyjściowy są poprawne.
-                if unsafe { (f.create_config)(dpy, profile as i32, VAEntrypointVLD as i32, &mut attr, 1, &mut cfg) } == 0 {
+                if unsafe { (f.create_config)(dpy, profile, VAEntrypointVLD as i32, &mut attr, 1, &mut cfg) } == 0 {
                     return Ok(VaDecoder { f, dpy, _drm: file, config: cfg, sized: None, sps: None, pps: None, refs: Vec::new(), next_surface: 0, poc: 0 });
                 }
             }

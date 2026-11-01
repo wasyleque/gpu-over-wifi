@@ -20,7 +20,7 @@ pub struct EncoderConfig {
 impl EncoderConfig {
     /// Sprawdza zakres wartości (NVENC H.264: wymiary parzyste, 33..=4096).
     pub fn validate(&self) -> Result<(), String> {
-        if self.width < 33 || self.height < 33 || self.width > 4096 || self.height > 4096 || self.width % 2 != 0 || self.height % 2 != 0 {
+        if self.width < 33 || self.height < 33 || self.width > 4096 || self.height > 4096 || !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
             return Err(format!("wymiary {}x{} poza zakresem H.264 NVENC (parzyste, 33..=4096)", self.width, self.height));
         }
         if self.fps == 0 || self.fps > 240 {

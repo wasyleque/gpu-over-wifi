@@ -1,4 +1,6 @@
 //! Własne FFI do NVENC (libnvidia-encode, przez dlopen) i CUDA oraz bezpieczna nakładka kodera H.264.
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod api;
 pub mod consts;
 pub mod cuda;
