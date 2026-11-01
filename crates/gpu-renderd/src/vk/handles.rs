@@ -16,58 +16,117 @@ impl Handle {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TableFull;
 
+#[derive(Debug)]
+struct Slot<T> {
+    gen: u32,
+    val: Option<T>,
+    next_free: u32,
+}
+
 pub struct HandleTable<T> {
-    // Pola wybiera implementacja (sloty z generacją i listą wolnych miejsc).
-    _marker: std::marker::PhantomData<T>,
+    slots: Vec<Slot<T>>,
+    free_head: u32,
+    /// Globalna generacja: rośnie przy każdym `insert`, nigdy nie przyjmuje wartości 0.
+    generation: u32,
+    max: usize,
+    live: usize,
 }
 
 impl<T> HandleTable<T> {
-    /// Tablica bez limitu (dla zaufanych wywołań) .
+    /// Tablica bez limitu (dla zaufanych wywołań).
     pub fn new() -> Self {
-        todo!()
+        Self::with_limit(usize::MAX)
     }
 
     /// Tablica, która przyjmie co najwyżej `max` jednocześnie żywych wpisów.
     pub fn with_limit(max: usize) -> Self {
-        todo!()
+        HandleTable { slots: Vec::new(), free_head: u32::MAX, generation: 0, max, live: 0 }
     }
 
     /// Wyłącznie do testów: generacja, od której zaczyna się liczenie.
     #[cfg(test)]
     pub(crate) fn with_generation(max: usize, generation: u32) -> Self {
-        todo!()
+        HandleTable { generation, ..Self::with_limit(max) }
+    }
+
+    fn next_generation(&mut self) -> u32 {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generation = 1;
+        }
+        self.generation
     }
 
     /// Wstawia wartość i zwraca świeży uchwyt (nigdy 0, nigdy równy żadnemu wcześniej wydanemu
     /// uchwytowi żywego wpisu). `Err(TableFull)` gdy limit osiągnięty.
     pub fn insert(&mut self, v: T) -> Result<Handle, TableFull> {
-        todo!()
+        if self.live >= self.max {
+            return Err(TableFull);
+        }
+        let reuse = if self.free_head != u32::MAX { Some(self.free_head) } else { None };
+        let index = match reuse {
+            Some(i) => i,
+            None => {
+                if self.slots.len() >= (u32::MAX - 1) as usize {
+                    return Err(TableFull);
+                }
+                self.slots.len() as u32
+            }
+        };
+        let gen = self.next_generation();
+        match reuse {
+            Some(i) => {
+                let slot = self.slots.get_mut(i as usize).ok_or(TableFull)?;
+                self.free_head = slot.next_free;
+                *slot = Slot { gen, val: Some(v), next_free: u32::MAX };
+            }
+            None => self.slots.push(Slot { gen, val: Some(v), next_free: u32::MAX }),
+        }
+        self.live += 1;
+        Ok(Handle(((gen as u64) << 32) | index as u64))
+    }
+
+    fn slot(&self, h: Handle) -> Option<&Slot<T>> {
+        let slot = self.slots.get((h.0 & 0xFFFF_FFFF) as usize)?;
+        (slot.gen == (h.0 >> 32) as u32 && slot.val.is_some()).then_some(slot)
     }
 
     pub fn get(&self, h: Handle) -> Option<&T> {
-        todo!()
+        self.slot(h)?.val.as_ref()
     }
 
     pub fn get_mut(&mut self, h: Handle) -> Option<&mut T> {
-        todo!()
+        self.slot(h)?;
+        self.slots.get_mut((h.0 & 0xFFFF_FFFF) as usize)?.val.as_mut()
     }
 
     /// Usuwa wpis; drugie usunięcie tego samego uchwytu zwraca `None`.
     pub fn remove(&mut self, h: Handle) -> Option<T> {
-        todo!()
+        self.slot(h)?;
+        let index = (h.0 & 0xFFFF_FFFF) as u32;
+        let free_head = self.free_head;
+        let slot = self.slots.get_mut(index as usize)?;
+        let v = slot.val.take()?;
+        slot.next_free = free_head;
+        self.free_head = index;
+        self.live -= 1;
+        Some(v)
     }
 
     pub fn len(&self) -> usize {
-        todo!()
+        self.live
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.live == 0
     }
 
     /// Zwraca wszystkie żywe wartości (w kolejności slotów) i unieważnia każdy uchwyt.
     pub fn drain_all(&mut self) -> Vec<T> {
-        todo!()
+        let out: Vec<T> = self.slots.drain(..).filter_map(|s| s.val).collect();
+        self.free_head = u32::MAX;
+        self.live = 0;
+        out
     }
 }
 
@@ -204,7 +263,7 @@ mod tests {
         let mut x: u32 = 12345;
         for step in 0..5000u32 {
             x = x.wrapping_mul(1664525).wrapping_add(1013904223);
-            if x % 3 != 0 || live.is_empty() {
+            if !x.is_multiple_of(3) || live.is_empty() {
                 live.push((t.insert(step).unwrap(), step));
             } else {
                 let i = (x as usize / 7) % live.len();
