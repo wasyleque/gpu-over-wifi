@@ -102,7 +102,10 @@ pub fn encode_segments(data: &[u8], ranges: &[(usize, usize)], more: bool) -> Ve
 }
 
 /// Odwrotność `encode_segments`: `(więcej, segmenty (offset, bajty))`. `None` przy uciętych lub niespójnych danych.
-pub fn decode_segments(buf: &[u8]) -> Option<(bool, Vec<(u64, &[u8])>)> {
+/// Segmenty odpowiedzi delty: `(offset, bajty)`.
+pub type Segments<'a> = Vec<(u64, &'a [u8])>;
+
+pub fn decode_segments(buf: &[u8]) -> Option<(bool, Segments<'_>)> {
     let (&more, mut rest) = buf.split_first()?;
     let mut segs = Vec::new();
     while !rest.is_empty() {
