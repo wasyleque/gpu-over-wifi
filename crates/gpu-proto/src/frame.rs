@@ -407,12 +407,7 @@ mod tests {
                 let chunk: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
                 r.push(&chunk);
                 sent += n;
-                loop {
-                    match r.next_frame() {
-                        Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => break,
-                    }
-                }
+                while let Ok(Some(_)) = r.next_frame() {}
             }
             assert!(r.buffered() <= total, "bufor nie może urosnąć ponad wejście");
         }
