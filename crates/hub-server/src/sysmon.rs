@@ -51,42 +51,301 @@ pub struct NetRate {
 
 /// Linie `cpu` i `cpuN` z `/proc/stat` (zbiorcza pierwsza, jeśli jest w pliku).
 pub fn parse_cpu_stat(text: &str) -> Vec<CpuTimes> {
-    todo!()
+    let mut result = Vec::new();
+    
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        
+        let first = parts[0];
+        let id = if first == "cpu" {
+            None
+        } else if let Some(num_str) = first.strip_prefix("cpu") {
+            if let Ok(num) = num_str.parse::<usize>() {
+                Some(num)
+            } else {
+                continue; // Skip lines that don't match cpu<number>
+            }
+        } else {
+            continue; // Skip lines that don't start with "cpu"
+        };
+        
+        // Parse the numeric fields (user, nice, system, idle, iowait, irq, softirq, steal)
+        let mut fields = [0u64; 8];
+        let mut i = 0;
+        for part in parts.iter().skip(1) {
+            if i >= 8 {
+                break;
+            }
+            if let Ok(val) = part.parse::<u64>() {
+                fields[i] = val;
+            } else {
+                // If any field fails to parse, skip this line
+                continue;
+            }
+            i += 1;
+        }
+        
+        // Calculate busy and total times
+        let busy = fields[0].saturating_add(fields[1])
+            .saturating_add(fields[2])
+            .saturating_add(fields[5])
+            .saturating_add(fields[6])
+            .saturating_add(fields[7]);
+        
+        let total = busy.saturating_add(fields[3])
+            .saturating_add(fields[4]);
+        
+        result.push(CpuTimes { id, busy, total });
+    }
+    
+    result
 }
 
 /// Użycie CPU w procentach (0-100) dla każdego wpisu z `cur`, dopasowanego po `id` do `prev`.
 /// Brak odpowiednika w `prev` lub zerowy przyrost czasu => 0.0.
 pub fn cpu_percent(prev: &[CpuTimes], cur: &[CpuTimes]) -> Vec<f32> {
-    todo!()
+    cur.iter()
+        .map(|cur_entry| {
+            // Find corresponding entry in prev
+            let prev_entry = prev.iter().find(|prev_entry| prev_entry.id == cur_entry.id);
+            
+            match prev_entry {
+                Some(prev_entry) => {
+                    // Calculate deltas
+                    let busy_delta = cur_entry.busy.saturating_sub(prev_entry.busy);
+                    let total_delta = cur_entry.total.saturating_sub(prev_entry.total);
+                    
+                    if total_delta == 0 {
+                        0.0
+                    } else {
+                        let percent = 100.0 * (busy_delta as f64) / (total_delta as f64);
+                        // Clamp to 0..=100 range
+                        percent.clamp(0.0, 100.0) as f32
+                    }
+                }
+                None => 0.0,
+            }
+        })
+        .collect()
 }
 
 pub fn parse_meminfo(text: &str) -> MemInfo {
-    todo!()
+    let mut mem_info = MemInfo::default();
+    
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            let value = value.trim();
+            
+            // Parse the numeric value and unit (kB)
+            if let Some(kb_str) = value.strip_suffix(" kB") {
+                if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                    match key {
+                        "MemTotal" => mem_info.total_kb = kb,
+                        "MemAvailable" => mem_info.available_kb = kb,
+                        "Cached" => mem_info.cached_kb = kb,
+                        "SwapTotal" => mem_info.swap_total_kb = kb,
+                        "SwapFree" => mem_info.swap_free_kb = kb,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    
+    mem_info
 }
 
 /// Tylko całe dyski (nvme0n1, sda, vda): bez partycji, loop, ram, dm, md.
 pub fn parse_diskstats(text: &str) -> Vec<DiskCounters> {
-    todo!()
+    let mut result = Vec::new();
+    
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        
+        // Need at least 10 fields
+        if parts.len() < 10 {
+            continue;
+        }
+        
+        // Parse name (field 2)
+        let name = parts[2].to_string();
+        
+        // Check if this is a whole device (not a partition or special device)
+        if !is_whole_device(&name) {
+            continue;
+        }
+        
+        // Parse sectors_read (field 5) and sectors_written (field 9)
+        if let (Some(read), Some(write)) = (
+            parts[5].parse::<u64>().ok(),
+            parts[9].parse::<u64>().ok()
+        ) {
+            result.push(DiskCounters {
+                name,
+                sectors_read: read,
+                sectors_written: write,
+            });
+        }
+    }
+    
+    result
 }
 
 /// Przepustowość dysków w MB/s (1 MB = 10^6 B, sektor = 512 B). Licznik, który zmalał, daje 0.
 pub fn disk_rates(prev: &[DiskCounters], cur: &[DiskCounters], dt_s: f64) -> Vec<DiskRate> {
-    todo!()
+    if dt_s <= 0.0 || !dt_s.is_finite() {
+        return vec![DiskRate { name: String::new(), read_mb_s: 0.0, write_mb_s: 0.0 }; cur.len()];
+    }
+    
+    cur.iter()
+        .map(|cur_entry| {
+            // Find corresponding entry in prev
+            let prev_entry = prev.iter().find(|prev_entry| prev_entry.name == cur_entry.name);
+            
+            let (read_mb_s, write_mb_s) = match prev_entry {
+                Some(prev_entry) => {
+                    // Calculate deltas
+                    let read_delta = cur_entry.sectors_read.saturating_sub(prev_entry.sectors_read);
+                    
+                    let write_delta = cur_entry.sectors_written.saturating_sub(prev_entry.sectors_written);
+                    
+                    // Convert sectors to MB/s (1 sector = 512 bytes)
+                    let read_mb_s = (read_delta * 512) as f64 / (1_000_000.0 * dt_s);
+                    let write_mb_s = (write_delta * 512) as f64 / (1_000_000.0 * dt_s);
+                    
+                    (read_mb_s, write_mb_s)
+                }
+                None => (0.0, 0.0),
+            };
+            
+            DiskRate {
+                name: cur_entry.name.clone(),
+                read_mb_s,
+                write_mb_s,
+            }
+        })
+        .collect()
 }
 
 /// Interfejsy sieciowe z `/proc/net/dev` bez `lo`.
 pub fn parse_net_dev(text: &str) -> Vec<NetCounters> {
-    todo!()
+    let mut result = Vec::new();
+    let mut lines = text.lines().peekable();
+    
+    // Skip first two header lines
+    lines.next();
+    lines.next();
+    
+    for line in lines {
+        if !line.contains(':') {
+            continue;
+        }
+        
+        // Split on the first colon to separate interface name from data
+        if let Some((iface, data)) = line.split_once(':') {
+            let iface = iface.trim().to_string();
+            
+            // Skip loopback interface
+            if iface == "lo" {
+                continue;
+            }
+            
+            // Parse data fields (whitespace-separated)
+            let fields: Vec<&str> = data.split_whitespace().collect();
+            
+            // Need at least 9 fields for rx_bytes and tx_bytes
+            if fields.len() < 9 {
+                continue;
+            }
+            
+            // Parse rx_bytes (field 0) and tx_bytes (field 8)
+            if let (Some(rx), Some(tx)) = (
+                fields[0].parse::<u64>().ok(),
+                fields[8].parse::<u64>().ok()
+            ) {
+                result.push(NetCounters {
+                    iface,
+                    rx_bytes: rx,
+                    tx_bytes: tx,
+                });
+            }
+        }
+    }
+    
+    result
 }
 
 /// Przepustowość w Mb/s (bity, 10^6). Licznik, który zmalał, daje 0.
 pub fn net_rates(prev: &[NetCounters], cur: &[NetCounters], dt_s: f64) -> Vec<NetRate> {
-    todo!()
+    if dt_s <= 0.0 || !dt_s.is_finite() {
+        return vec![NetRate { iface: String::new(), rx_mbit_s: 0.0, tx_mbit_s: 0.0 }; cur.len()];
+    }
+    
+    cur.iter()
+        .map(|cur_entry| {
+            // Find corresponding entry in prev
+            let prev_entry = prev.iter().find(|prev_entry| prev_entry.iface == cur_entry.iface);
+            
+            let (rx_mbit_s, tx_mbit_s) = match prev_entry {
+                Some(prev_entry) => {
+                    // Calculate deltas
+                    let rx_delta = cur_entry.rx_bytes.saturating_sub(prev_entry.rx_bytes);
+                    
+                    let tx_delta = cur_entry.tx_bytes.saturating_sub(prev_entry.tx_bytes);
+                    
+                    // Convert bytes to Mb/s (1 byte = 8 bits, 1 Mb = 10^6 bits)
+                    let rx_mbit_s = (rx_delta * 8) as f64 / (1_000_000.0 * dt_s);
+                    let tx_mbit_s = (tx_delta * 8) as f64 / (1_000_000.0 * dt_s);
+                    
+                    (rx_mbit_s, tx_mbit_s)
+                }
+                None => (0.0, 0.0),
+            };
+            
+            NetRate {
+                iface: cur_entry.iface.clone(),
+                rx_mbit_s,
+                tx_mbit_s,
+            }
+        })
+        .collect()
 }
 
 /// Temperatura z pliku sysfs w milistopniach ("45000\n" => 45.0).
 pub fn parse_millidegrees(text: &str) -> Option<f32> {
-    todo!()
+    text.trim()
+        .parse::<i64>()
+        .ok()
+        .map(|millidegrees| millidegrees as f32 / 1000.0)
+}
+
+/// Check if a device name represents a whole disk (not a partition or special device)
+fn all_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn all_letters(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+/// Całe dyski: `nvme<N>n<M>`, `sd<litery>`, `vd<litery>`, `xvd<litery>`; bez partycji i urządzeń wirtualnych.
+fn is_whole_device(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix("nvme") {
+        return match rest.split_once('n') {
+            Some((ctrl, ns)) => all_digits(ctrl) && all_digits(ns),
+            None => false,
+        };
+    }
+    for prefix in ["xvd", "sd", "vd"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return all_letters(rest);
+        }
+    }
+    false
 }
 
 #[cfg(test)]
