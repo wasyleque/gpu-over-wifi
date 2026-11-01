@@ -18,6 +18,62 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 | LZ4 and H.264 frame transport, selectable (`GPU_ICD_CODEC`) | Windows client driver, HEVC |
 | AI proxy with VRAM-aware scheduling, DeepSeek via InferSSD | Game-session reservations in the scheduler |
 
+## Test hardware
+
+| Role | Machine | CPU | RAM | GPU | Storage | OS |
+|---|---|---|---|---|---|---|
+| Client (laptop) | Lenovo ThinkPad 20JNS5UQ0N | Intel Core i5-6300U, 4 threads | 8 GB | Intel HD Graphics 520 (Skylake GT2) | – | Arch Linux (Omarchy), Hyprland/Wayland |
+| Server A ("gpu-hub") | desktop | AMD Ryzen 9 5900XT, 16 cores | 64 GB DDR4 (AM4 platform) | NVIDIA RTX 3090 Ti, 24 GB, driver 580.178 | Kingston NVMe 2 TB (PCIe 4) | Ubuntu 26.04 |
+| Server B | desktop | AMD Ryzen 9 5950X, 16 cores | 64 GB DDR4 (AM4 platform) | NVIDIA RTX 3090, 24 GB, driver 580.105 | ADATA SX8200 NVMe 2 TB + 1 TB SSD | Ubuntu 24.04 |
+
+Link client-A: direct 1 Gb/s Ethernet cable, ~0.2 ms round trip. Client-B: VPN (not used for the numbers below).
+RAM *type* follows from the platform (Ryzen 5000 on AM4 supports DDR4 only); module speed and timings were not read because that needs root (`dmidecode`) and are marked as TBD.
+
+## Measurements
+
+All numbers are from single lab runs, not statistics: treat them as orders of magnitude. Reproduce with `GPU_ICD_STATS=1` (client) and the tools in `tools/`.
+
+### Remote Vulkan (client laptop -> server A, `vkcube`, 650x718, release build)
+
+How each design step changed the same scene:
+
+| Step | Frames/s | Notes |
+|---|---|---|
+| 1. Synchronous read-back of every frame over the network | ~27 | 1.87 MB/frame, 7 round trips/frame, read-back 28.8 ms |
+| 2. Asynchronous frames on a second connection, raw | 44 | app no longer waits for the picture |
+| 3. + LZ4 | 46 | 62 KB/frame (30x smaller on this flat scene) |
+| 4. + non-vsync present (`mailbox`) | ~314 | local present 20.2 -> 1.2 ms per frame (FIFO was waiting for vsync) |
+
+Frame codec comparison (per frame, `mailbox`):
+
+| Codec | Size | Receive | Decode | Present |
+|---|---|---|---|---|
+| LZ4 (lossless, default) | 62 KB | 0.1 ms | 1.0 ms | 1.2 ms |
+| H.264 (NVENC -> VA-API) | 32 KB | 0.2 ms | 8.8 ms | 1.1 ms |
+
+On a cable the lossless LZ4 path is faster; H.264 is meant for slower links. `vkcube` is a flat, simple scene, so it flatters LZ4 and says little about real games.
+
+Building blocks:
+
+| Measurement | Result |
+|---|---|
+| Submit + wait + read back 4 KiB on the remote GPU | 1.16 ms (median) |
+| NVENC H.264 encode incl. host->GPU copy, 1920x1080 / 640x360 | 1.62 ms / 0.27 ms (median) |
+| VA-API H.264 decode + read-back + NV12->BGRA on the HD 520, 1920x1080 / 640x360 | 36.6 ms / 4.3 ms (median) |
+| Host -> GPU copy of one 1080p frame (CUDA) | 0.41 ms (20 GB/s) |
+| Sessions seeing the NVIDIA card after the loader-unload fix (40 killed + 20 normal clients) | 60 / 60 (before: 10 / 50) |
+
+### AI hub (server A, DeepSeek V4.1 Flash via InferSSD, one NVMe, context 16384, thinking off)
+
+| Configuration | Generation | Prompt processing |
+|---|---|---|
+| Plain GGUF files (baseline) | 3.37 tok/s | 5.7 tok/s |
+| Expert pack (re-laid-out for the SSD) | 4.76 tok/s (+41%) | 8.1 tok/s |
+| Same, through the hub | 4.66 tok/s | 8.0 tok/s |
+| Long prompt (4105 tokens) with 2 GB VRAM headroom | 3.02 tok/s | 55.7 tok/s |
+
+About half of the remaining time per token is waiting for the single NVMe drive; details and the dead ends are in [`docs/OPTIMIZATION-inferssd.md`](docs/OPTIMIZATION-inferssd.md).
+
 ## Try it
 
 See [`docs/TESTING-OTHER-MACHINE.md`](docs/TESTING-OTHER-MACHINE.md) for building the server daemon and the client driver and running `vkcube` through them. Design notes: [`docs/DESIGN-remote-gpu.md`](docs/DESIGN-remote-gpu.md), [`docs/DESIGN-game-streaming.md`](docs/DESIGN-game-streaming.md). The working status log is [`AGENTS.md`](AGENTS.md).
