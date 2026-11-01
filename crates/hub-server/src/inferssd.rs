@@ -68,6 +68,8 @@ pub struct InferssdBackend {
     state: Mutex<State>,
     /// Alias aktualnie gotowego modelu (odczytywany bez blokowania długiego startu).
     loaded: StdMutex<Option<String>>,
+    /// Katalog ostatniego uruchomienia w trybie `launch` (zawiera `native-events.jsonl`).
+    last_run: StdMutex<Option<PathBuf>>,
 }
 
 impl InferssdBackend {
@@ -80,6 +82,7 @@ impl InferssdBackend {
                 .expect("Błąd inicjalizacji klienta HTTP InferSSD"),
             state: Mutex::new(State::default()),
             loaded: StdMutex::new(None),
+            last_run: StdMutex::new(None),
         }
     }
 
@@ -119,6 +122,9 @@ impl InferssdBackend {
                     .map(|d| d.as_nanos())
                     .unwrap_or(0);
                 let out = l.run_dir.join(format!("run-{nanos}"));
+                if let Ok(mut g) = self.last_run.lock() {
+                    *g = Some(out.clone());
+                }
                 a.extend(["launch".into(), "--execute".into()]);
                 if let Some(r) = &l.resources {
                     a.extend(["--resources".into(), r.into()]);
@@ -231,6 +237,11 @@ impl Backend for InferssdBackend {
 
     fn kind(&self) -> hub_proto::Backend {
         hub_proto::Backend::Inferssd
+    }
+
+    fn telemetry_path(&self) -> Option<PathBuf> {
+        let dir = self.last_run.lock().ok()?.clone()?;
+        Some(dir.join("native-events.jsonl"))
     }
 
     async fn models(&self) -> Vec<String> {

@@ -28,7 +28,7 @@ pub struct DiskCounters {
     pub sectors_written: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DiskRate {
     pub name: String,
     pub read_mb_s: f64,
@@ -42,7 +42,7 @@ pub struct NetCounters {
     pub tx_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NetRate {
     pub iface: String,
     pub rx_mbit_s: f64,

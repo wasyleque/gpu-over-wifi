@@ -324,6 +324,11 @@ impl Scheduler {
             .unwrap_or_else(|| "http://127.0.0.1:11434".to_string())
     }
 
+    /// Plik telemetrii pierwszego backendu, który go udostępnia (InferSSD w trybie `launch`).
+    pub fn telemetry_path(&self) -> Option<std::path::PathBuf> {
+        self.backends.iter().find_map(|b| b.telemetry_path())
+    }
+
     /// Identyfikatory modeli backendów innych niż domyślny (pierwszy), do `GET /v1/models`.
     pub async fn extra_model_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();

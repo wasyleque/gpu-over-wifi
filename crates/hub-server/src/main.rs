@@ -22,6 +22,7 @@ use tracing::{error, info, warn};
 
 mod backend;
 mod inferssd;
+mod monitor;
 mod proxy;
 mod scheduler;
 mod sysmon;
@@ -72,6 +73,7 @@ pub struct AppState {
     pub proxy_client: reqwest::Client,
     pub max_body_mib: usize,
     pub scheduler: Arc<scheduler::Scheduler>,
+    pub monitor: Arc<monitor::Monitor>,
     pub nvml: Option<Arc<Nvml>>,
 }
 
@@ -250,11 +252,76 @@ async fn status_handler(
     }))
 }
 
+/// Strona monitora: statyczny HTML bez danych (dane pobiera z `/api/monitor` z tokenem).
+async fn monitor_page() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        include_str!("monitor.html"),
+    )
+}
+
+#[derive(Deserialize)]
+struct MonitorQuery {
+    since: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+struct MonitorResponse {
+    host: String,
+    now: f64,
+    model: monitor::ModelInfo,
+    samples: Vec<monitor::Sample>,
+    inference: Option<monitor::InferenceView>,
+}
+
+async fn monitor_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<MonitorQuery>,
+) -> Result<Json<MonitorResponse>, StatusCode> {
+    if !verify_bearer_token(&headers, &state.token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let now = monitor::unix_now();
+    Ok(Json(MonitorResponse {
+        host: state.monitor.host.clone(),
+        now,
+        model: state.monitor.model.clone(),
+        samples: state.monitor.since(q.since.unwrap_or(0.0)),
+        inference: state.monitor.inference(now),
+    }))
+}
+
+/// Suma rozmiarów plików `.gguf` z tego samego zestawu shardów co podany pierwszy plik.
+fn model_size_bytes(first_shard: &std::path::Path) -> u64 {
+    let (Some(dir), Some(file)) = (first_shard.parent(), first_shard.file_name().and_then(|f| f.to_str())) else {
+        return 0;
+    };
+    let prefix = file.split("-00001-of-").next().unwrap_or(file);
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    n.starts_with(prefix) && n.ends_with(".gguf")
+                })
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 pub fn build_router(state: AppState) -> Router {
     let max_body_mib = state.max_body_mib;
     let router = Router::new()
         .route("/hello", get(hello_handler))
-        .route("/status", get(status_handler));
+        .route("/status", get(status_handler))
+        .route("/monitor", get(monitor_page))
+        .route("/api/monitor", get(monitor_api));
     proxy::register_routes(router, max_body_mib).with_state(state)
 }
 
@@ -471,6 +538,19 @@ async fn main() {
     let scheduler = scheduler::Scheduler::new(hub_config.scheduler, backends);
     scheduler.spawn_idle_reaper();
 
+    let model = hub_config
+        .backends
+        .iter()
+        .filter(|b| b.kind == "inferssd")
+        .find_map(|b| b.model_paths.iter().next())
+        .map(|(alias, path)| monitor::ModelInfo {
+            name: alias.clone(),
+            size_bytes: model_size_bytes(std::path::Path::new(path)),
+        })
+        .unwrap_or(monitor::ModelInfo { name: String::new(), size_bytes: 0 });
+    let monitor = monitor::Monitor::new(hostname.clone(), model, 40, 384);
+    monitor.spawn(nvml.clone(), scheduler.clone());
+
     let state = AppState {
         token,
         hostname,
@@ -480,6 +560,7 @@ async fn main() {
         proxy_client,
         max_body_mib: args.max_body_mib,
         scheduler,
+        monitor,
         nvml,
     };
 
@@ -528,6 +609,7 @@ mod tests {
                 ))],
             ),
             nvml: None,
+            monitor: monitor::Monitor::new("test".into(), monitor::ModelInfo { name: String::new(), size_bytes: 0 }, 2, 2),
         }
     }
 

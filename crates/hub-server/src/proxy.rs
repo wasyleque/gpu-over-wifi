@@ -326,6 +326,7 @@ mod tests {
             proxy_client: build_proxy_client(),
             max_body_mib: DEFAULT_MAX_BODY_MIB,
             nvml: None,
+            monitor: crate::monitor::Monitor::new("test".into(), crate::monitor::ModelInfo { name: String::new(), size_bytes: 0 }, 2, 2),
             scheduler,
         }
     }
@@ -606,6 +607,7 @@ mod tests {
             proxy_client: build_proxy_client(),
             max_body_mib: DEFAULT_MAX_BODY_MIB,
             nvml: None,
+            monitor: crate::monitor::Monitor::new("test".into(), crate::monitor::ModelInfo { name: String::new(), size_bytes: 0 }, 2, 2),
             scheduler,
         };
         let app = build_router(state);
@@ -709,6 +711,7 @@ mod tests {
             proxy_client: build_proxy_client(),
             max_body_mib: DEFAULT_MAX_BODY_MIB,
             nvml: None,
+            monitor: crate::monitor::Monitor::new("test".into(), crate::monitor::ModelInfo { name: String::new(), size_bytes: 0 }, 2, 2),
             scheduler,
         };
         let app = build_router(state);

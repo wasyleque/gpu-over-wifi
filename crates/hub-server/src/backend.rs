@@ -72,6 +72,10 @@ pub trait Backend: Send + Sync {
     fn kind(&self) -> hub_proto::Backend {
         hub_proto::Backend::Ollama
     }
+    /// Plik telemetrii bieżącego lub ostatniego uruchomienia (dla monitora); domyślnie brak.
+    fn telemetry_path(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// Implementacja backendu dla serwera Ollama.
