@@ -44,6 +44,10 @@ pub trait GpuBackend {
     fn mem_read(&mut self, _memory: u64, _offset: u64, _len: u32) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
     }
+    /// Odczyt samych różnic pamięci (patrz `Request::MemReadDelta`); `max_bytes` ogranicza jedną odpowiedź.
+    fn mem_read_delta(&mut self, _memory: u64, _max_bytes: usize) -> Result<Vec<u8>, i32> {
+        Err(ERR_UNKNOWN)
+    }
     /// Czeka, aż wszystko wysłane wcześniej zostanie wykonane po stronie backendu.
     fn sync(&mut self) -> Result<(), i32> {
         Ok(())
@@ -277,6 +281,10 @@ impl<B: GpuBackend> Session<B> {
                 Request::MemRead { memory, offset, len } => match self.backend.mem_read(memory, offset, len) {
                     Ok(v) => Response::Data(v),
                     Err(code) => Response::Error { code, message: "memory read error".to_string() },
+                },
+                Request::MemReadDelta { memory } => match self.backend.mem_read_delta(memory, gpu_proto::msg::MAX_BATCH - 64) {
+                    Ok(v) => Response::Data(v),
+                    Err(code) => Response::Error { code, message: "memory delta read error".to_string() },
                 },
                 Request::Sync => {
                     let r = self.backend.sync();

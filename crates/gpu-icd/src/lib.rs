@@ -73,6 +73,8 @@ struct InstState {
     next_id: u64,
     /// Rozmiary pamięci przydzielonych na serwerze i lokalne kopie (tylko odwzorowane).
     mem_sizes: HashMap<u64, u64>,
+    /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
+    gpu_dirty: bool,
     mems: HashMap<u64, fwd::Shadow>,
     /// Kolejki już wydane aplikacji: (urządzenie, rodzina, indeks) -> obiekt.
     queues: HashMap<(u64, u32, u32), usize>,
@@ -300,6 +302,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             batch: Vec::new(),
             next_id: 1 << 20,
             mem_sizes: HashMap::new(),
+            gpu_dirty: false,
             templates: HashMap::new(),
             mems: HashMap::new(),
             queues: HashMap::new(),

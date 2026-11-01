@@ -77,6 +77,8 @@ pub enum Request {
     MemWrite { memory: u64, offset: u64, data: Vec<u8> },
     /// Odczyt pamięci serwera.
     MemRead { memory: u64, offset: u64, len: u32 },
+    /// Odczyt różnic: serwer odsyła tylko strony pamięci zmienione od ostatniego zapisu/odczytu (format: `pagediff::encode_segments`).
+    MemReadDelta { memory: u64 },
     /// Identyfikator tej sesji (do podłączenia drugiego połączenia z wideo).
     SessionId,
     /// Drugie połączenie (po `Hello`): odtąd serwer wypycha na nie ramki obrazu sesji `session`.
@@ -183,6 +185,10 @@ impl Request {
                 e.put_u64(*offset);
                 e.put_u32(*len);
             }
+            Request::MemReadDelta { memory } => {
+                e.put_u8(16);
+                e.put_u64(*memory);
+            }
             Request::SessionId => e.put_u8(13),
             Request::AttachVideo { session } => {
                 e.put_u8(14);
@@ -285,6 +291,7 @@ impl Request {
                 Request::MemRead { memory, offset, len }
             }
             13 => Request::SessionId,
+            16 => Request::MemReadDelta { memory: d.get_u64()? },
             14 => Request::AttachVideo { session: d.get_u64()? },
             15 => {
                 let memory = d.get_u64()?;
@@ -414,6 +421,7 @@ mod tests {
             Request::Sync,
             Request::MemWrite { memory: 5, offset: 4096, data: vec![0xAA; 100] },
             Request::MemRead { memory: 5, offset: 0, len: 4096 },
+            Request::MemReadDelta { memory: 9 },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },
             Request::PresentFrame { memory: 9, len: 1_870_000, seq: 77, width: 650, height: 718, format: 1, codec: 2 },

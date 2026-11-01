@@ -364,6 +364,10 @@ impl GpuBackend for VulkanBackend {
         self.replay.mem_read(memory, offset, len)
     }
 
+    fn mem_read_delta(&mut self, memory: u64, max_bytes: usize) -> Result<Vec<u8>, i32> {
+        self.replay.mem_read_delta(memory, max_bytes)
+    }
+
     fn device_extensions(&mut self, pdev: u64) -> Result<Vec<(String, u32)>, i32> {
         let (raw, fns) = self.pdev(pdev)?;
         let mut n = 0u32;

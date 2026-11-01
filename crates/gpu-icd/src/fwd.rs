@@ -64,6 +64,23 @@ impl Stats {
 pub struct Shadow {
     data: Vec<u8>,
     mapped: bool,
+    /// Stan stron znany serwerowi: wysyłamy i odbieramy tylko różnice.
+    pages: gpu_proto::pagediff::PageTracker,
+}
+
+impl Shadow {
+    pub fn new(len: usize) -> Shadow {
+        Shadow { data: vec![0u8; len], mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len) }
+    }
+
+    /// Zakresy zmienione przez aplikację od ostatniego wysłania.
+    pub fn dirty_ranges(&mut self) -> Vec<(usize, usize)> {
+        self.pages.changed(&self.data, usize::MAX).0
+    }
+
+    pub fn mark_synced(&mut self, from: usize, to: usize) {
+        self.pages.mark_synced(&self.data, from, to);
+    }
 }
 
 /// Tłumaczy uchwyty dyspozycyjne (wskaźnik na obiekt -> identyfikator pod offsetem 8); reszta to identyfikatory.
@@ -121,10 +138,13 @@ impl InstState {
     fn write_mapped(&mut self) {
         let ids: Vec<u64> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, _)| *i).collect();
         for id in ids {
-            let Some((p, l)) = self.mems.get(&id).map(|s| (s.data.as_ptr(), s.data.len())) else { continue };
-            // SAFETY: bufor kopii nie zmienia adresu ani rozmiaru po utworzeniu; wskaźnik nie pożycza `self`.
-            let data = unsafe { std::slice::from_raw_parts(p, l) };
-            self.send_mem(id, 0, data);
+            let Some(ranges) = self.mems.get_mut(&id).map(|s| s.dirty_ranges()) else { continue };
+            let Some(p) = self.mems.get(&id).map(|s| s.data.as_ptr()) else { continue };
+            for (a, b) in ranges {
+                // SAFETY: bufor kopii nie zmienia adresu ani rozmiaru po utworzeniu; zakres leży w jego granicach.
+                let data = unsafe { std::slice::from_raw_parts(p.add(a), b - a) };
+                self.send_mem(id, a as u64, data);
+            }
         }
     }
 
@@ -146,14 +166,32 @@ impl InstState {
         Some(out)
     }
 
-    /// Po oczekiwaniu (fence/idle): GPU mogło zapisać odwzorowaną pamięć, więc odświeżamy lokalne kopie.
+    /// Po zakończonym oczekiwaniu (fence/idle) GPU mogło zapisać odwzorowaną pamięć: dociągamy z serwera tylko zmienione strony.
+    /// Bez nowego `vkQueueSubmit` od ostatniego odświeżenia nic nie mogło się zmienić, więc nie pytamy.
     fn read_mapped(&mut self) {
-        let ids: Vec<(u64, usize)> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, s)| (*i, s.data.len())).collect();
-        for (id, len) in ids {
-            if let Some(d) = self.read_mem(id, 0, len) {
-                // Kopiujemy do istniejącego bufora: aplikacja trzyma wskaźnik z `vkMapMemory`.
-                if let Some(s) = self.mems.get_mut(&id) {
-                    s.data.copy_from_slice(&d);
+        if !std::mem::take(&mut self.gpu_dirty) {
+            return;
+        }
+        let ids: Vec<u64> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, _)| *i).collect();
+        for id in ids {
+            loop {
+                self.flush();
+                self.stats.roundtrips += 1;
+                let Ok(Response::Data(d)) = self.client.call(&Request::MemReadDelta { memory: id }) else { break };
+                let Some((more, segs)) = gpu_proto::pagediff::decode_segments(&d) else { break };
+                for (off, body) in segs {
+                    self.stats.memr_bytes += body.len() as u64;
+                    let (a, b) = (off as usize, off as usize + body.len());
+                    // Kopiujemy do istniejącego bufora: aplikacja trzyma wskaźnik z `vkMapMemory`.
+                    if let Some(s) = self.mems.get_mut(&id) {
+                        if b <= s.data.len() {
+                            s.data[a..b].copy_from_slice(body);
+                            s.mark_synced(a, b);
+                        }
+                    }
+                }
+                if !more {
+                    break;
                 }
             }
         }
@@ -337,6 +375,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     if cmd.name.starts_with("vkQueueSubmit") {
         st.write_mapped();
+        st.gpu_dirty = true;
     }
     let mut e = Encoder::new();
     if encode_command(op, args, &mut e, &IcdCtx).is_err() {
@@ -424,7 +463,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         // Wartość zwracana (np. adres bufora) idzie na końcu odpowiedzi; brak = 0, czyli adres nieprawidłowy.
         return if result >= 0 { dec.get_u64().unwrap_or(0) } else { 0 };
     }
-    if cmd.class == CmdClass::Sync {
+    if cmd.class == CmdClass::Sync && result == 0 {
         st.read_mapped();
     }
     fail(result)
@@ -439,7 +478,7 @@ pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64,
     if offset > total || (size != u64::MAX && offset.saturating_add(size) > total) || out.is_null() {
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
-    let sh = st.mems.entry(mem).or_insert_with(|| Shadow { data: vec![0u8; total as usize], mapped: false });
+    let sh = st.mems.entry(mem).or_insert_with(|| Shadow::new(total as usize));
     sh.mapped = true;
     *out = sh.data.as_mut_ptr().add(offset as usize);
     0
@@ -450,11 +489,13 @@ pub unsafe extern "C" fn unmap_memory(_dev: u64, mem: u64) {
         let mut st = lock(&inst.state);
         let span = st.mems.get_mut(&mem).map(|s| {
             s.mapped = false;
-            (s.data.as_ptr(), s.data.len())
+            (s.data.as_ptr(), s.dirty_ranges())
         });
         // Zapis z odwzorowania musi dotrzeć na serwer, bo po Unmap nie będzie już śledzony.
-        if let Some((p, l)) = span {
-            st.send_mem(mem, 0, std::slice::from_raw_parts(p, l));
+        if let Some((p, ranges)) = span {
+            for (a, b) in ranges {
+                st.send_mem(mem, a as u64, std::slice::from_raw_parts(p.add(a), b - a));
+            }
         }
     }
 }
@@ -477,6 +518,9 @@ pub unsafe extern "C" fn flush_ranges(_dev: u64, count: u32, r: *const u8) -> i3
         let end = if size == u64::MAX { sh.data.len() as u64 } else { off.saturating_add(size).min(sh.data.len() as u64) };
         let part = sh.data.get(off as usize..end as usize).map(|s| s.to_vec()).unwrap_or_default();
         st.send_mem(mem, off, &part);
+        if let Some(sh) = st.mems.get_mut(&mem) {
+            sh.mark_synced(off as usize, end as usize);
+        }
     }
     0
 }
@@ -491,6 +535,7 @@ pub unsafe extern "C" fn invalidate_ranges(_dev: u64, count: u32, r: *const u8) 
         if let Some(d) = st.read_mem(mem, off, (end - off) as usize) {
             if let Some(s) = st.mems.get_mut(&mem) {
                 s.data[off as usize..end as usize].copy_from_slice(&d);
+                s.mark_synced(off as usize, end as usize);
             }
         }
         map.insert(mem, ());

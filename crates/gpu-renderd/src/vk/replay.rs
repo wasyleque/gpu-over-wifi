@@ -66,6 +66,8 @@ pub struct Replayer {
     instance: VkInstance,
     fns: HashMap<u16, *const c_void>,
     maps: HashMap<u64, *mut u8>,
+    /// Stan stron pamięci znany klientowi (do odczytu samych różnic).
+    pages: HashMap<u64, gpu_proto::pagediff::PageTracker>,
     /// Surowa wartość zwrócona przez ostatnio wykonane polecenie (dla poleceń `Ret::U64`).
     last_ret: u64,
     /// Nazwa ostatnio wykonanego polecenia (do komunikatów o błędzie dekodowania następnego).
@@ -103,7 +105,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), last_ret: 0, last_name: "" }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "" }
     }
 
     pub fn set_instance(&mut self, raw: VkInstance) {
@@ -249,6 +251,7 @@ impl Replayer {
         for id in ids {
             self.registry.unregister(*id);
             self.maps.remove(id);
+            self.pages.remove(id);
         }
     }
 
@@ -291,7 +294,23 @@ impl Replayer {
         }
         // SAFETY: zakres [offset, offset+len) mieści się w odwzorowanej pamięci o rozmiarze `e.size`.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), data.len()) };
+        // Klient ma te strony w takim stanie, jaki właśnie wysłał: odczyt różnic nie odeśle ich z powrotem.
+        // SAFETY: cały odwzorowany obszar ma `e.size` bajtów.
+        let whole = unsafe { std::slice::from_raw_parts(ptr, e.size as usize) };
+        self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_synced(whole, offset as usize, end as usize);
         self.range_call("vkFlushMappedMemoryRanges", device, e.real)
+    }
+
+    /// Odczyt różnic: tylko strony, które zmieniły się od ostatniego zapisu lub odczytu tej pamięci (limit jednej odpowiedzi
+    /// to `max_bytes`; flaga `more` mówi, że trzeba zapytać ponownie). Format: `pagediff::encode_segments`.
+    pub fn mem_read_delta(&mut self, memory: u64, max_bytes: usize) -> Result<Vec<u8>, i32> {
+        let (ptr, e, device) = self.mapping(memory)?;
+        self.range_call("vkInvalidateMappedMemoryRanges", device, e.real)?;
+        // SAFETY: odwzorowanie ma `e.size` bajtów.
+        let whole = unsafe { std::slice::from_raw_parts(ptr, e.size as usize) };
+        let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize));
+        let (ranges, more) = tracker.changed(whole, max_bytes);
+        Ok(gpu_proto::pagediff::encode_segments(whole, &ranges, more))
     }
 
     pub fn mem_read(&mut self, memory: u64, offset: u64, len: u32) -> Result<Vec<u8>, i32> {

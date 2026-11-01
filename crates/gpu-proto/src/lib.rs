@@ -7,6 +7,7 @@ pub mod meta;
 #[rustfmt::skip]
 pub mod meta_table;
 pub mod msg;
+pub mod pagediff;
 pub mod stype;
 pub mod video;
 #[rustfmt::skip]
