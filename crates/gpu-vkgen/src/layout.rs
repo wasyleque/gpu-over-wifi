@@ -68,10 +68,10 @@ mod tests {
       <member><type>uint8_t</type> <name>b</name></member>
     </type>
     <type category="struct" name="VkHandles">
-      <member>void* <name>p</name></member>
+      <member><type>void</type>* <name>p</name></member>
       <member><type>VkInstance</type> <name>h</name></member>
       <member><type>VkBuffer</type> <name>nd</name></member>
-      <member><type>PFN_vkFoo</name> <name>fn</name></member>
+      <member><type>PFN_vkFoo</type> <name>fn</name></member>
     </type>
     <type category="struct" name="VkEnums">
       <member><type>VkFormat</type> <name>f</name></member>
