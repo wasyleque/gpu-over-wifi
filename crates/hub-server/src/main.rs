@@ -321,9 +321,28 @@ fn start_mdns(hostname: &str, port: u16) -> Option<ServiceDaemon> {
 }
 
 /// Buduje konfigurację backendu InferSSD z wpisu `[[backend]]` w `hub.toml`.
-fn inferssd_config(cfg: &scheduler::BackendConfig) -> inferssd::InferssdConfig {
+fn inferssd_config(cfg: &scheduler::BackendConfig) -> Result<inferssd::InferssdConfig, String> {
     let port = cfg.port.unwrap_or(8080);
-    inferssd::InferssdConfig {
+    let launch = match cfg.mode.as_deref() {
+        None | Some("serve") => None,
+        Some("launch") => Some(inferssd::LaunchConfig {
+            resources: cfg.resources.as_ref().map(PathBuf::from),
+            settings: cfg.settings.as_ref().map(PathBuf::from),
+            context: cfg.context,
+            batch: cfg.batch,
+            ubatch: cfg.ubatch,
+            memory_budget_bytes: cfg
+                .memory_budget_bytes
+                .ok_or("tryb 'launch' wymaga 'memory_budget_bytes'")?,
+            run_dir: cfg
+                .run_dir
+                .as_ref()
+                .map(PathBuf::from)
+                .ok_or("tryb 'launch' wymaga 'run_dir'")?,
+        }),
+        Some(other) => return Err(format!("nieznany tryb '{other}' (dozwolone: serve, launch)")),
+    };
+    Ok(inferssd::InferssdConfig {
         name: cfg.name.clone(),
         binary: PathBuf::from(cfg.binary.as_deref().unwrap_or("inferssd")),
         base_url: if cfg.url.is_empty() {
@@ -343,7 +362,8 @@ fn inferssd_config(cfg: &scheduler::BackendConfig) -> inferssd::InferssdConfig {
         poll_interval: Duration::from_secs(2),
         retry_after: Duration::from_secs(cfg.retry_after_secs.unwrap_or(60)),
         term_grace: Duration::from_secs(15),
-    }
+        launch,
+    })
 }
 
 /// Inicjalizuje NVML; na Ubuntu bez pakietu -dev istnieje tylko `libnvidia-ml.so.1`.
@@ -426,7 +446,13 @@ async fn main() {
                 proxy_client.clone(),
                 cfg.models.clone(),
             ))),
-            "inferssd" => others.push(Arc::new(inferssd::InferssdBackend::new(inferssd_config(cfg)))),
+            "inferssd" => match inferssd_config(cfg) {
+                Ok(c) => others.push(Arc::new(inferssd::InferssdBackend::new(c))),
+                Err(msg) => {
+                    error!("Backend '{}': {msg}", cfg.name);
+                    std::process::exit(1);
+                }
+            },
             other => {
                 error!("Backend '{}': nieobsługiwany rodzaj '{other}'", cfg.name);
                 std::process::exit(1);
@@ -636,5 +662,30 @@ mod tests {
             load_token(Some(" my-secret ".to_string()), None).unwrap(),
             "my-secret"
         );
+    }
+
+    fn backend_cfg(extra: &str) -> scheduler::BackendConfig {
+        let toml = format!("[[backend]]\nname = \"inferssd\"\nkind = \"inferssd\"\n{extra}\n");
+        toml::from_str::<scheduler::HubConfig>(&toml).unwrap().backends.remove(0)
+    }
+
+    #[test]
+    fn inferssd_config_modes_and_validation() {
+        // Domyślnie tryb serve.
+        assert!(inferssd_config(&backend_cfg("")).unwrap().launch.is_none());
+        // launch bez limitu pamięci lub katalogu to błąd startu, nie ciche wartości domyślne.
+        let e = inferssd_config(&backend_cfg("mode = \"launch\"\nrun_dir = \"/r\"")).unwrap_err();
+        assert!(e.contains("memory_budget_bytes"), "{e}");
+        let e = inferssd_config(&backend_cfg("mode = \"launch\"\nmemory_budget_bytes = 1")).unwrap_err();
+        assert!(e.contains("run_dir"), "{e}");
+        assert!(inferssd_config(&backend_cfg("mode = \"bogus\"")).is_err());
+        // Pełna konfiguracja launch.
+        let ok = inferssd_config(&backend_cfg(
+            "mode = \"launch\"\nmemory_budget_bytes = 42\nrun_dir = \"/r\"\nubatch = 2048\nbatch = 2048\ncontext = 16384\nsettings = \"/s.ssd\"",
+        ))
+        .unwrap();
+        let l = ok.launch.unwrap();
+        assert_eq!((l.ubatch, l.batch, l.context, l.memory_budget_bytes), (Some(2048), Some(2048), Some(16384), 42));
+        assert_eq!(l.settings.unwrap().to_str(), Some("/s.ssd"));
     }
 }

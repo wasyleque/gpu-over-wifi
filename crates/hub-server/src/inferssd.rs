@@ -15,6 +15,22 @@ use tracing::{info, warn};
 
 use crate::backend::{model_names_match, Backend, ResidencyClass};
 
+/// Parametry trybu `inferssd launch` (ustawienia, pack ekspertów, rozmiary partii).
+#[derive(Debug, Clone)]
+pub struct LaunchConfig {
+    /// Opis zasobów silnika (`--resources`); domyślnie z otoczenia opakowania `inferssd`.
+    pub resources: Option<PathBuf>,
+    /// Plik `inferssd-settings 1` (np. z `expert.source` wskazującym na pack).
+    pub settings: Option<PathBuf>,
+    pub context: Option<u32>,
+    pub batch: Option<u32>,
+    pub ubatch: Option<u32>,
+    /// Limit pamięci procesu zapisywany do polityki uruchomienia.
+    pub memory_budget_bytes: u64,
+    /// Katalog na politykę i logi uruchomień; każdy start dostaje nowy podkatalog.
+    pub run_dir: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct InferssdConfig {
     pub name: String,
@@ -31,6 +47,8 @@ pub struct InferssdConfig {
     pub retry_after: Duration,
     /// Czas na SIGTERM, zanim proces dostanie SIGKILL.
     pub term_grace: Duration,
+    /// `Some` => `inferssd launch --execute ...`; `None` => `inferssd serve`.
+    pub launch: Option<LaunchConfig>,
 }
 
 struct Running {
@@ -72,6 +90,57 @@ impl InferssdBackend {
             .find(|(alias, _)| model_names_match(alias, model))
     }
 
+    /// Argumenty wiersza poleceń zależnie od trybu (`serve` albo `launch`).
+    fn command_args(&self, path: &PathBuf) -> Result<Vec<std::ffi::OsString>, String> {
+        use std::ffi::OsString;
+        let mut a: Vec<OsString> = Vec::new();
+        match &self.cfg.launch {
+            None => {
+                a.extend(["serve".into(), "-m".into(), path.into(), "--port".into()]);
+                a.push(self.cfg.port.to_string().into());
+            }
+            Some(l) => {
+                std::fs::create_dir_all(&l.run_dir)
+                    .map_err(|e| format!("katalog uruchomień ({}): {e}", l.run_dir.display()))?;
+                let policy_path = l.run_dir.join("runtime-policy.json");
+                let policy = serde_json::json!({
+                    "platform": "linux",
+                    "lock_path": l.run_dir.join("runtime.lock"),
+                    "stop_path": l.run_dir.join("runtime.stop"),
+                    "memory_budget_bytes": l.memory_budget_bytes,
+                    "minimum_memlock_bytes": 0,
+                    "cleanup_seconds": 30,
+                });
+                std::fs::write(&policy_path, policy.to_string())
+                    .map_err(|e| format!("polityka ({}): {e}", policy_path.display()))?;
+                // `launch` wymaga NOWEGO katalogu wyjściowego przy każdym starcie.
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let out = l.run_dir.join(format!("run-{nanos}"));
+                a.extend(["launch".into(), "--execute".into()]);
+                if let Some(r) = &l.resources {
+                    a.extend(["--resources".into(), r.into()]);
+                }
+                a.extend(["--model".into(), path.into()]);
+                a.extend(["--runtime-policy".into(), policy_path.into()]);
+                a.extend(["--output-dir".into(), out.into()]);
+                a.extend(["--port".into(), self.cfg.port.to_string().into()]);
+                for (flag, value) in [("--context", l.context), ("--batch", l.batch), ("--ubatch", l.ubatch)] {
+                    if let Some(v) = value {
+                        a.extend([flag.into(), v.to_string().into()]);
+                    }
+                }
+                if let Some(st) = &l.settings {
+                    a.extend(["--settings".into(), st.into()]);
+                }
+            }
+        }
+        a.extend(self.cfg.extra_args.iter().map(OsString::from));
+        Ok(a)
+    }
+
     fn spawn(&self, path: &PathBuf) -> Result<Child, String> {
         let (stdout, stderr) = match &self.cfg.log_file {
             Some(log) => {
@@ -86,13 +155,9 @@ impl InferssdBackend {
             }
             None => (Stdio::null(), Stdio::null()),
         };
+        let args = self.command_args(path)?;
         Command::new(&self.cfg.binary)
-            .arg("serve")
-            .arg("-m")
-            .arg(path)
-            .arg("--port")
-            .arg(self.cfg.port.to_string())
-            .args(&self.cfg.extra_args)
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr)
@@ -323,6 +388,7 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
             poll_interval: Duration::from_millis(50),
             retry_after: Duration::from_secs(60),
             term_grace: Duration::from_millis(300),
+            launch: None,
         })
     }
 
@@ -383,5 +449,55 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 
         b.unload_all().await.unwrap();
         assert!(!port_open(port), "SIGKILL powinien zakończyć proces ignorujący SIGTERM");
+    }
+
+    #[tokio::test]
+    async fn launch_mode_passes_expected_arguments_and_fresh_output_dirs() {
+        let dir = temp_dir("launch");
+        let run_dir = dir.join("runs");
+        let port = free_port();
+        // Atrapa zapisuje otrzymane argumenty (jedna linia na start).
+        let bin = fake_binary(&dir, 0.1, &format!("echo \"$@\" >> {}/args.log", dir.display()));
+        let mut b = backend(bin, port);
+        b.cfg.launch = Some(LaunchConfig {
+            resources: Some(PathBuf::from("/opt/res.json")),
+            settings: Some(PathBuf::from("/opt/pack.ssd")),
+            context: Some(16384),
+            batch: Some(2048),
+            ubatch: Some(2048),
+            memory_budget_bytes: 123_456_789,
+            run_dir: run_dir.clone(),
+        });
+
+        b.ensure_ready("deepseek").await.unwrap();
+        b.unload_all().await.unwrap();
+        b.ensure_ready("deepseek").await.unwrap();
+        b.unload_all().await.unwrap();
+
+        let log = std::fs::read_to_string(dir.join("args.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "dwa starty => dwie linie: {log}");
+        for l in &lines {
+            assert!(l.starts_with("launch --execute --resources /opt/res.json --model /tmp/fake-first-shard.gguf --runtime-policy "), "{l}");
+            assert!(l.contains(&format!("--port {port} --context 16384 --batch 2048 --ubatch 2048 --settings /opt/pack.ssd")), "{l}");
+        }
+        let outs: Vec<&str> = lines.iter().map(|l| l.split("--output-dir ").nth(1).unwrap().split(' ').next().unwrap()).collect();
+        assert_ne!(outs[0], outs[1], "każdy start potrzebuje nowego katalogu wyjściowego");
+        assert!(outs[0].starts_with(run_dir.to_str().unwrap()));
+        let policy: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(run_dir.join("runtime-policy.json")).unwrap()).unwrap();
+        assert_eq!(policy["memory_budget_bytes"], 123_456_789u64);
+        assert_eq!(policy["platform"], "linux");
+    }
+
+    #[tokio::test]
+    async fn serve_mode_arguments_are_unchanged() {
+        let dir = temp_dir("serveargs");
+        let port = free_port();
+        let bin = fake_binary(&dir, 0.1, &format!("echo \"$@\" >> {}/args.log", dir.display()));
+        let b = backend(bin, port);
+        b.ensure_ready("deepseek").await.unwrap();
+        b.unload_all().await.unwrap();
+        let log = std::fs::read_to_string(dir.join("args.log")).unwrap();
+        assert_eq!(log.trim(), format!("serve -m /tmp/fake-first-shard.gguf --port {port}"));
     }
 }

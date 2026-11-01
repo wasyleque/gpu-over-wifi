@@ -106,6 +106,24 @@ pub struct BackendConfig {
     pub start_timeout_secs: Option<u64>,
     #[serde(default)]
     pub retry_after_secs: Option<u64>,
+    /// `"serve"` (domyślnie) albo `"launch"` (ustawienia, pack ekspertów, rozmiary partii).
+    #[serde(default)]
+    pub mode: Option<String>,
+    // --- tylko dla mode = "launch" ---
+    #[serde(default)]
+    pub resources: Option<String>,
+    #[serde(default)]
+    pub settings: Option<String>,
+    #[serde(default)]
+    pub context: Option<u32>,
+    #[serde(default)]
+    pub batch: Option<u32>,
+    #[serde(default)]
+    pub ubatch: Option<u32>,
+    #[serde(default)]
+    pub memory_budget_bytes: Option<u64>,
+    #[serde(default)]
+    pub run_dir: Option<String>,
 }
 
 fn default_backend_kind() -> String {
