@@ -5,6 +5,8 @@
 use gpu_proto::ext_table::{COMMAND_ALIASES, DEVICE_EXTENSIONS};
 use gpu_proto::meta::find_command;
 
+/// `graphics_pipeline_library`: sterownik NVIDII na serwerze pada (SIGSEGV w libnvidia-eglcore) przy `vkCreateGraphicsPipelines`
+/// z `VkGraphicsPipelineLibraryCreateInfoEXT` (Dota 2); bez rozszerzenia gry używają zwykłych potoków.
 /// Fragmenty nazw rozszerzeń, które wymagają obiektów systemu operacyjnego lub lokalnego wyświetlania albo mają semantykę
 /// zależną od maszyny (uchwyty plików/dma-buf, multi-GPU, zegary hosta, wideo, śledzenie ray tracingu bez testów).
 const DENY: &[&str] = &[
@@ -12,7 +14,7 @@ const DENY: &[&str] = &[
     "display", "swapchain", "present", "surface", "full_screen", "drm", "video_", "device_group", "calibrated_timestamps",
     "performance_query", "acquire_xlib", "sci_sync", "ohos", "headless", "pipeline_binary", "cuda", "nvx_", "image_compression_control",
     "device_generated_commands", "shader_object", "opacity_micromap", "ray_tracing", "acceleration_structure", "ray_query",
-    "deferred_host_operations", "frame_boundary", "low_latency", "anti_lag", "debug_report", "validation",
+    "deferred_host_operations", "graphics_pipeline_library", "frame_boundary", "low_latency", "anti_lag", "debug_report", "validation",
 ];
 
 /// Czy polecenie jest wykonywane lokalnie przez ICD, a nie przekazywane (te nazwy zwracają null w `proc_addr_by_name`).
@@ -53,7 +55,7 @@ mod tests {
     #[test]
     fn swapchain_is_always_advertised_and_wsi_or_os_extensions_never() {
         assert!(is_advertisable("VK_KHR_swapchain"));
-        for e in ["VK_KHR_win32_surface", "VK_KHR_external_memory_fd", "VK_KHR_display", "VK_KHR_video_decode_h264", "VK_EXT_image_drm_format_modifier", "VK_KHR_present_wait", "VK_KHR_device_group"] {
+        for e in ["VK_KHR_win32_surface", "VK_KHR_external_memory_fd", "VK_KHR_display", "VK_KHR_video_decode_h264", "VK_EXT_image_drm_format_modifier", "VK_KHR_present_wait", "VK_KHR_device_group", "VK_EXT_graphics_pipeline_library"] {
             assert!(!is_advertisable(e), "{e}");
         }
         assert!(!is_advertisable("VK_NIE_ISTNIEJE"));
