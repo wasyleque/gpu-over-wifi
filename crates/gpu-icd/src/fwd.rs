@@ -233,6 +233,33 @@ fn trace(name: &str, ret: u64) {
     }
 }
 
+/// `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`: aplikacja pyta, czy potok jest w pamięci podręcznej, i oczekuje
+/// prawdziwego wyniku (`VK_PIPELINE_COMPILE_REQUIRED`), więc takie tworzenie nie może być optymistyczne.
+const PIPELINE_FAIL_ON_COMPILE_REQUIRED: u32 = 0x100;
+
+/// Czy `vkCreate*Pipelines` zawiera choć jedną strukturę z flagą `FAIL_ON_PIPELINE_COMPILE_REQUIRED` (wymaga synchronicznej odpowiedzi).
+///
+/// # Safety
+/// `slots[2]` i `slots[3]` muszą opisywać `createInfoCount` i `pCreateInfos` zgodnie z deklaracją polecenia.
+unsafe fn is_pipeline_probe(name: &str, slots: &[u64]) -> bool {
+    let info = match name {
+        "vkCreateGraphicsPipelines" => "VkGraphicsPipelineCreateInfo",
+        "vkCreateComputePipelines" => "VkComputePipelineCreateInfo",
+        "vkCreateRayTracingPipelinesKHR" => return pipeline_infos_have_flag(slots, 3, 4, "VkRayTracingPipelineCreateInfoKHR"),
+        _ => return false,
+    };
+    pipeline_infos_have_flag(slots, 2, 3, info)
+}
+
+unsafe fn pipeline_infos_have_flag(slots: &[u64], count_slot: usize, ptr_slot: usize, struct_name: &str) -> bool {
+    let (Some(&count), Some(&ptr)) = (slots.get(count_slot), slots.get(ptr_slot)) else { return false };
+    let Some(size) = gpu_proto::meta::find_struct(struct_name).map(|m| m.size as usize) else { return false };
+    if ptr == 0 || count > 4096 {
+        return false;
+    }
+    (0..count as usize).any(|i| std::ptr::read_unaligned((ptr as *const u8).add(i * size + 16) as *const u32) & PIPELINE_FAIL_ON_COMPILE_REQUIRED != 0)
+}
+
 /// Wykonuje polecenie o kodzie `op` z gotowymi slotami parametrów (tak samo dla aplikacji i dla ICD, które wydaje własne polecenia).
 ///
 /// # Safety
@@ -322,7 +349,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
 
     st.stats.commands += 1;
     let has_data_out = params.iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1);
-    if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64) {
+    if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64 && !is_pipeline_probe(cmd.name, slots)) {
         st.batch.extend(bytes);
         if st.batch.len() > BATCH_FLUSH {
             st.flush();
@@ -453,5 +480,27 @@ pub(crate) unsafe fn exec_named_async(st: &mut InstState, name: &str, slots: &mu
     match gpu_proto::meta::find_command(name) {
         Some((op, c)) if c.params().len() == slots.len() => exec_with(st, op, slots, true) as u32 as i32,
         _ => VK_ERROR_INITIALIZATION_FAILED,
+    }
+}
+
+#[cfg(test)]
+mod pipeline_probe_tests {
+    use super::*;
+
+    #[test]
+    fn only_infos_with_the_fail_on_compile_required_flag_force_a_synchronous_create() {
+        // Dwie struktury VkGraphicsPipelineCreateInfo (144 B): flagi @16.
+        let mut mem = vec![0u8; 144 * 2];
+        let slots = |m: &Vec<u8>| vec![1u64, 0, 2, m.as_ptr() as u64, 0, 0];
+        unsafe {
+            assert!(!is_pipeline_probe("vkCreateGraphicsPipelines", &slots(&mem)));
+            mem[144 + 16] = 0x00;
+            mem[144 + 17] = 0x01; // 0x100 w drugiej strukturze
+            assert!(is_pipeline_probe("vkCreateGraphicsPipelines", &slots(&mem)));
+            assert!(!is_pipeline_probe("vkCreateBuffer", &slots(&mem)));
+            // Zerowy wskaźnik i absurdalna liczba nie powodują odczytu.
+            assert!(!is_pipeline_probe("vkCreateGraphicsPipelines", &[1, 0, 2, 0]));
+            assert!(!is_pipeline_probe("vkCreateGraphicsPipelines", &[1, 0, 1 << 40, mem.as_ptr() as u64]));
+        }
     }
 }

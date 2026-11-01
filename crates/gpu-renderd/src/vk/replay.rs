@@ -208,6 +208,11 @@ impl Replayer {
             for (i, id) in ids.iter().enumerate() {
                 // SAFETY: sterownik wpisał prawdziwy uchwyt w miejsce identyfikatora klienta.
                 let real = unsafe { std::ptr::read_unaligned(p.add(i)) };
+                // Sterownik zostawia VK_NULL_HANDLE, gdy np. potok wymaga kompilacji (VK_PIPELINE_COMPILE_REQUIRED): takiego
+                // uchwytu nie rejestrujemy, więc późniejsze użycie jest błędem, a nie wywołaniem sterownika z null.
+                if real == 0 {
+                    continue;
+                }
                 self.registry.register(*id, Entry { kind, real, parent, size }).map_err(code)?;
             }
         }
