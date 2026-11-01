@@ -24,6 +24,7 @@ mod backend;
 mod inferssd;
 mod proxy;
 mod scheduler;
+mod tap;
 
 /// Domyślny adres API Ollamy.
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
