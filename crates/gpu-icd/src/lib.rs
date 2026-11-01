@@ -20,6 +20,7 @@ use gpu_renderd::handler::decode_extensions;
 
 mod fwd;
 mod local;
+mod wsi;
 #[rustfmt::skip]
 mod icd_table;
 
@@ -71,6 +72,30 @@ struct InstState {
     queues: HashMap<(u64, u32, u32), usize>,
     device_lost: bool,
     stats: fwd::Stats,
+}
+
+/// Lokalny sterownik do prezentacji, otwierany leniwie (raz); `None` gdy go nie ma.
+static LOCAL: Mutex<Option<local::LocalVulkan>> = Mutex::new(None);
+static LOCAL_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn with_local<R>(f: impl FnOnce(&local::LocalVulkan) -> R) -> Option<R> {
+    let mut g = lock(&LOCAL);
+    if g.is_none() && !LOCAL_TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        match local::LocalVulkan::open() {
+            Ok(l) => *g = Some(l),
+            Err(e) => {
+                if std::env::var("GPU_ICD_DEBUG").is_ok() {
+                    eprintln!("[gpu-icd] lokalny sterownik niedostępny: {e}");
+                }
+            }
+        }
+    }
+    g.as_ref().map(f)
+}
+
+/// Rozszerzenia instancji, które ogłaszamy (powierzchnie okien, o ile ma je lokalny sterownik).
+fn instance_extensions() -> Vec<(&'static str, u32)> {
+    with_local(|l| wsi::advertised_surface_extensions(&l.enabled_instance_exts)).unwrap_or_default()
 }
 
 /// Jedyna instancja procesu (M2a); polecenia generyczne szukają przez nią połączenia.
@@ -175,23 +200,53 @@ unsafe extern "C" fn enumerate_instance_version(p: *mut u32) -> VkResult {
     VK_SUCCESS
 }
 
-unsafe extern "C" fn enumerate_instance_extension_properties(layer: *const c_char, count: *mut u32, _props: *mut c_void) -> VkResult {
+unsafe extern "C" fn enumerate_instance_extension_properties(layer: *const c_char, count: *mut u32, props: *mut u8) -> VkResult {
     if !layer.is_null() {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    if let Some(c) = count.as_mut() {
-        *c = 0;
+    let Some(count) = count.as_mut() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let list = instance_extensions();
+    if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        eprintln!("[gpu-icd] vkEnumerateInstanceExtensionProperties: {} rozszerzeń, props {}", list.len(), if props.is_null() { "null" } else { "bufor" });
     }
-    VK_SUCCESS
+    if props.is_null() {
+        *count = list.len() as u32;
+        return VK_SUCCESS;
+    }
+    let n = (*count as usize).min(list.len());
+    for (i, (name, ver)) in list.iter().take(n).enumerate() {
+        let dst = props.add(i * 260);
+        std::ptr::write_bytes(dst, 0, 260);
+        std::ptr::copy_nonoverlapping(name.as_ptr(), dst, name.len().min(255));
+        std::ptr::write_unaligned(dst.add(256) as *mut u32, *ver);
+    }
+    *count = n as u32;
+    if n < list.len() {
+        VK_INCOMPLETE
+    } else {
+        VK_SUCCESS
+    }
 }
 
 unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out: *mut *mut InstanceObj) -> VkResult {
     if info.is_null() || out.is_null() {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    // VkInstanceCreateInfo: enabledExtensionCount @48. Nie ogłaszamy żadnych rozszerzeń instancji.
-    if std::ptr::read_unaligned(info.add(48) as *const u32) != 0 {
-        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    // VkInstanceCreateInfo: enabledExtensionCount @48, ppEnabledExtensionNames @56. Dozwolone tylko ogłoszone.
+    let n_ext = std::ptr::read_unaligned(info.add(48) as *const u32) as usize;
+    if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        eprintln!("[gpu-icd] vkCreateInstance: {n_ext} rozszerzeń w żądaniu");
+    }
+    if n_ext > 0 {
+        let names = std::ptr::read_unaligned(info.add(56) as *const *const *const c_char);
+        let allowed = instance_extensions();
+        for i in 0..n_ext {
+            let p = if names.is_null() { std::ptr::null() } else { *names.add(i) };
+            let ok = !p.is_null() && CStr::from_ptr(p).to_str().is_ok_and(|n| allowed.iter().any(|(a, _)| *a == n));
+            if !ok {
+                return VK_ERROR_EXTENSION_NOT_PRESENT;
+            }
+        }
     }
     let (Ok(addr), Some(token)) = (std::env::var("GPU_ICD_ADDR"), config_token()) else {
         return VK_ERROR_INITIALIZATION_FAILED;
@@ -226,7 +281,11 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
         let mut st = lock(&(*obj).state);
         for rp in remote_pds {
             if !all {
-                let t = st.query(rp, PdFunc::Properties2, 0, 0, &[]).map(|d| u32_at(&d, 32)).unwrap_or(0);
+                let q = st.query(rp, PdFunc::Properties2, 0, 0, &[]);
+                if std::env::var("GPU_ICD_DEBUG").is_ok() {
+                    eprintln!("[gpu-icd] zdalna karta {rp:#x}: zapytanie {}, typ {:?}", q.is_some(), q.as_ref().map(|d| u32_at(d, 32)));
+                }
+                let t = q.map(|d| u32_at(&d, 32)).unwrap_or(0);
                 if t == VK_PHYSICAL_DEVICE_TYPE_CPU {
                     continue;
                 }
@@ -261,6 +320,9 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
 unsafe extern "C" fn enumerate_physical_devices(inst: *mut InstanceObj, count: *mut u32, out: *mut *mut PdevObj) -> VkResult {
     let (Some(inst), Some(count)) = (inst.as_ref(), count.as_mut()) else { return VK_ERROR_INITIALIZATION_FAILED };
     let st = lock(&inst.state);
+    if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        eprintln!("[gpu-icd] vkEnumeratePhysicalDevices: {} urządzeń, żądana liczba {}, bufor {}", st.pdevs.len(), *count, if out.is_null() { "null" } else { "jest" });
+    }
     if out.is_null() {
         *count = st.pdevs.len() as u32;
         return VK_SUCCESS;
@@ -432,6 +494,126 @@ unsafe extern "C" fn get_sparse_image_format_properties(_p: *mut c_void, _f: u32
     }
 }
 
+const VK_TRUE_U32: u32 = 1;
+
+/// `vkCreate*SurfaceKHR`: ICD tworzy własny uchwyt (struktura w układzie VkIcdSurface), który loader odsyła w zapytaniach.
+unsafe fn make_surface(info: *const u8, out: *mut u64, platform: u32, a_off: usize, b_off: usize, b_wide: bool) -> VkResult {
+    if out.is_null() {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    let (a, b) = if info.is_null() {
+        (0, 0)
+    } else {
+        let a = std::ptr::read_unaligned(info.add(a_off) as *const u64);
+        let b = if b_off == 0 { 0 } else if b_wide { std::ptr::read_unaligned(info.add(b_off) as *const u64) } else { std::ptr::read_unaligned(info.add(b_off) as *const u32) as u64 };
+        (a, b)
+    };
+    *out = Box::into_raw(wsi::icd_surface(platform, a, b)) as u64;
+    VK_SUCCESS
+}
+
+unsafe extern "C" fn create_wayland_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
+    make_surface(info, out, wsi::PLATFORM_WAYLAND, 24, 32, true) // display @24, surface @32
+}
+
+unsafe extern "C" fn create_xcb_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
+    make_surface(info, out, wsi::PLATFORM_XCB, 24, 32, false) // connection @24, window (u32) @32
+}
+
+unsafe extern "C" fn create_xlib_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
+    make_surface(info, out, wsi::PLATFORM_XLIB, 24, 32, true) // dpy @24, window @32
+}
+
+unsafe extern "C" fn create_headless_surface(_i: u64, info: *const u8, _a: *const c_void, out: *mut u64) -> VkResult {
+    let _ = info;
+    make_surface(std::ptr::null(), out, wsi::PLATFORM_HEADLESS, 0, 0, true)
+}
+
+unsafe extern "C" fn destroy_surface(_i: u64, surface: u64, _a: *const c_void) {
+    if surface != 0 {
+        drop(Box::from_raw(surface as *mut [u64; 3]));
+    }
+}
+
+unsafe extern "C" fn wayland_presentation_support(_pd: *mut c_void, _qf: u32, display: u64) -> u32 {
+    with_local(|l| l.presentation_support("vkGetPhysicalDeviceWaylandPresentationSupportKHR", 0, display, 0)).unwrap_or(false) as u32
+}
+
+unsafe extern "C" fn xcb_presentation_support(_pd: *mut c_void, _qf: u32, connection: u64, visual: u32) -> u32 {
+    with_local(|l| l.presentation_support("vkGetPhysicalDeviceXcbPresentationSupportKHR", 0, connection, visual as u64)).unwrap_or(false) as u32
+}
+
+unsafe extern "C" fn xlib_presentation_support(_pd: *mut c_void, _qf: u32, dpy: u64, visual: u64) -> u32 {
+    with_local(|l| l.presentation_support("vkGetPhysicalDeviceXlibPresentationSupportKHR", 0, dpy, visual)).unwrap_or(false) as u32
+}
+
+unsafe extern "C" fn surface_support(_pd: *mut c_void, qf: u32, surface: u64, out: *mut u32) -> VkResult {
+    let Some(out) = out.as_mut() else { return VK_ERROR_INITIALIZATION_FAILED };
+    if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        let w: Vec<u32> = (0..6).map(|i| std::ptr::read_unaligned((surface as *const u32).add(i))).collect();
+        eprintln!("[gpu-icd] surface_support: uchwyt {surface:#x}, pierwsze słowa {w:x?}, qf {qf}");
+    }
+    // Prezentujemy lokalnie, więc o wsparciu decyduje lokalna karta (rodzina graficzna 0); każda rodzina zdalna może rysować.
+    match with_local(|l| l.surface_support(0, surface)).flatten() {
+        Some(ok) => {
+            *out = if ok && qf < 64 { VK_TRUE_U32 } else { 0 };
+            VK_SUCCESS
+        }
+        None => VK_ERROR_INITIALIZATION_FAILED,
+    }
+}
+
+unsafe extern "C" fn surface_capabilities(_pd: *mut c_void, surface: u64, out: *mut u8) -> VkResult {
+    if out.is_null() {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    let Some(mut caps) = with_local(|l| l.surface_caps(surface)).flatten() else { return VK_ERROR_INITIALIZATION_FAILED };
+    if !wsi::patch_capabilities(&mut caps) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    std::ptr::copy_nonoverlapping(caps.as_ptr(), out, 52);
+    VK_SUCCESS
+}
+
+unsafe extern "C" fn surface_formats(_pd: *mut c_void, surface: u64, count: *mut u32, out: *mut u8) -> VkResult {
+    let Some(count) = count.as_mut() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let Some(list) = with_local(|l| l.surface_formats(surface)).flatten().map(|f| wsi::filter_formats(&f)) else { return VK_ERROR_INITIALIZATION_FAILED };
+    if out.is_null() {
+        *count = list.len() as u32;
+        return VK_SUCCESS;
+    }
+    let n = (*count as usize).min(list.len());
+    for (i, (f, cs)) in list.iter().take(n).enumerate() {
+        std::ptr::write_unaligned(out.add(i * 8) as *mut u32, *f);
+        std::ptr::write_unaligned(out.add(i * 8 + 4) as *mut u32, *cs);
+    }
+    *count = n as u32;
+    if n < list.len() {
+        VK_INCOMPLETE
+    } else {
+        VK_SUCCESS
+    }
+}
+
+unsafe extern "C" fn surface_present_modes(_pd: *mut c_void, surface: u64, count: *mut u32, out: *mut u32) -> VkResult {
+    let Some(count) = count.as_mut() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let Some(list) = with_local(|l| l.present_modes(surface)).flatten().map(|m| wsi::filter_present_modes(&m)) else { return VK_ERROR_INITIALIZATION_FAILED };
+    if out.is_null() {
+        *count = list.len() as u32;
+        return VK_SUCCESS;
+    }
+    let n = (*count as usize).min(list.len());
+    for (i, m) in list.iter().take(n).enumerate() {
+        std::ptr::write_unaligned(out.add(i), *m);
+    }
+    *count = n as u32;
+    if n < list.len() {
+        VK_INCOMPLETE
+    } else {
+        VK_SUCCESS
+    }
+}
+
 unsafe extern "C" fn get_device_proc_addr(_d: *mut c_void, name: *const c_char) -> *const c_void {
     vk_icdGetInstanceProcAddr(std::ptr::null_mut(), name)
 }
@@ -454,18 +636,20 @@ pub fn proc_addr_by_name(name: &str) -> *const c_void {
         return p;
     }
     match gpu_proto::meta::find_command(name) {
+        // Funkcje powierzchni, ekranu i swapchaina, których ICD nie implementuje lokalnie, NIE idą generycznie na serwer.
+        Some(_) if name.contains("Surface") || name.contains("Display") || name.contains("Swapchain") || name.contains("Present") => std::ptr::null(),
         Some((op, c)) if c.supported && !LOCAL_ONLY.contains(&name) => icd_table::ENTRIES[op as usize] as usize as *const c_void,
         _ => std::ptr::null(),
     }
 }
 
 /// Polecenia, które ICD obsługuje wyłącznie lokalnie (nie przekazuje generycznie).
-const LOCAL_ONLY: &[&str] = &["vkCreateInstance", "vkDestroyInstance", "vkEnumeratePhysicalDevices", "vkEnumerateInstanceVersion", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties"];
+const LOCAL_ONLY: &[&str] = &["vkCreateWaylandSurfaceKHR", "vkCreateXcbSurfaceKHR", "vkCreateXlibSurfaceKHR", "vkCreateHeadlessSurfaceEXT", "vkDestroySurfaceKHR", "vkGetPhysicalDeviceWaylandPresentationSupportKHR", "vkGetPhysicalDeviceXcbPresentationSupportKHR", "vkGetPhysicalDeviceXlibPresentationSupportKHR", "vkCreateInstance", "vkDestroyInstance", "vkEnumeratePhysicalDevices", "vkEnumerateInstanceVersion", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties"];
 
 fn local_proc_addr(name: &str) -> *const c_void {
     table!(name,
         "vkEnumerateInstanceVersion" => enumerate_instance_version as unsafe extern "C" fn(*mut u32) -> VkResult,
-        "vkEnumerateInstanceExtensionProperties" => enumerate_instance_extension_properties as unsafe extern "C" fn(*const c_char, *mut u32, *mut c_void) -> VkResult,
+        "vkEnumerateInstanceExtensionProperties" => enumerate_instance_extension_properties as unsafe extern "C" fn(*const c_char, *mut u32, *mut u8) -> VkResult,
         "vkCreateInstance" => create_instance as unsafe extern "C" fn(*const u8, *const c_void, *mut *mut InstanceObj) -> VkResult,
         "vkDestroyInstance" => destroy_instance as unsafe extern "C" fn(*mut InstanceObj, *const c_void),
         "vkEnumeratePhysicalDevices" => enumerate_physical_devices as unsafe extern "C" fn(*mut InstanceObj, *mut u32, *mut *mut PdevObj) -> VkResult,
@@ -489,6 +673,18 @@ fn local_proc_addr(name: &str) -> *const c_void {
         "vkGetPhysicalDeviceImageFormatProperties" => get_image_format_properties as unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, *mut u8) -> VkResult,
         "vkGetPhysicalDeviceSparseImageFormatProperties" => get_sparse_image_format_properties as unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, *mut u32, *mut u8),
         "vkGetDeviceProcAddr" => get_device_proc_addr as unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_void,
+        "vkGetPhysicalDeviceSurfaceSupportKHR" => surface_support as unsafe extern "C" fn(*mut c_void, u32, u64, *mut u32) -> VkResult,
+        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" => surface_capabilities as unsafe extern "C" fn(*mut c_void, u64, *mut u8) -> VkResult,
+        "vkGetPhysicalDeviceSurfaceFormatsKHR" => surface_formats as unsafe extern "C" fn(*mut c_void, u64, *mut u32, *mut u8) -> VkResult,
+        "vkGetPhysicalDeviceSurfacePresentModesKHR" => surface_present_modes as unsafe extern "C" fn(*mut c_void, u64, *mut u32, *mut u32) -> VkResult,
+        "vkCreateWaylandSurfaceKHR" => create_wayland_surface as unsafe extern "C" fn(u64, *const u8, *const c_void, *mut u64) -> VkResult,
+        "vkCreateXcbSurfaceKHR" => create_xcb_surface as unsafe extern "C" fn(u64, *const u8, *const c_void, *mut u64) -> VkResult,
+        "vkCreateXlibSurfaceKHR" => create_xlib_surface as unsafe extern "C" fn(u64, *const u8, *const c_void, *mut u64) -> VkResult,
+        "vkCreateHeadlessSurfaceEXT" => create_headless_surface as unsafe extern "C" fn(u64, *const u8, *const c_void, *mut u64) -> VkResult,
+        "vkDestroySurfaceKHR" => destroy_surface as unsafe extern "C" fn(u64, u64, *const c_void),
+        "vkGetPhysicalDeviceWaylandPresentationSupportKHR" => wayland_presentation_support as unsafe extern "C" fn(*mut c_void, u32, u64) -> u32,
+        "vkGetPhysicalDeviceXcbPresentationSupportKHR" => xcb_presentation_support as unsafe extern "C" fn(*mut c_void, u32, u64, u32) -> u32,
+        "vkGetPhysicalDeviceXlibPresentationSupportKHR" => xlib_presentation_support as unsafe extern "C" fn(*mut c_void, u32, u64, u64) -> u32,
         "vkMapMemory" => fwd::map_memory as unsafe extern "C" fn(u64, u64, u64, u64, u32, *mut *mut u8) -> VkResult,
         "vkUnmapMemory" => fwd::unmap_memory as unsafe extern "C" fn(u64, u64),
         "vkFlushMappedMemoryRanges" => fwd::flush_ranges as unsafe extern "C" fn(u64, u32, *const u8) -> VkResult,
@@ -502,7 +698,13 @@ pub unsafe extern "C" fn vk_icdGetInstanceProcAddr(_instance: *mut c_void, name:
         return std::ptr::null();
     }
     match CStr::from_ptr(name).to_str() {
-        Ok(n) => proc_addr_by_name(n),
+        Ok(n) => {
+            let p = proc_addr_by_name(n);
+            if std::env::var("GPU_ICD_DEBUG_PROC").is_ok() {
+                eprintln!("[gpu-icd] proc {n}: {}", if p.is_null() { "NULL" } else { "ok" });
+            }
+            p
+        }
         Err(_) => std::ptr::null(),
     }
 }
@@ -536,8 +738,11 @@ mod tests {
         for n in ["vkCmdDraw", "vkQueueSubmit", "vkCreateDevice", "vkCreateBuffer", "vkWaitForFences"] {
             assert!(!proc_addr_by_name(n).is_null(), "{n}");
         }
+        for n in ["vkGetPhysicalDeviceSurfaceSupportKHR", "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR", "vkGetPhysicalDeviceSurfacePresentModesKHR"] {
+            assert!(!proc_addr_by_name(n).is_null(), "{n}");
+        }
         assert_ne!(proc_addr_by_name("vkCmdDraw"), proc_addr_by_name("vkCmdDrawIndexed"), "każde polecenie ma własny punkt wejścia");
-        for n in ["", "vkCreateInstanceX", "vkNieMaTakiego", "vkGetPhysicalDeviceXcbPresentationSupportKHR"] {
+        for n in ["", "vkCreateInstanceX", "vkNieMaTakiego", "vkCreateDisplayPlaneSurfaceKHR", "vkGetPhysicalDeviceSurfaceCapabilities2KHR", "vkQueuePresentKHR"] {
             assert!(proc_addr_by_name(n).is_null(), "{n}");
         }
     }

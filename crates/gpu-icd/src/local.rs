@@ -12,7 +12,7 @@ use gpu_renderd::vk::replay::call_thunk;
 
 const VK_API_1_1: u32 = 0x0040_1000;
 /// Rozszerzenia instancji potrzebne do powierzchni okna (włączamy te, które sterownik ma).
-const WANTED_INSTANCE_EXTS: &[&str] = &["VK_KHR_surface", "VK_KHR_wayland_surface", "VK_KHR_xcb_surface", "VK_KHR_xlib_surface"];
+const WANTED_INSTANCE_EXTS: &[&str] = &["VK_KHR_surface", "VK_KHR_wayland_surface", "VK_KHR_xcb_surface", "VK_KHR_xlib_surface", "VK_EXT_headless_surface"];
 
 /// Wyciąga `library_path` z manifestu ICD (bez zależności od biblioteki JSON). Ścieżki względne z `/` liczymy
 /// od katalogu manifestu, a goła nazwa pliku jest zostawiana dynamicznemu linkerowi.
@@ -68,6 +68,9 @@ pub struct LocalVulkan {
     pub manifest: PathBuf,
 }
 
+// SAFETY: surowe wskaźniki to uchwyty sterownika używane pod blokadą (jedna instancja w procesie).
+unsafe impl Send for LocalVulkan {}
+
 fn ext_names(buf: &[u8], n: usize) -> Vec<String> {
     (0..n)
         .filter_map(|i| {
@@ -88,6 +91,46 @@ impl LocalVulkan {
         let f = Self::fnptr(&self.lib, self.instance, name)?;
         // SAFETY: wskaźniki w `ints` żyją do końca wywołania; sygnatura zgodna z vk.xml.
         unsafe { call_thunk(f, ints, &[]) }.map(|r| r as u32 as i32)
+    }
+
+    /// Czy lokalna karta potrafi prezentować na `surface` z rodziny kolejek `qf`.
+    pub fn surface_support(&self, qf: u32, surface: u64) -> Option<bool> {
+        let mut out = 0u32;
+        let r = self.call("vkGetPhysicalDeviceSurfaceSupportKHR", &[self.pdev as u64, qf as u64, surface, &mut out as *mut u32 as u64])?;
+        (r >= 0).then_some(out != 0)
+    }
+
+    /// `VkSurfaceCapabilitiesKHR` (52 B) od lokalnego sterownika.
+    pub fn surface_caps(&self, surface: u64) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; 56];
+        let r = self.call("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", &[self.pdev as u64, surface, buf.as_mut_ptr() as u64])?;
+        buf.truncate(52);
+        (r >= 0).then_some(buf)
+    }
+
+    /// Formaty powierzchni jako pary (format, przestrzeń barw).
+    pub fn surface_formats(&self, surface: u64) -> Option<Vec<(u32, u32)>> {
+        let mut n = 0u32;
+        self.call("vkGetPhysicalDeviceSurfaceFormatsKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, 0])?;
+        let mut buf = vec![0u8; n as usize * 8];
+        let r = self.call("vkGetPhysicalDeviceSurfaceFormatsKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, buf.as_mut_ptr() as u64])?;
+        (r >= 0).then(|| buf.chunks_exact(8).take(n as usize).map(|c| (u32::from_le_bytes([c[0], c[1], c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]))).collect())
+    }
+
+    pub fn present_modes(&self, surface: u64) -> Option<Vec<u32>> {
+        let mut n = 0u32;
+        self.call("vkGetPhysicalDeviceSurfacePresentModesKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, 0])?;
+        let mut buf = vec![0u8; n as usize * 4];
+        let r = self.call("vkGetPhysicalDeviceSurfacePresentModesKHR", &[self.pdev as u64, surface, &mut n as *mut u32 as u64, buf.as_mut_ptr() as u64])?;
+        (r >= 0).then(|| buf.chunks_exact(4).take(n as usize).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    }
+
+    /// Czy lokalna karta może prezentować na danej platformie (`kind`: nazwa funkcji `vkGetPhysicalDevice*PresentationSupportKHR`).
+    pub fn presentation_support(&self, kind: &str, qf: u32, a: u64, b: u64) -> bool {
+        let f = Self::fnptr(&self.lib, self.instance, kind);
+        let Some(f) = f else { return false };
+        // SAFETY: argumenty to wskaźniki platformy przekazane przez aplikację (display/connection) i indeksy.
+        unsafe { call_thunk(f, &[self.pdev as u64, qf as u64, a, b], &[]) }.is_some_and(|r| (r as u32) != 0)
     }
 
     /// Otwiera pierwszy działający sterownik Intela z manifestów i wybiera jego pierwsze urządzenie.
@@ -205,5 +248,31 @@ mod tests {
         assert!(l.enabled_instance_exts.iter().any(|e| e == "VK_KHR_surface"), "{:?}", l.enabled_instance_exts);
         assert!(l.device_exts.iter().any(|e| e == "VK_KHR_swapchain"), "brak VK_KHR_swapchain");
         eprintln!("lokalny sterownik: {} ({}), instancja: {:?}", l.device_name, l.manifest.display(), l.enabled_instance_exts);
+    }
+}
+
+#[cfg(test)]
+mod experiments {
+    use super::*;
+
+    #[test]
+    fn headless_surface_handle_as_the_loader_would_pass_it() {
+        let Ok(l) = LocalVulkan::open() else { return };
+        // VkIcdSurfaceHeadless { VkIcdSurfaceBase { platform } }: VK_ICD_WSI_PLATFORM_HEADLESS = 9.
+        let surf = [9u64; 2];
+        let h = surf.as_ptr() as u64;
+        eprintln!("support: {:?}", l.surface_support(0, h));
+        eprintln!("caps: {:?}", l.surface_caps(h).map(|c| (u32::from_le_bytes(c[0..4].try_into().unwrap()), u32::from_le_bytes(c[4..8].try_into().unwrap()))));
+        eprintln!("formats: {:?}", l.surface_formats(h).map(|f| f.len()));
+        eprintln!("modes: {:?}", l.present_modes(h));
+        // Ta sama próba przez własną powierzchnię sterownika (vkCreateHeadlessSurfaceEXT wywołany bezpośrednio).
+        let mut info = [0u64; 3];
+        info[0] = 1_000_256_000;
+        let mut own: u64 = 0;
+        let r = l.call("vkCreateHeadlessSurfaceEXT", &[l.instance as u64, info.as_ptr() as u64, 0, &mut own as *mut u64 as u64]);
+        eprintln!("własna powierzchnia headless: wynik {r:?}, uchwyt {own:#x}");
+        if r == Some(0) {
+            eprintln!("  support {:?}, caps {:?}", l.surface_support(0, own), l.surface_caps(own).map(|c| c.len()));
+        }
     }
 }

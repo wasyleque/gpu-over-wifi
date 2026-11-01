@@ -64,7 +64,112 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
 
 const SIZE: u64 = 4096;
 
+/// Tryb `enum`: wyliczanie urządzeń tak jak robi `vkcube` (najpierw NULL, potem bufor), z rozszerzeniami z `GPU_SMOKE_EXTS`.
+fn enum_mode() {
+    let lib = LibVulkan::load().unwrap_or_else(|e| die(&format!("libvulkan: {e:?}")));
+    let g = GlobalFns::load(&lib).unwrap_or_else(|e| die(&format!("funkcje globalne: {e:?}")));
+    let exts = std::env::var("GPU_SMOKE_EXTS").unwrap_or_default();
+    let names: Vec<std::ffi::CString> = exts.split(',').filter(|e| !e.is_empty()).map(|e| std::ffi::CString::new(e).unwrap()).collect();
+    let ptrs: Vec<*const std::ffi::c_char> = names.iter().map(|c| c.as_ptr()).collect();
+    let mut info = [0u64; 8];
+    info[0] = 1;
+    info[6] = ptrs.len() as u64;
+    info[7] = ptrs.as_ptr() as u64;
+    let mut inst: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (g.create_instance)(info.as_ptr() as *const c_void, std::ptr::null(), &mut inst) };
+    println!("vkCreateInstance({exts:?}) = {r}");
+    let f = unsafe { InstanceFns::load(&lib, inst) }.unwrap_or_else(|e| die(&format!("funkcje instancji: {e:?}")));
+    let mut n = 0u32;
+    let r1 = unsafe { (f.enumerate_physical_devices)(inst, &mut n, std::ptr::null_mut()) };
+    println!("1. wywołanie (NULL): wynik {r1}, liczba {n}");
+    let mut pds = vec![0x21usize as *mut c_void; n as usize + 1];
+    let r2 = unsafe { (f.enumerate_physical_devices)(inst, &mut n, pds.as_mut_ptr()) };
+    println!("2. wywołanie (bufor): wynik {r2}, liczba {n}, uchwyty {:x?}", &pds[..n as usize + 1]);
+    for (i, p) in pds.iter().take(n as usize).enumerate() {
+        let mut props = vec![0u8; 832];
+        unsafe { (f.get_properties2)(*p, props.as_mut_ptr() as *mut c_void) }; // properties2 oczekuje sType
+        let mut p1 = vec![0u8; 832];
+        println!("   urządzenie {i}: uchwyt {p:?}, wywołuję vkGetPhysicalDeviceProperties...");
+        let fnp = unsafe { lib.proc_addr(inst, c"vkGetPhysicalDeviceProperties") }.unwrap();
+        unsafe { call_thunk(fnp, &[*p as u64, p1.as_mut_ptr() as u64], &[]) };
+        println!("   nazwa: {}", CStr::from_bytes_until_nul(&p1[20..276]).unwrap().to_string_lossy());
+    }
+    unsafe { (f.destroy_instance)(inst, std::ptr::null()) };
+}
+
+/// Tryb `surface`: powierzchnia headless przez loader i nasz ICD; zapytania o możliwości okna.
+fn surface_mode() {
+    let lib = LibVulkan::load().unwrap_or_else(|e| die(&format!("libvulkan: {e:?}")));
+    let g = GlobalFns::load(&lib).unwrap_or_else(|e| die(&format!("funkcje globalne: {e:?}")));
+    let names = [std::ffi::CString::new("VK_KHR_surface").unwrap(), std::ffi::CString::new("VK_EXT_headless_surface").unwrap()];
+    let ptrs: Vec<*const std::ffi::c_char> = names.iter().map(|c| c.as_ptr()).collect();
+    let mut info = [0u64; 8];
+    info[0] = 1;
+    info[6] = ptrs.len() as u64;
+    info[7] = ptrs.as_ptr() as u64;
+    let mut inst: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (g.create_instance)(info.as_ptr() as *const c_void, std::ptr::null(), &mut inst) };
+    if r != 0 {
+        die(&format!("vkCreateInstance z powierzchnią = {r} (ICD nie ogłasza rozszerzeń powierzchni?)"));
+    }
+    let f = unsafe { InstanceFns::load(&lib, inst) }.unwrap_or_else(|e| die(&format!("funkcje instancji: {e:?}")));
+    let func = |name: &str| -> *const c_void {
+        let c = std::ffi::CString::new(name).unwrap();
+        unsafe { lib.proc_addr(inst, &c) }.unwrap_or_else(|| die(&format!("loader nie zna {name}")))
+    };
+    let call = |name: &str, ints: &[u64]| -> i32 { unsafe { call_thunk(func(name), ints, &[]) }.unwrap() as u32 as i32 };
+    let mut n = 8u32;
+    let mut pds = vec![std::ptr::null_mut(); 8];
+    unsafe { (f.enumerate_physical_devices)(inst, &mut n, pds.as_mut_ptr()) };
+    if n == 0 {
+        die("brak urządzeń");
+    }
+    let pd = pds[0] as u64;
+    let mut hinfo = [0u64; 3];
+    hinfo[0] = 1_000_256_000; // VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT
+    let mut surface: u64 = 0;
+    let r = call("vkCreateHeadlessSurfaceEXT", &[inst as u64, hinfo.as_ptr() as u64, 0, &mut surface as *mut u64 as u64]);
+    if r != 0 || surface == 0 {
+        die(&format!("vkCreateHeadlessSurfaceEXT = {r}"));
+    }
+    let mut sup = 99u32;
+    let r = call("vkGetPhysicalDeviceSurfaceSupportKHR", &[pd, 0, surface, &mut sup as *mut u32 as u64]);
+    println!("wsparcie prezentacji (rodzina 0): kod {r}, wartość {sup}");
+    let mut caps = vec![0u8; 56];
+    let r = call("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", &[pd, surface, caps.as_mut_ptr() as u64]);
+    if r != 0 {
+        die(&format!("capabilities = {r}"));
+    }
+    let (minc, maxc, usage) = (u32_at(&caps, 0), u32_at(&caps, 4), u32_at(&caps, 48));
+    println!("możliwości: minImageCount {minc}, maxImageCount {maxc}, usage {usage:#x}, currentExtent {}x{}", u32_at(&caps, 8), u32_at(&caps, 12));
+    let mut fnum = 0u32;
+    call("vkGetPhysicalDeviceSurfaceFormatsKHR", &[pd, surface, &mut fnum as *mut u32 as u64, 0]);
+    let mut fbuf = vec![0u8; fnum as usize * 8];
+    call("vkGetPhysicalDeviceSurfaceFormatsKHR", &[pd, surface, &mut fnum as *mut u32 as u64, fbuf.as_mut_ptr() as u64]);
+    let formats: Vec<u32> = (0..fnum as usize).map(|i| u32_at(&fbuf, i * 8)).collect();
+    let mut mnum = 0u32;
+    call("vkGetPhysicalDeviceSurfacePresentModesKHR", &[pd, surface, &mut mnum as *mut u32 as u64, 0]);
+    let mut mbuf = vec![0u8; mnum as usize * 4];
+    call("vkGetPhysicalDeviceSurfacePresentModesKHR", &[pd, surface, &mut mnum as *mut u32 as u64, mbuf.as_mut_ptr() as u64]);
+    let modes: Vec<u32> = (0..mnum as usize).map(|i| u32_at(&mbuf, i * 4)).collect();
+    println!("formaty: {formats:?}, tryby prezentacji: {modes:?}");
+    if (minc, maxc) != (3, 3) || usage & 0x10 == 0 || !modes.contains(&2) || modes.contains(&1) || formats.iter().any(|f| ![37, 43, 44, 50].contains(f)) {
+        die("odpowiedzi o powierzchni niezgodne z oczekiwaniami (3 obrazy, COLOR_ATTACHMENT, FIFO bez MAILBOX, formaty 8-bitowe)");
+    }
+    println!("OK: ICD odpowiada o powierzchni okna (3 obrazy, FIFO, formaty {} szt.)", formats.len());
+    call("vkDestroySurfaceKHR", &[inst as u64, surface, 0]);
+    unsafe { (f.destroy_instance)(inst, std::ptr::null()) };
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("enum") {
+        enum_mode();
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("surface") {
+        surface_mode();
+        return;
+    }
     let reps: usize = std::env::args().nth(1).and_then(|v| v.parse().ok()).unwrap_or(1);
     let lib = LibVulkan::load().unwrap_or_else(|e| die(&format!("libvulkan: {e:?}")));
     let g = GlobalFns::load(&lib).unwrap_or_else(|e| die(&format!("funkcje globalne: {e:?}")));
