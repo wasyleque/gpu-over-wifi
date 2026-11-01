@@ -27,6 +27,40 @@ pub enum Codec {
     Hevc = 1,
     /// Surowe piksele skompresowane bezstratnie (blok LZ4 bez prefiksu rozmiaru; rozmiar wynika z wymiarów).
     Lz4 = 2,
+    /// H.264/AVC (Annex B, jedna jednostka dostępu na ramkę): sprzętowo dekodowany m.in. przez Intel Skylake (VA-API).
+    H264 = 3,
+}
+
+impl Codec {
+    /// Nazwa używana w ustawieniach (`GPU_ICD_CODEC`): `raw`, `lz4`, `h264`, `hevc`. `auto` rozstrzyga wołający.
+    pub fn from_name(name: &str) -> Option<Codec> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "raw" => Some(Codec::Raw),
+            "lz4" => Some(Codec::Lz4),
+            "h264" | "avc" => Some(Codec::H264),
+            "hevc" | "h265" => Some(Codec::Hevc),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Codec::Raw => "raw",
+            Codec::Lz4 => "lz4",
+            Codec::H264 => "h264",
+            Codec::Hevc => "hevc",
+        }
+    }
+}
+
+/// Wybiera kodek z ustawienia użytkownika i listy dostępnych (kolejność listy = preferencja dla `auto`).
+/// `None`, gdy żądany kodek nie jest dostępny (wołający ostrzega i bierze pierwszy dostępny).
+pub fn choose_codec(setting: &str, available: &[Codec]) -> Option<Codec> {
+    let s = setting.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+        return available.first().copied();
+    }
+    Codec::from_name(s).filter(|c| available.contains(c))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +120,7 @@ impl VideoHeader {
             0 => Codec::Raw,
             1 => Codec::Hevc,
             2 => Codec::Lz4,
+            3 => Codec::H264,
             other => return Err(VideoError::BadCodec(other)),
         };
         if bytes[22] != 0 || bytes[23] != 0 {
@@ -263,11 +298,11 @@ mod tests {
     #[test]
     fn header_roundtrips_for_all_format_and_codec_combinations() {
         for f in [PixelFormat::Bgra8, PixelFormat::Rgba8] {
-            for c in [Codec::Raw, Codec::Hevc] {
+            for c in [Codec::Raw, Codec::Hevc, Codec::Lz4, Codec::H264] {
                 let mut h = hdr();
                 h.format = f;
                 h.codec = c;
-                if c == Codec::Hevc {
+                if c != Codec::Raw {
                     h.payload_len = 12345;
                 }
                 assert_eq!(VideoHeader::decode(&h.encode()), Ok(h));
@@ -453,6 +488,33 @@ mod tests {
         let mut hevc = h;
         hevc.codec = Codec::Hevc;
         assert_eq!(raw_pixels(&hevc, &payload), Err(VideoError::BadCodec(1)));
+    }
+
+    #[test]
+    fn codec_names_parse_roundtrip_and_selection_honours_availability() {
+        for c in [Codec::Raw, Codec::Lz4, Codec::H264, Codec::Hevc] {
+            assert_eq!(Codec::from_name(c.name()), Some(c));
+        }
+        assert_eq!(Codec::from_name(" H264 "), Some(Codec::H264));
+        assert_eq!(Codec::from_name("avc"), Some(Codec::H264));
+        assert_eq!(Codec::from_name("h265"), Some(Codec::Hevc));
+        assert_eq!(Codec::from_name("vp9"), None);
+        let avail = [Codec::H264, Codec::Lz4, Codec::Raw];
+        assert_eq!(choose_codec("auto", &avail), Some(Codec::H264), "auto = pierwszy dostępny (preferencja)");
+        assert_eq!(choose_codec("", &avail), Some(Codec::H264));
+        assert_eq!(choose_codec("lz4", &avail), Some(Codec::Lz4));
+        assert_eq!(choose_codec("hevc", &avail), None, "żądany, ale niedostępny");
+        assert_eq!(choose_codec("nie-ma", &avail), None);
+        assert_eq!(choose_codec("auto", &[]), None);
+    }
+
+    #[test]
+    fn h264_header_roundtrips_and_is_not_a_raw_frame() {
+        let mut h = hdr();
+        h.codec = Codec::H264;
+        h.payload_len = 54321;
+        assert_eq!(VideoHeader::decode(&h.encode()), Ok(h));
+        assert_eq!(raw_pixels(&h, &[0u8; 54321]), Err(VideoError::BadCodec(3)));
     }
 
     #[test]

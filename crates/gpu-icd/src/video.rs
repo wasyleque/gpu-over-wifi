@@ -82,7 +82,7 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
                 }
                 &decoded
             }
-            Codec::Hevc => continue, // M5
+            Codec::Hevc | Codec::H264 => continue, // M5: dekodery wideo dojdą z VA-API
         };
         st.decode_ns += t_dec.elapsed().as_nanos() as u64;
         let frame_bgra: &[u8] = if h.format == PixelFormat::Rgba8 {

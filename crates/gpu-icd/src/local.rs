@@ -34,12 +34,13 @@ pub fn library_path_from_manifest(json: &str, manifest_dir: &Path) -> Option<Pat
     }
 }
 
-/// Manifesty sterowników Intela (nie nasz ICD), posortowane tak, by nowszy `intel_icd` był przed `hasvk`.
-pub fn find_intel_manifests() -> Vec<PathBuf> {
+/// Manifesty lokalnych sterowników do wyświetlania, od najbardziej prawdopodobnych: Intel, AMD, NVIDIA, reszta fizycznych GPU.
+/// Pomijamy sterowniki programowe i wirtualne (lvp, virtio, gfxstream) oraz nasz ICD. `GPU_ICD_LOCAL_ICD` wskazuje manifest wprost.
+pub fn find_local_manifests() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("GPU_ICD_LOCAL_ICD") {
         return vec![PathBuf::from(p)];
     }
-    let mut dirs = vec![PathBuf::from("/usr/share/vulkan/icd.d"), PathBuf::from("/etc/vulkan/icd.d")];
+    let mut dirs = vec![PathBuf::from("/usr/share/vulkan/icd.d"), PathBuf::from("/etc/vulkan/icd.d"), PathBuf::from("/usr/local/share/vulkan/icd.d")];
     if let Ok(h) = std::env::var("HOME") {
         dirs.push(PathBuf::from(h).join(".local/share/vulkan/icd.d"));
     }
@@ -48,12 +49,27 @@ pub fn find_intel_manifests() -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_lowercase();
-            if name.contains("intel") && name.ends_with(".json") {
+            let skip = ["lvp", "virtio", "gfxstream", "gpu_icd", "gpu-icd", "lavapipe"].iter().any(|x| name.contains(x));
+            if name.ends_with(".json") && !skip {
                 out.push(e.path());
             }
         }
     }
-    out.sort_by_key(|p| (p.to_string_lossy().contains("hasvk"), p.clone()));
+    let rank = |p: &PathBuf| {
+        let n = p.to_string_lossy().to_lowercase();
+        let base = if n.contains("intel") {
+            0
+        } else if n.contains("radeon") || n.contains("amd") {
+            1
+        } else if n.contains("nvidia") {
+            2
+        } else {
+            3
+        };
+        (base, n.contains("hasvk"), p.clone())
+    };
+    out.sort_by_key(rank);
+    out.dedup();
     out
 }
 
@@ -150,8 +166,8 @@ impl LocalVulkan {
 
     /// Otwiera pierwszy działający sterownik Intela z manifestów i wybiera jego pierwsze urządzenie.
     pub fn open() -> Result<LocalVulkan, String> {
-        let mut last = "nie znaleziono manifestu sterownika Intela".to_string();
-        for m in find_intel_manifests() {
+        let mut last = "nie znaleziono manifestu lokalnego sterownika Vulkana".to_string();
+        for m in find_local_manifests() {
             match Self::open_manifest(&m) {
                 Ok(l) => return Ok(l),
                 Err(e) => last = format!("{}: {e}", m.display()),
@@ -243,12 +259,19 @@ mod tests {
     }
 
     #[test]
-    fn manifests_never_include_our_own_icd_and_hasvk_comes_last() {
+    fn manifests_skip_software_and_virtual_drivers_and_rank_intel_first_hasvk_last() {
         std::env::remove_var("GPU_ICD_LOCAL_ICD");
-        let m = find_intel_manifests();
-        assert!(m.iter().all(|p| p.to_string_lossy().to_lowercase().contains("intel")));
-        if let (Some(a), Some(b)) = (m.iter().position(|p| p.to_string_lossy().contains("hasvk")), m.iter().position(|p| !p.to_string_lossy().contains("hasvk"))) {
-            assert!(b < a);
+        let m = find_local_manifests();
+        for p in &m {
+            let n = p.to_string_lossy().to_lowercase();
+            assert!(!n.contains("lvp") && !n.contains("virtio") && !n.contains("gfxstream") && !n.contains("gpu_icd"), "{n}");
+        }
+        let pos = |f: &dyn Fn(&str) -> bool| m.iter().position(|p| f(&p.to_string_lossy().to_lowercase()));
+        if let (Some(i), Some(n)) = (pos(&|n| n.contains("intel_icd")), pos(&|n| n.contains("nvidia"))) {
+            assert!(i < n, "Intel przed NVIDIA");
+        }
+        if let (Some(h), Some(i)) = (pos(&|n| n.contains("hasvk")), pos(&|n| n.contains("intel_icd"))) {
+            assert!(i < h, "hasvk po nowszym intel_icd");
         }
     }
 

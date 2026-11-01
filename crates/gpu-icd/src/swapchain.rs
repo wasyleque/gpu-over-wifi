@@ -51,6 +51,19 @@ unsafe fn rd<T: Copy>(struct_name: &str, ptr: *const u8, member: &str) -> Option
     Some(std::ptr::read_unaligned(ptr.add(m.offset as usize) as *const T))
 }
 
+/// Kodek ramek wybrany ustawieniem `GPU_ICD_CODEC` (`auto`, `raw`, `lz4`, `h264`, `hevc`) spośród tych, które ICD umie dekodować
+/// i serwer koduje (dziś: LZ4 i surowy; H.264/HEVC dojdą wraz z NVENC i dekoderem). Niedostępny wybór => ostrzeżenie i `auto`.
+fn pick_codec() -> u8 {
+    use gpu_proto::video::{choose_codec, Codec};
+    const AVAILABLE: &[Codec] = &[Codec::Lz4, Codec::Raw];
+    let setting = std::env::var("GPU_ICD_CODEC").unwrap_or_default();
+    let chosen = choose_codec(&setting, AVAILABLE).unwrap_or_else(|| {
+        eprintln!("gpu-icd: kodek {setting:?} niedostępny (dostępne: lz4, raw); używam lz4");
+        Codec::Lz4
+    });
+    chosen as u8
+}
+
 /// Wybiera typ pamięci zdalnej karty: dozwolony przez `bits` i mający wszystkie `want` bity właściwości.
 fn pick_memory_type(props: &[u8], bits: u32, want: u32) -> Option<u32> {
     let count = u32::from_le_bytes(props.get(16..20)?.try_into().ok()?) as usize;
@@ -306,7 +319,7 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         st.flush();
         let format = if matches!(fmt, 37 | 43) { 2u8 } else { 1u8 };
         // Kodek ramek: domyślnie LZ4 (bezstratny); `GPU_ICD_CODEC=raw` wymusza surowe piksele.
-        let codec = if std::env::var("GPU_ICD_CODEC").is_ok_and(|c| c == "raw") { 0u8 } else { 2u8 };
+        let codec = pick_codec();
         let req = gpu_proto::msg::Request::PresentFrame { memory: readback, len: (w * h * 4), seq, width: w as u16, height: h as u16, format, codec };
         st.stats.frames += 1;
         st.stats.t_wait_ns += t0.elapsed().as_nanos() as u64;
