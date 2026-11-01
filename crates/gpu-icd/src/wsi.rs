@@ -136,8 +136,8 @@ mod tests {
         let usage = u32::from_le_bytes(c[48..52].try_into().unwrap());
         assert_eq!(usage & 0x10, 0x10, "COLOR_ATTACHMENT");
         assert_eq!(usage & 0x1, 0x1, "TRANSFER_SRC");
-        assert!(!patch_capabilities(&mut vec![0u8; 51]));
-        assert!(!patch_capabilities(&mut vec![0u8; 53]));
+        assert!(!patch_capabilities(&mut [0u8; 51]));
+        assert!(!patch_capabilities(&mut [0u8; 53]));
         assert!(!patch_capabilities(&mut []));
     }
 }
