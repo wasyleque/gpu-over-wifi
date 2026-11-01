@@ -82,6 +82,14 @@ pub unsafe fn build_writes(entries: &[Entry], data: *const u8, set: u64) -> Opti
             let stride = if e.count == 1 { 0 } else { e.stride };
             let src = data.add(e.offset + k * stride);
             std::ptr::copy_nonoverlapping(src, arr.as_mut_ptr().add(k * size), size);
+            // Pola `VkDescriptorImageInfo`, których dany typ deskryptora nie używa, mogą zawierać śmieci (spec je ignoruje),
+            // a kodek tłumaczy każdy uchwyt i odrzuciłby nieznany identyfikator: zerujemy nieużywane.
+            let elem = &mut arr[k * size..(k + 1) * size];
+            match e.descriptor_type {
+                0 => elem[8..].fill(0),         // SAMPLER: tylko sampler
+                2 | 3 | 10 => elem[..8].fill(0), // obrazy bez próbnika: imageView + layout
+                _ => {}
+            }
         }
         let mut w = [0u8; 64];
         w[0..4].copy_from_slice(&WRITE_DESCRIPTOR_SET.to_le_bytes());
@@ -156,6 +164,22 @@ mod tests {
         // Bufor w pBufferInfo (@48 drugiej struktury = 64 + 48), widok w pTexelBufferView (@56 trzeciej).
         assert_eq!(unsafe { *(rd64(64 + 48) as *const u8) }, 0x77);
         assert_eq!(unsafe { *(rd64(128 + 56) as *const u8) }, 0x99);
+    }
+
+    #[test]
+    fn ignored_image_info_fields_are_zeroed_so_garbage_handles_never_reach_the_server() {
+        let mut data = [0xEEu8; 72];
+        data[16..24].fill(0xEE);
+        let entries = [entry(0, 1, 0, 0, 0), entry(1, 1, 2, 24, 0), entry(2, 1, 1, 48, 0)];
+        let w = unsafe { build_writes(&entries, data.as_ptr(), 1) }.unwrap();
+        let arr = |i: usize| unsafe { std::slice::from_raw_parts(u64::from_le_bytes(w.bytes[i * 64 + 40..i * 64 + 48].try_into().unwrap()) as *const u8, 24).to_vec() };
+        let sampler = arr(0);
+        assert_eq!(&sampler[..8], &[0xEE; 8], "sampler zostaje");
+        assert!(sampler[8..].iter().all(|b| *b == 0), "imageView i layout zerowane dla SAMPLER");
+        let sampled = arr(1);
+        assert!(sampled[..8].iter().all(|b| *b == 0), "sampler zerowany dla SAMPLED_IMAGE");
+        assert_eq!(&sampled[8..], &[0xEE; 16]);
+        assert_eq!(arr(2), vec![0xEE; 24], "COMBINED_IMAGE_SAMPLER zostaje w całości");
     }
 
     #[test]
