@@ -279,6 +279,9 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             let p = if names.is_null() { std::ptr::null() } else { *names.add(i) };
             let ok = !p.is_null() && CStr::from_ptr(p).to_str().is_ok_and(|n| allowed.iter().any(|(a, _)| *a == n));
             if !ok {
+                if std::env::var("GPU_ICD_DEBUG").is_ok() && !p.is_null() {
+                    eprintln!("[gpu-icd] vkCreateInstance: nieogłoszone rozszerzenie {:?}", CStr::from_ptr(p));
+                }
                 return VK_ERROR_EXTENSION_NOT_PRESENT;
             }
         }
