@@ -5,5 +5,6 @@ pub mod meta;
 pub mod meta_table;
 pub mod msg;
 pub mod stype;
+pub mod video;
 #[rustfmt::skip]
 pub mod stype_table;
