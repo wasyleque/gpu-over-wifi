@@ -295,6 +295,15 @@ impl GpuBackend for VulkanBackend {
         if let Some(e) = self.instances.get_mut(Handle(instance)) {
             e.pdevs = handles.clone();
         }
+        // Diagnostyka: lista urządzeń widziana przez ten proces przy każdej instancji (zdarzało się, że znikała karta NVIDIA).
+        let mut names = Vec::new();
+        for p in &handles {
+            if let Ok(d) = self.query_head(p.raw(), ST_PROPERTIES2, 0, &[]) {
+                let name = d.get(36..36 + 256).map(|n| String::from_utf8_lossy(n.split(|&b| b == 0).next().unwrap_or(&[])).into_owned()).unwrap_or_default();
+                names.push(name);
+            }
+        }
+        eprintln!("gpu-renderd: instancja {instance:#x} widzi {} urządzeń: {names:?}", handles.len());
         Ok(handles.iter().map(|h| h.raw()).collect())
     }
 

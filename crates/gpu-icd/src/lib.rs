@@ -293,6 +293,9 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             st.pdevs.push(Box::into_raw(Box::new(PdevObj { loader_data: 0, remote: rp, instance: obj })));
         }
     }
+    if lock(&(*obj).state).pdevs.is_empty() {
+        eprintln!("gpu-icd: UWAGA: serwer {addr} nie udostępnia żadnej karty innej niż CPU (llvmpipe); sprawdź sterownik GPU na serwerze albo ustaw GPU_ICD_ALL_DEVICES=1");
+    }
     *out = obj;
     VK_SUCCESS
 }
