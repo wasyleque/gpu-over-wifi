@@ -4,7 +4,7 @@
 //! (liczby LE, napisy i bajty z prefiksem długości). Dane z sieci są niezaufane:
 //! dekoder sprawdza limity i odrzuca bajty nadmiarowe po poprawnym komunikacie.
 
-use gpu_wire::WireError;
+use gpu_wire::{Decoder, Encoder, WireError};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Maksymalna długość tokenu uwierzytelniającego (bajty).
@@ -37,7 +37,19 @@ pub enum PdFunc {
 
 impl PdFunc {
     pub fn from_u8(v: u8) -> Option<PdFunc> {
-        todo!()
+        Some(match v {
+            1 => PdFunc::Properties,
+            2 => PdFunc::Properties2,
+            3 => PdFunc::Features,
+            4 => PdFunc::Features2,
+            5 => PdFunc::MemoryProperties,
+            6 => PdFunc::MemoryProperties2,
+            7 => PdFunc::FormatProperties,
+            8 => PdFunc::FormatProperties2,
+            9 => PdFunc::QueueFamilyProperties,
+            10 => PdFunc::QueueFamilyProperties2,
+            _ => return None,
+        })
     }
 }
 
@@ -88,21 +100,185 @@ impl From<WireError> for MsgError {
 
 impl Request {
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        let mut e = Encoder::new();
+        match self {
+            Request::Hello { version, token } => {
+                e.put_u8(0);
+                e.put_u32(*version);
+                e.put_bytes(token);
+            }
+            Request::EnumInstanceVersion => e.put_u8(1),
+            Request::EnumInstanceExtensions => e.put_u8(2),
+            Request::CreateInstance { api_version, extensions } => {
+                e.put_u8(3);
+                e.put_u32(*api_version);
+                e.put_varint(extensions.len() as u64);
+                for x in extensions {
+                    e.put_str(x);
+                }
+            }
+            Request::DestroyInstance { instance } => {
+                e.put_u8(4);
+                e.put_u64(*instance);
+            }
+            Request::EnumPhysicalDevices { instance } => {
+                e.put_u8(5);
+                e.put_u64(*instance);
+            }
+            Request::GetPhysicalDevice { pdev, func, arg, count, chain } => {
+                e.put_u8(6);
+                e.put_u64(*pdev);
+                e.put_u8(*func as u8);
+                e.put_u32(*arg);
+                e.put_u32(*count);
+                e.put_varint(chain.len() as u64);
+                for c in chain {
+                    e.put_u32(*c);
+                }
+            }
+            Request::EnumDeviceExtensions { pdev } => {
+                e.put_u8(7);
+                e.put_u64(*pdev);
+            }
+        }
+        e.finish()
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Request, MsgError> {
-        todo!()
+        let mut d = Decoder::new(bytes);
+        let req = match d.get_u8()? {
+            0 => {
+                let version = d.get_u32()?;
+                let token = d.get_bytes()?;
+                if token.len() > MAX_TOKEN_LEN {
+                    return Err(MsgError::LimitExceeded("token"));
+                }
+                Request::Hello { version, token: token.to_vec() }
+            }
+            1 => Request::EnumInstanceVersion,
+            2 => Request::EnumInstanceExtensions,
+            3 => {
+                let api_version = d.get_u32()?;
+                let n = d.get_varint()?;
+                if n > MAX_EXTENSIONS as u64 {
+                    return Err(MsgError::LimitExceeded("extensions"));
+                }
+                let mut extensions = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    let name = d.get_str()?;
+                    if name.len() > MAX_NAME_LEN {
+                        return Err(MsgError::LimitExceeded("extension name"));
+                    }
+                    extensions.push(name.to_string());
+                }
+                Request::CreateInstance { api_version, extensions }
+            }
+            4 => Request::DestroyInstance { instance: d.get_u64()? },
+            5 => Request::EnumPhysicalDevices { instance: d.get_u64()? },
+            6 => {
+                let pdev = d.get_u64()?;
+                let f = d.get_u8()?;
+                let func = PdFunc::from_u8(f).ok_or(MsgError::UnknownFunc(f))?;
+                let arg = d.get_u32()?;
+                let count = d.get_u32()?;
+                if count > MAX_COUNT {
+                    return Err(MsgError::LimitExceeded("count"));
+                }
+                let n = d.get_varint()?;
+                if n > MAX_CHAIN as u64 {
+                    return Err(MsgError::LimitExceeded("chain"));
+                }
+                let mut chain = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    chain.push(d.get_u32()?);
+                }
+                Request::GetPhysicalDevice { pdev, func, arg, count, chain }
+            }
+            7 => Request::EnumDeviceExtensions { pdev: d.get_u64()? },
+            op => return Err(MsgError::UnknownOp(op)),
+        };
+        match d.remaining() {
+            0 => Ok(req),
+            n => Err(MsgError::TrailingBytes(n)),
+        }
     }
 }
 
 impl Response {
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        let mut e = Encoder::new();
+        match self {
+            Response::HelloOk { version } => {
+                e.put_u8(0);
+                e.put_u32(*version);
+            }
+            Response::Handle(h) => {
+                e.put_u8(1);
+                e.put_u64(*h);
+            }
+            Response::Handles(hs) => {
+                e.put_u8(2);
+                e.put_varint(hs.len() as u64);
+                for h in hs {
+                    e.put_u64(*h);
+                }
+            }
+            Response::U32(v) => {
+                e.put_u8(3);
+                e.put_u32(*v);
+            }
+            Response::Data(b) => {
+                e.put_u8(4);
+                e.put_bytes(b);
+            }
+            Response::Error { code, message } => {
+                e.put_u8(5);
+                e.put_u32(*code as u32);
+                e.put_str(message);
+            }
+        }
+        e.finish()
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Response, MsgError> {
-        todo!()
+        let mut d = Decoder::new(bytes);
+        let resp = match d.get_u8()? {
+            0 => Response::HelloOk { version: d.get_u32()? },
+            1 => Response::Handle(d.get_u64()?),
+            2 => {
+                let n = d.get_varint()?;
+                // Każdy uchwyt zajmuje 8 bajtów: liczba większa niż zmieści bufor to błąd, bez alokacji.
+                if n > MAX_COUNT as u64 || n > (d.remaining() / 8) as u64 {
+                    return Err(MsgError::Wire(WireError::UnexpectedEof));
+                }
+                let mut hs = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    hs.push(d.get_u64()?);
+                }
+                Response::Handles(hs)
+            }
+            3 => Response::U32(d.get_u32()?),
+            4 => {
+                let b = d.get_bytes()?;
+                if b.len() > MAX_DATA {
+                    return Err(MsgError::LimitExceeded("data"));
+                }
+                Response::Data(b.to_vec())
+            }
+            5 => {
+                let code = d.get_u32()? as i32;
+                let message = d.get_str()?;
+                if message.len() > MAX_NAME_LEN * 4 {
+                    return Err(MsgError::LimitExceeded("message"));
+                }
+                Response::Error { code, message: message.to_string() }
+            }
+            op => return Err(MsgError::UnknownOp(op)),
+        };
+        match d.remaining() {
+            0 => Ok(resp),
+            n => Err(MsgError::TrailingBytes(n)),
+        }
     }
 }
 
