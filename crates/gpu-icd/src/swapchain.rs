@@ -72,7 +72,8 @@ unsafe fn alloc_bound(st: &mut InstState, dev: u64, props: &[u8], kind: &str, ob
     }
     let rb = req.bytes();
     let (size, bits) = (u64::from_le_bytes(rb[0..8].try_into().unwrap_or([0; 8])), u32::from_le_bytes(rb[16..20].try_into().unwrap_or([0; 4])));
-    let mt = pick_memory_type(props, bits, want).or_else(|| pick_memory_type(props, bits, 0)).ok_or(VK_ERROR_INITIALIZATION_FAILED)?;
+    // Preferujemy pełne `want`, potem bez bitu CACHED (0x8), na końcu cokolwiek dozwolonego.
+    let mt = pick_memory_type(props, bits, want).or_else(|| pick_memory_type(props, bits, want & !0x8)).or_else(|| pick_memory_type(props, bits, 0)).ok_or(VK_ERROR_INITIALIZATION_FAILED)?;
     let mut ai = S::new("VkMemoryAllocateInfo");
     ai.u64("allocationSize", size).u32("memoryTypeIndex", mt);
     let mut mem = 0u64;
@@ -116,7 +117,8 @@ unsafe fn create_inner(st: &mut InstState, dev: u64, info: *const u8) -> Result<
     if exec_named(st, "vkCreateBuffer", &mut [dev, bci.p(), 0, &mut rbuf as *mut u64 as u64]) < 0 {
         return Err(VK_ERROR_INITIALIZATION_FAILED);
     }
-    let readback_mem = alloc_bound(st, dev, &props, "buffer", rbuf, 0x6)?;
+    // Bufor odczytu w pamięci HOST_VISIBLE|COHERENT|CACHED: odczyt z pamięci bez cache jest wielokrotnie wolniejszy.
+    let readback_mem = alloc_bound(st, dev, &props, "buffer", rbuf, 0xE)?;
 
     let mut queue = 0u64;
     exec_named(st, "vkGetDeviceQueue", &mut [dev, 0, 0, &mut queue as *mut u64 as u64]);
@@ -269,6 +271,7 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
     let Some(sw) = st.swapchains.get_mut(&sc) else { return VK_ERROR_OUT_OF_DATE };
     let (dev, fence, readback, fmt, w, h) = (sw.device, sw.fence, sw.readback_mem, sw.format, sw.width, sw.height);
     let Some(cb) = sw.cbs.get(idx).copied() else { return VK_ERROR_OUT_OF_DATE };
+    let t0 = std::time::Instant::now();
     let stages = vec![0x1000u32; nwait as usize];
     let mut si = S::new("VkSubmitInfo");
     si.u32("waitSemaphoreCount", nwait).u64("pWaitSemaphores", waits as u64).u64("pWaitDstStageMask", stages.as_ptr() as u64);
@@ -280,6 +283,7 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     exec_named(st, "vkResetFences", &mut [dev, 1, &fence as *const u64 as u64]);
+    let t1 = std::time::Instant::now();
     let size = w as usize * h as usize * 4;
     let Some(mut frame) = st.read_mem(readback, 0, size) else { return VK_ERROR_INITIALIZATION_FAILED };
     if matches!(fmt, 37 | 43) {
@@ -288,6 +292,10 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
             frame = bgra;
         }
     }
+    let t2 = std::time::Instant::now();
+    st.stats.t_wait_ns += (t1 - t0).as_nanos() as u64;
+    st.stats.t_read_ns += (t2 - t1).as_nanos() as u64;
+    st.stats.frames += 1;
     let Some(sw) = st.swapchains.get_mut(&sc) else { return VK_ERROR_OUT_OF_DATE };
     sw.frames += 1;
     if let (Ok(path), true) = (std::env::var("GPU_ICD_DUMP_FRAME"), sw.frames == 1) {
@@ -309,10 +317,12 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         }
     }
     let Some(p) = sw.presenter.as_mut() else { return VK_ERROR_INITIALIZATION_FAILED };
-    match with_local(|l| p.present(l, &frame)) {
+    let r = match with_local(|l| p.present(l, &frame)) {
         Some(Ok(r)) => r,
         _ => VK_ERROR_INITIALIZATION_FAILED,
-    }
+    };
+    st.stats.t_local_ns += t2.elapsed().as_nanos() as u64;
+    r
 }
 
 #[cfg(test)]

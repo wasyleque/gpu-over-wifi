@@ -43,13 +43,19 @@ pub struct Stats {
     pub query_bytes: u64,
     pub roundtrips: u64,
     pub commands: u64,
+    /// Czasy etapów `Present` (ns): submit+czekanie na GPU serwera, odczyt klatki po sieci, lokalne wyświetlenie; liczba klatek.
+    pub t_wait_ns: u64,
+    pub t_read_ns: u64,
+    pub t_local_ns: u64,
+    pub frames: u64,
 }
 
 impl Stats {
     pub fn report(&self) -> String {
+        let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}",
-            self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips
+            "gpu-icd statystyki: poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
