@@ -39,7 +39,34 @@ pub enum FrameError {
 
 /// CRC32C (Castagnoli, wielomian odwrócony 0x82F63B78), implementacja programowa.
 pub fn crc32c(data: &[u8]) -> u32 {
-    todo!()
+    const TABLE: [u32; 256] = make_table();
+    
+    let mut crc = 0xFFFFFFFF;
+    for &b in data {
+        let table_index = (crc ^ b as u32) & 0xFF;
+        crc = TABLE[table_index as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFFFFFF
+}
+
+const fn make_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0x82F63B78;
+            } else {
+                crc >>= 1;
+            }
+            j += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,13 +80,36 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
+    /// Koduje nagłówek do 16 bajtów w little-endian.
     pub fn encode(&self) -> [u8; HEADER_LEN] {
-        todo!()
+        let mut result = [0u8; HEADER_LEN];
+        result[0..4].copy_from_slice(&self.len.to_le_bytes());
+        result[4] = self.stream;
+        result[5] = self.flags;
+        result[6..8].copy_from_slice(&self.seq.to_le_bytes());
+        result[8..12].copy_from_slice(&self.epoch.to_le_bytes());
+        result[12..16].copy_from_slice(&self.crc32c.to_le_bytes());
+        result
     }
 
     /// Dekoduje nagłówek i waliduje `len` oraz `flags`.
     pub fn decode(bytes: &[u8; HEADER_LEN]) -> Result<Self, FrameError> {
-        todo!()
+        let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let stream = bytes[4];
+        let flags = bytes[5];
+        let seq = u16::from_le_bytes([bytes[6], bytes[7]]);
+        let epoch = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let crc32c = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+
+        if len > MAX_FRAME {
+            return Err(FrameError::TooLarge(len));
+        }
+
+        if flags & !flags::ALL != 0 {
+            return Err(FrameError::UnknownFlags(flags & !flags::ALL));
+        }
+
+        Ok(FrameHeader { len, stream, flags, seq, epoch, crc32c })
     }
 }
 
@@ -72,12 +122,37 @@ pub struct Frame {
 impl Frame {
     /// Buduje ramkę: ustawia `len`, a przy fladze CRC liczy `crc32c`.
     pub fn new(stream: u8, flags: u8, seq: u16, epoch: u32, payload: Vec<u8>) -> Result<Frame, FrameError> {
-        todo!()
+        if payload.len() > MAX_FRAME as usize {
+            return Err(FrameError::TooLarge(payload.len() as u32));
+        }
+
+        if flags & !flags::ALL != 0 {
+            return Err(FrameError::UnknownFlags(flags & !flags::ALL));
+        }
+
+        let crc32c = if flags & flags::CRC != 0 {
+            crc32c(&payload)
+        } else {
+            0
+        };
+
+        let header = FrameHeader {
+            len: payload.len() as u32,
+            stream,
+            flags,
+            seq,
+            epoch,
+            crc32c,
+        };
+
+        Ok(Frame { header, payload })
     }
 
     /// Nagłówek + payload.
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        let mut result = self.header.encode().to_vec();
+        result.extend_from_slice(&self.payload);
+        result
     }
 }
 
@@ -89,24 +164,63 @@ pub struct FrameReader {
 }
 
 impl FrameReader {
+    /// Tworzy nowy czytnik.
     pub fn new() -> Self {
-        todo!()
+        Self::default()
     }
 
     /// Dopisuje odebrane bajty.
     pub fn push(&mut self, data: &[u8]) {
-        todo!()
+        if !self.poisoned {
+            self.buf.extend_from_slice(data);
+        }
     }
 
     /// `Ok(Some)` gdy jest kompletna ramka, `Ok(None)` gdy trzeba więcej danych.
     /// Po pierwszym błędzie czytnik jest zablokowany i zawsze zwraca `Err(Poisoned)`.
     pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
-        todo!()
+        if self.poisoned {
+            return Err(FrameError::Poisoned);
+        }
+
+        if self.buf.len() < HEADER_LEN {
+            return Ok(None);
+        }
+
+        // Długość bufora >= HEADER_LEN jest sprawdzona wyżej, więc kopiowanie nie może spanikować.
+        let mut header_bytes = [0u8; HEADER_LEN];
+        header_bytes.copy_from_slice(&self.buf[..HEADER_LEN]);
+        // Nagłówek jest walidowany od razu, zanim zaczniemy czekać na payload.
+        let header = match FrameHeader::decode(&header_bytes) {
+            Ok(h) => h,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(e);
+            }
+        };
+
+        let total_len = HEADER_LEN + header.len as usize;
+        if self.buf.len() < total_len {
+            return Ok(None);
+        }
+
+        let payload = self.buf[HEADER_LEN..total_len].to_vec();
+
+        if header.flags & flags::CRC != 0 {
+            let actual_crc = crc32c(&payload);
+            if actual_crc != header.crc32c {
+                self.poisoned = true;
+                return Err(FrameError::BadCrc { expected: header.crc32c, actual: actual_crc });
+            }
+        }
+
+        self.buf.drain(..total_len);
+        Ok(Some(Frame { header, payload }))
     }
 
     /// Liczba zbuforowanych, jeszcze nieprzetworzonych bajtów.
     pub fn buffered(&self) -> usize {
-        todo!()
+        self.buf.len()
     }
 }
 
@@ -265,5 +379,70 @@ mod tests {
         r.push(&h.encode());
         assert_eq!(r.next_frame(), Err(FrameError::UnknownFlags(0x40)));
         assert_eq!(r.next_frame(), Err(FrameError::Poisoned));
+    }
+
+    /// Prosty deterministyczny generator (xorshift64*), bez zależności.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn fuzz_random_bytes_never_panic_and_never_buffer_unboundedly() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..3000 {
+            let mut r = FrameReader::new();
+            let total = rng.below(600);
+            let mut sent = 0;
+            while sent < total {
+                let n = (1 + rng.below(40)).min(total - sent);
+                let chunk: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
+                r.push(&chunk);
+                sent += n;
+                loop {
+                    match r.next_frame() {
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+            assert!(r.buffered() <= total, "bufor nie może urosnąć ponad wejście");
+        }
+    }
+
+    #[test]
+    fn fuzz_valid_frames_in_random_chunks_roundtrip() {
+        let mut rng = Rng(0x1234_5678_9ABC_DEF1);
+        for _ in 0..300 {
+            let frames: Vec<Frame> = (0..1 + rng.below(6))
+                .map(|i| {
+                    let payload: Vec<u8> = (0..rng.below(300)).map(|_| rng.next() as u8).collect();
+                    let fl = if rng.below(2) == 0 { flags::CRC } else { 0 } | if rng.below(2) == 0 { flags::ZSTD } else { 0 };
+                    Frame::new(rng.below(256) as u8, fl, i as u16, 7, payload).unwrap()
+                })
+                .collect();
+            let wire: Vec<u8> = frames.iter().flat_map(|f| f.encode()).collect();
+            let mut r = FrameReader::new();
+            let mut got = Vec::new();
+            let mut pos = 0;
+            while pos < wire.len() {
+                let n = (1 + rng.below(50)).min(wire.len() - pos);
+                r.push(&wire[pos..pos + n]);
+                pos += n;
+                while let Some(f) = r.next_frame().unwrap() {
+                    got.push(f);
+                }
+            }
+            assert_eq!(got, frames);
+            assert_eq!(r.buffered(), 0);
+        }
     }
 }
