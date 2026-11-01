@@ -6,6 +6,8 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 
 pub const TIER_NONE: u8 = 0;
 pub const TIER_SSD: u8 = 1;
@@ -64,26 +66,225 @@ pub struct Tap {
     layers: usize,
     experts: usize,
     heat: Vec<u8>,
+    current_token: Option<u64>,
+    current: TokenStats,
+    last: Option<TokenStats>,
+    answer: AnswerStats,
+    answer_start: Option<f64>,
+    last_event_s: Option<f64>,
+    picked: Vec<(u16, u16)>,
 }
 
 impl Tap {
     pub fn new(layers: usize, experts: usize) -> Self {
-        todo!()
+        let heat = vec![TIER_NONE; layers * experts];
+        Tap {
+            layers,
+            experts,
+            heat,
+            current_token: None,
+            current: TokenStats::default(),
+            last: None,
+            answer: AnswerStats::default(),
+            answer_start: None,
+            last_event_s: None,
+            picked: Vec::new(),
+        }
     }
 
     /// Przetwarza jedną linię JSON. `now_s` to znacznik czasu (sekundy) podany przez wywołującego.
     /// Uwzględnia tylko zdarzenia `ssd.place.layer` z `decode == true`.
     pub fn feed_line(&mut self, line: &str, now_s: f64) {
-        todo!()
+        let v = match serde_json::from_str::<serde_json::Value>(line).ok() {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Sprawdź typ zdarzenia i czy decode jest true
+        if v.get("ev").and_then(|v| v.as_str()) != Some("ssd.place.layer") {
+            return;
+        }
+        
+        if v.get("decode").and_then(|v| v.as_bool()) != Some(true) {
+            return;
+        }
+
+        // Pobierz warstwę
+        let layer = match v.get("layer").and_then(|v| v.as_u64()) {
+            Some(layer) => layer,
+            None => return,
+        };
+        
+        if layer >= self.layers as u64 {
+            return;
+        }
+
+        // Pobierz token
+        let token = match v.get("token").and_then(|v| v.as_u64()) {
+            Some(token) => token,
+            None => return,
+        };
+
+        // Pobierz eksperci
+        let selected_experts = match v.get("selected_experts").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => return,
+        };
+        
+        if selected_experts.len() > MAX_EXPERTS_PER_LINE {
+            return;
+        }
+
+        // Sprawdź czy wszystkie eksperci są poprawne
+        for expert_val in selected_experts {
+            let expert = match expert_val.as_u64() {
+                Some(expert) => expert,
+                None => return,
+            };
+            
+            if expert >= self.experts as u64 {
+                return;
+            }
+        }
+
+        // Sprawdź czy jest odpowiedni czas
+        if let Some(last_event_s) = self.last_event_s {
+            if now_s - last_event_s > ANSWER_GAP_SECS {
+                self.answer = AnswerStats::default();
+                self.answer_start = None;
+            }
+        }
+
+        // Obsłuż przełączenie tokena
+        let needs_new_token = match self.current_token {
+            Some(current_token) => current_token != token,
+            None => false,
+        };
+
+        if needs_new_token {
+            self.last = Some(self.current);
+            self.picked.clear();
+            self.current = TokenStats { token, ..Default::default() };
+            self.answer.tokens += 1;
+        } else if self.current_token.is_none() {
+            self.current = TokenStats { token, ..Default::default() };
+            self.answer.tokens += 1;
+        }
+
+        // Ustaw flagę aktualnego tokena
+        self.current_token = Some(token);
+
+        // Pobierz tablice hitów
+        let vram_hit = match v.get("vram_hit").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => &Vec::new(),
+        };
+        
+        let cache_hit = match v.get("cache_hit").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => &Vec::new(),
+        };
+
+        // Pobierz dane o odczytach
+        let read_bytes = v.get("read_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+        let wall_us = v.get("wall_us").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        // Dodaj eksperci do statystyk
+        for (i, expert_val) in selected_experts.iter().enumerate() {
+            let expert = expert_val.as_u64().unwrap_or(0) as u16;
+            
+            // Określ typ eksperta
+            let tier = if i < vram_hit.len() && vram_hit[i].as_bool().unwrap_or(false) {
+                TIER_GPU
+            } else if i < cache_hit.len() && cache_hit[i].as_bool().unwrap_or(false) {
+                TIER_RAM
+            } else {
+                TIER_SSD
+            };
+            
+            // Zapisz w mapie cieplnej
+            let heat_index = (layer as usize) * self.experts + (expert as usize);
+            self.heat[heat_index] = tier;
+            
+            // Dodaj do statystyk tokena i odpowiedzi
+            match tier {
+                TIER_GPU => {
+                    self.current.gpu += 1;
+                    self.answer.gpu += 1;
+                }
+                TIER_RAM => {
+                    self.current.ram += 1;
+                    self.answer.ram += 1;
+                }
+                TIER_SSD => {
+                    self.current.ssd += 1;
+                    self.answer.ssd += 1;
+                }
+                _ => {}
+            }
+            
+            self.current.experts += 1;
+            self.answer.experts += 1;
+            
+            // Dodaj do listy wybranych eksperci
+            self.picked.push((layer as u16, expert));
+        }
+
+        // Dodaj dane o odczytach i czasie
+        self.current.read_bytes += read_bytes;
+        self.answer.read_bytes += read_bytes;
+        self.current.wall_us += wall_us;
+
+        // Zapisz czas ostatniego zdarzenia
+        self.last_event_s = Some(now_s);
+        
+        // Ustaw początek odpowiedzi jeśli jeszcze nie ustawiony
+        if self.answer_start.is_none() {
+            self.answer_start = Some(now_s);
+        }
     }
 
     /// Zeruje mapę cieplną i statystyki ("Clear map").
     pub fn clear(&mut self) {
-        todo!()
+        self.heat.fill(TIER_NONE);
+        self.current = TokenStats::default();
+        self.last = None;
+        self.answer = AnswerStats::default();
+        self.answer_start = None;
+        self.last_event_s = None;
+        self.picked.clear();
+        self.current_token = None;
     }
 
     pub fn snapshot(&self, now_s: f64) -> Snapshot {
-        todo!()
+        let heat_clone = self.heat.clone();
+        let elapsed = match self.answer_start {
+            Some(start) => now_s - start,
+            None => 0.0,
+        };
+        
+        let tokens_per_sec = if elapsed > 0.0 {
+            self.answer.tokens as f64 / elapsed
+        } else {
+            0.0
+        };
+        
+        let running = match self.last_event_s {
+            Some(last) => now_s - last <= RUNNING_WINDOW_SECS,
+            None => false,
+        };
+
+        Snapshot {
+            layers: self.layers,
+            experts: self.experts,
+            heat: heat_clone,
+            picked: self.picked.clone(),
+            current: self.current,
+            last: self.last,
+            answer: self.answer,
+            tokens_per_sec,
+            running,
+        }
     }
 }
 
@@ -97,17 +298,75 @@ pub struct TailReader {
 
 impl TailReader {
     pub fn new(path: PathBuf) -> Self {
-        todo!()
+        TailReader {
+            path,
+            offset: 0,
+            partial: String::new(),
+        }
     }
 
     /// Zmienia ścieżkę (nowy przebieg InferSSD) i czyta od początku.
     pub fn set_path(&mut self, path: PathBuf) {
-        todo!()
+        self.path = path;
+        self.offset = 0;
+        self.partial.clear();
     }
 
     /// Zwraca kompletne linie dopisane od ostatniego wywołania. Brak pliku to pusta lista.
     pub fn read_new_lines(&mut self) -> Vec<String> {
-        todo!()
+        let mut result = Vec::new();
+        
+        // Spróbuj otworzyć plik
+        let file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(_) => return result,
+        };
+        
+        // Pobierz rozmiar pliku
+        let len = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(_) => return result,
+        };
+        
+        // Jeśli plik jest krótszy niż offset, zresetuj offset i częściowy bufor
+        if len < self.offset {
+            self.offset = 0;
+            self.partial.clear();
+        }
+        
+        // Przejdź do odpowiedniego miejsca w pliku
+        let mut file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(_) => return result,
+        };
+        
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return result;
+        }
+        
+        // Odczytaj resztę pliku
+        let mut buffer = Vec::new();
+        match file.read_to_end(&mut buffer) {
+            Ok(_) => {},
+            Err(_) => return result,
+        };
+        
+        self.offset += buffer.len() as u64;
+        
+        // Dodaj dane do częściowego bufora
+        let content = String::from_utf8_lossy(&buffer);
+        self.partial.push_str(&content);
+        
+        // Kompletne linie (zakończone '\n') wracają do wywołującego, reszta czeka w `partial`.
+        while let Some(pos) = self.partial.find('\n') {
+            let mut line: String = self.partial.drain(..=pos).collect();
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            result.push(line);
+        }
+        result
     }
 }
 
