@@ -63,8 +63,16 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, CodecError> {
             out.push(Tok::Num(b[st..i].iter().collect::<String>().parse().map_err(|_| CodecError::BadLen("liczba"))?));
         } else if c.is_ascii_alphabetic() || c == '_' {
             let st = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == '_') {
-                i += 1;
+            loop {
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == '_') {
+                    i += 1;
+                }
+                // Ścieżka przez wskaźnik: `pAllocateInfo->commandBufferCount`.
+                if b.get(i) == Some(&'-') && b.get(i + 1) == Some(&'>') && b.get(i + 2).is_some_and(|c| c.is_ascii_alphabetic() || *c == '_') {
+                    i += 2;
+                } else {
+                    break;
+                }
             }
             out.push(Tok::Id(b[st..i].iter().collect()));
         } else if "+-*/()".contains(c) {
@@ -171,6 +179,7 @@ mod tests {
             "codeSize" => Some(40),
             "samples" => Some(33),
             "rasterizationSamples" => Some(64),
+            "pAllocateInfo->commandBufferCount" => Some(5),
             _ => None,
         }
     }
@@ -192,8 +201,15 @@ mod tests {
     }
 
     #[test]
+    fn pointer_paths_are_passed_to_the_resolver_whole() {
+        assert_eq!(eval_len("pAllocateInfo->commandBufferCount", &vals).unwrap().count, Some(5));
+        assert!(eval_len("pAllocateInfo->nieMa", &vals).is_err());
+        assert!(eval_len("a->", &vals).is_err());
+    }
+
+    #[test]
     fn bad_expressions_are_errors_not_panics() {
-        for e in ["unknownMember", "pAllocateInfo->descriptorSetCount", "a,b", "(codeSize", "codeSize +", "codeSize / 0", "", "4 4"] {
+        for e in ["unknownMember", "a,b", "(codeSize", "codeSize +", "codeSize / 0", "", "4 4"] {
             assert!(eval_len(e, &vals).is_err(), "{e:?}");
         }
         assert!(eval_len("codeSize - 41", &vals).is_err(), "niedomiar");
@@ -217,8 +233,8 @@ mod tests {
                 unsupported.push(e.clone());
             }
         }
-        // Dopuszczalne: tylko formy z parametrów poleceń (`->`) i listy wyrażeń.
-        let bad: Vec<_> = unsupported.iter().filter(|e| !e.contains("->") && !e.contains(',')).collect();
+        // Dopuszczalne: tylko listy wyrażeń rozdzielone przecinkiem (poza `,null-terminated`).
+        let bad: Vec<_> = unsupported.iter().filter(|e| !e.contains(',')).collect();
         assert!(bad.is_empty(), "nieobsługiwane wyrażenia struktur: {bad:?}");
         assert!(seen.len() > 150, "{}", seen.len());
     }

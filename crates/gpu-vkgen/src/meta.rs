@@ -205,8 +205,105 @@ fn classify(t: &Types, layouts: &BTreeMap<String, crate::layout::Layout>, m: &Me
     row
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRow {
+    pub name: String,
+    pub ret: &'static str,
+    pub class: &'static str,
+    pub supported: bool,
+    pub params: Vec<MemberRow>,
+}
+
+fn param_member(n: roxmltree::Node) -> Option<Member> {
+    let mut before = String::new();
+    let mut after_type = String::new();
+    let mut after_name = String::new();
+    let (mut ty, mut name) = (None, None);
+    for c in n.children() {
+        if c.is_text() {
+            let t = c.text().unwrap_or("");
+            if ty.is_none() {
+                before.push_str(t);
+            } else if name.is_none() {
+                after_type.push_str(t);
+            } else {
+                after_name.push_str(t);
+            }
+        } else if c.has_tag_name("type") {
+            ty = c.text().map(str::to_string);
+        } else if c.has_tag_name("name") {
+            name = c.text().map(str::to_string);
+        }
+    }
+    let (ty, name) = (ty?, name?);
+    let mut ptr_depth = after_type.matches('*').count() as u8;
+    // Tablica w parametrze (`float blendConstants[4]`) zanika do wskaźnika.
+    let dims: Vec<String> = after_name.split('[').skip(1).filter_map(|d| d.split(']').next()).map(|d| d.trim().to_string()).collect();
+    let mut len = n.attribute("len").map(|l| l.to_string());
+    if !dims.is_empty() {
+        ptr_depth += 1;
+        if len.is_none() {
+            len = Some(dims.join(" * "));
+        }
+    }
+    Some(Member {
+        name,
+        ty,
+        ptr_depth,
+        is_const: before.contains("const"),
+        array_dims: Vec::new(),
+        bit_width: None,
+        len,
+        optional: n.attribute("optional").is_some_and(|o| o.starts_with("true")),
+        values: None,
+    })
+}
+
+/// Opis poleceń Vulkana: parametry jako członkowie syntetycznej struktury (slot 8 B na parametr).
+pub fn compute_commands(xml: &str) -> Result<Vec<CommandRow>, String> {
+    let types = load_types(xml)?;
+    let layouts = compute_layouts(xml)?;
+    let classes: HashMap<String, crate::Class> = crate::parse_commands(xml)?.into_iter().map(|c| (c.name.clone(), c.class())).collect();
+    let doc = roxmltree::Document::parse_with_options(xml, roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() }).map_err(|e| e.to_string())?;
+    let mut out: BTreeMap<String, CommandRow> = BTreeMap::new();
+    for c in doc.descendants().filter(|n| n.has_tag_name("command") && n.attribute("alias").is_none()) {
+        let vulkan = |n: &roxmltree::Node| n.attribute("api").is_none_or(|a| a.split(',').any(|t| t.trim() == "vulkan"));
+        if !vulkan(&c) {
+            continue;
+        }
+        let Some(proto) = c.children().find(|x| x.has_tag_name("proto")) else { continue };
+        let Some(name) = proto.children().find(|x| x.has_tag_name("name")).and_then(|x| x.text()) else { continue };
+        let ret = match proto.children().find(|x| x.has_tag_name("type")).and_then(|x| x.text()) {
+            Some("void") => "Void",
+            Some("VkResult") => "VkResult",
+            _ => "Other",
+        };
+        let mut params = Vec::new();
+        for (i, p) in c.children().filter(|x| x.has_tag_name("param") && vulkan(x)).enumerate() {
+            let Some(m) = param_member(p) else { continue };
+            params.push(classify(&types, &layouts.ok, &m, (i * 8) as u32));
+        }
+        let supported = params.iter().all(|p| match (p.shape, p.elem) {
+            (_, "External") | (_, "FuncPtr") if p.shape == "Pointer" => false,
+            ("Value", "Scalar") | ("Value", "Handle") => p.count == 1,
+            ("Pointer", "Scalar") | ("Pointer", "Char") | ("Pointer", "Void") | ("Pointer", "Handle") | ("Pointer", "Struct") => p.ptr_depth == 1 || (p.ptr_depth == 2 && p.elem == "Char"),
+            _ => false,
+        }) && ret != "Other";
+        let class = match classes.get(name) {
+            Some(crate::Class::FireAndForget) => "FireAndForget",
+            Some(crate::Class::DeferredResult) => "DeferredResult",
+            Some(crate::Class::OptimisticCreate) => "OptimisticCreate",
+            Some(crate::Class::Query) => "Query",
+            Some(crate::Class::Sync) => "Sync",
+            None => "Query",
+        };
+        out.insert(name.to_string(), CommandRow { name: name.to_string(), ret, class, supported, params });
+    }
+    Ok(out.into_values().collect())
+}
+
 /// Źródło `meta_table.rs`.
-pub fn meta_table_source(rows: &[StructRow]) -> String {
+pub fn meta_table_source(rows: &[StructRow], cmds: &[CommandRow]) -> String {
     let mut members = String::new();
     let mut structs = String::new();
     let mut idx = 0usize;
@@ -223,8 +320,24 @@ pub fn meta_table_source(rows: &[StructRow]) -> String {
         }
         idx += r.members.len();
     }
+    let mut cmd_rows = String::new();
+    let mut cmd_members = String::new();
+    let mut ci = 0usize;
+    for c in cmds {
+        cmd_rows.push_str(&format!(
+            "    CommandMeta {{ name: {:?}, ret: Ret::{}, class: CmdClass::{}, supported: {}, first: {}, count: {} }},\n",
+            c.name, c.ret, c.class, c.supported, ci, c.params.len()
+        ));
+        for m in &c.params {
+            cmd_members.push_str(&format!(
+                "    MemberMeta {{ name: {:?}, offset: {}, shape: Shape::{}, elem: Elem::{}, type_name: {:?}, elem_size: {}, count: {}, ptr_depth: {}, is_const: {}, optional: {}, len: {:?} }},\n",
+                m.name, m.offset, m.shape, m.elem, m.type_name, m.elem_size, m.count, m.ptr_depth, m.is_const, m.optional, m.len
+            ));
+        }
+        ci += c.params.len();
+    }
     format!(
-        "//! GENEROWANY przez `gpu-vkgen --emit-meta`. Nie edytować ręcznie.\n\nuse crate::meta::{{Elem, MemberMeta, Shape, StructMeta}};\n\n/// Posortowana po nazwie.\npub const STRUCTS: &[StructMeta] = &[\n{structs}];\n\npub const MEMBERS: &[MemberMeta] = &[\n{members}];\n"
+        "//! GENEROWANY przez `gpu-vkgen --emit-meta`. Nie edytować ręcznie.\n\nuse crate::meta::{{CmdClass, CommandMeta, Elem, MemberMeta, Ret, Shape, StructMeta}};\n\n/// Posortowana po nazwie.\npub const STRUCTS: &[StructMeta] = &[\n{structs}];\n\npub const MEMBERS: &[MemberMeta] = &[\n{members}];\n\n/// Polecenia posortowane po nazwie; indeks to kod operacji w protokole.\npub const COMMANDS: &[CommandMeta] = &[\n{cmd_rows}];\n\npub const CMD_MEMBERS: &[MemberMeta] = &[\n{cmd_members}];\n"
     )
 }
 
@@ -314,11 +427,60 @@ mod tests {
         assert!(bad.is_empty(), "{} problemów, pierwsze: {:#?}", bad.len(), &bad[..bad.len().min(8)]);
     }
 
+    fn cmds() -> Vec<CommandRow> {
+        let xml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/vk.xml")).unwrap();
+        compute_commands(&xml).unwrap()
+    }
+
+    fn cmd<'a>(c: &'a [CommandRow], n: &str) -> &'a CommandRow {
+        c.iter().find(|x| x.name == n).unwrap_or_else(|| panic!("brak {n}"))
+    }
+
+    #[test]
+    fn create_buffer_params_are_slots_with_out_handle() {
+        let c = cmds();
+        let cb = cmd(&c, "vkCreateBuffer");
+        assert_eq!((cb.ret, cb.class, cb.supported), ("VkResult", "OptimisticCreate", true));
+        let names: Vec<_> = cb.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["device", "pCreateInfo", "pAllocator", "pBuffer"]);
+        assert_eq!(cb.params.iter().map(|p| p.offset).collect::<Vec<_>>(), [0, 8, 16, 24]);
+        assert_eq!((cb.params[0].shape, cb.params[0].elem), ("Value", "Handle"));
+        assert_eq!((cb.params[1].shape, cb.params[1].type_name.as_str(), cb.params[1].is_const), ("Pointer", "VkBufferCreateInfo", true));
+        let out = &cb.params[3];
+        assert_eq!((out.shape, out.elem, out.is_const), ("Pointer", "Handle", false));
+    }
+
+    #[test]
+    fn lengths_through_pointers_and_array_params() {
+        let c = cmds();
+        let a = cmd(&c, "vkAllocateCommandBuffers");
+        assert_eq!(a.params[2].len, "pAllocateInfo->commandBufferCount");
+        let bc = cmd(&c, "vkCmdSetBlendConstants");
+        assert_eq!((bc.params[1].shape, bc.params[1].len.as_str(), bc.params[1].ptr_depth), ("Pointer", "4", 1));
+        let fill = cmd(&c, "vkCmdFillBuffer");
+        assert_eq!((fill.ret, fill.class, fill.supported, fill.params.len()), ("Void", "FireAndForget", true, 5));
+        let sub = cmd(&c, "vkQueueSubmit");
+        assert_eq!((sub.params[2].len.as_str(), sub.supported), ("submitCount", true));
+        let wait = cmd(&c, "vkWaitForFences");
+        assert_eq!((wait.class, wait.params[2].len.as_str()), ("Sync", "fenceCount"));
+    }
+
+    #[test]
+    fn wsi_and_by_value_commands_are_marked_unsupported_and_most_others_supported() {
+        let c = cmds();
+        assert!(!cmd(&c, "vkGetPhysicalDeviceXcbPresentationSupportKHR").supported, "xcb_connection_t* to wskaźnik zewnętrzny (lokalny)");
+        let total = c.len();
+        let sup = c.iter().filter(|x| x.supported).count();
+        eprintln!("poleceń: {total}, obsługiwanych: {sup}");
+        assert!(total > 600 && sup * 100 / total >= 60, "{sup}/{total}");
+        assert!(c.windows(2).all(|w| w[0].name < w[1].name));
+    }
+
     #[test]
     fn source_is_sorted_and_indexes_are_consistent() {
         let rows = real();
         assert!(rows.windows(2).all(|w| w[0].name < w[1].name));
-        let src = meta_table_source(&rows);
+        let src = meta_table_source(&rows, &cmds());
         assert!(src.contains("StructMeta { name: \"VkInstanceCreateInfo\", size: 64, align: 8, is_union: false, first: "));
     }
 }

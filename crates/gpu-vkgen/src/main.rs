@@ -136,13 +136,13 @@ fn main() {
             eprintln!("Nie można odczytać {input}: {e}");
             std::process::exit(1);
         });
-        match meta::compute_meta(&xml) {
-            Ok(rows) => {
-                if let Err(e) = std::fs::write(output, meta::meta_table_source(&rows)) {
+        match meta::compute_meta(&xml).and_then(|r| meta::compute_commands(&xml).map(|c| (r, c))) {
+            Ok((rows, cmds)) => {
+                if let Err(e) = std::fs::write(output, meta::meta_table_source(&rows, &cmds)) {
                     eprintln!("Nie można zapisać {output}: {e}");
                     std::process::exit(1);
                 }
-                println!("zapisano {output}: {} struktur", rows.len());
+                println!("zapisano {output}: {} struktur, {} poleceń", rows.len(), cmds.len());
             }
             Err(e) => {
                 eprintln!("Błąd: {e}");

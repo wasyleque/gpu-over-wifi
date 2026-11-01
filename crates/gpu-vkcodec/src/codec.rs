@@ -48,6 +48,15 @@ fn meta_of(name: &str) -> Result<&'static StructMeta, CodecError> {
 
 /// Wartość członka całkowitego (1, 2, 4 lub 8 B) z pamięci struktury, do wyrażeń długości.
 unsafe fn read_uint(meta: &StructMeta, base: *const u8, name: &str) -> Option<u64> {
+    // `wskaźnik->pole`: pierwszy człon to wskaźnik na strukturę, dalej szukamy w niej.
+    if let Some((head, rest)) = name.split_once("->") {
+        let m = meta.members().iter().find(|m| m.name == head && m.shape == Shape::Pointer && m.ptr_depth == 1 && m.elem == Elem::Struct)?;
+        let p = std::ptr::read_unaligned(base.add(m.offset as usize) as *const *const u8);
+        if p.is_null() {
+            return None;
+        }
+        return read_uint(find_struct(m.type_name)?, p, rest);
+    }
     let m = meta.members().iter().find(|m| m.name == name && m.shape == Shape::Value && m.elem == Elem::Scalar && m.count == 1)?;
     let p = base.add(m.offset as usize);
     Some(match m.elem_size {

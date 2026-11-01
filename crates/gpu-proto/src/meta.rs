@@ -1,7 +1,7 @@
 //! Metadane struktur Vulkana (generowane z `vk.xml` do `meta_table.rs`): opis każdego członka potrzebny
 //! interpreterowi kodeka. Układ pamięci: x86_64 Linux (zgodny z `layout-golden.tsv`).
 
-pub use crate::meta_table::{MEMBERS, STRUCTS};
+pub use crate::meta_table::{CMD_MEMBERS, COMMANDS, MEMBERS, STRUCTS};
 
 /// Kształt członka.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,51 @@ impl StructMeta {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ret {
+    Void,
+    VkResult,
+    Other,
+}
+
+/// Jak polecenie zachowuje się w sieci (klasyfikacja z `gpu-vkgen`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmdClass {
+    FireAndForget,
+    DeferredResult,
+    OptimisticCreate,
+    Query,
+    Sync,
+}
+
+/// Polecenie Vulkana; parametry to członkowie syntetycznej struktury (slot 8 B na parametr).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandMeta {
+    pub name: &'static str,
+    pub ret: Ret,
+    pub class: CmdClass,
+    /// Kodek i serwer potrafią przenieść wszystkie parametry.
+    pub supported: bool,
+    pub first: u32,
+    pub count: u32,
+}
+
+impl CommandMeta {
+    pub fn params(&self) -> &'static [MemberMeta] {
+        &CMD_MEMBERS[self.first as usize..(self.first + self.count) as usize]
+    }
+
+    /// Syntetyczna struktura parametrów (do kodeka): rozmiar to 8 B na parametr.
+    pub fn as_struct(&self) -> StructMeta {
+        StructMeta { name: self.name, size: self.count * 8, align: 8, is_union: false, first: 0, count: 0 }
+    }
+}
+
+/// Wyszukuje polecenie po nazwie; zwraca też kod operacji (indeks).
+pub fn find_command(name: &str) -> Option<(u16, &'static CommandMeta)> {
+    COMMANDS.binary_search_by(|c| c.name.cmp(name)).ok().map(|i| (i as u16, &COMMANDS[i]))
+}
+
 /// Wyszukuje strukturę po nazwie (tablica `STRUCTS` jest posortowana po nazwie).
 pub fn find_struct(name: &str) -> Option<&'static StructMeta> {
     STRUCTS.binary_search_by(|s| s.name.cmp(name)).ok().map(|i| &STRUCTS[i])
@@ -120,5 +165,32 @@ mod tests {
         assert_eq!(s.members().len(), 8);
         assert_eq!(s.members()[1].shape, Shape::PNext);
         assert!(find_struct("VkNieMaTakiej").is_none());
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn commands_are_sorted_with_contiguous_param_ranges() {
+        assert!(COMMANDS.windows(2).all(|w| w[0].name < w[1].name));
+        let mut next = 0u32;
+        for c in COMMANDS {
+            assert_eq!(c.first, next, "{}", c.name);
+            next += c.count;
+        }
+        assert_eq!(next as usize, CMD_MEMBERS.len());
+        assert!(COMMANDS.len() < u16::MAX as usize, "kod operacji mieści się w u16");
+    }
+
+    #[test]
+    fn find_command_gives_a_stable_opcode_and_params() {
+        let (op, c) = find_command("vkQueueSubmit").unwrap();
+        assert_eq!(COMMANDS[op as usize].name, "vkQueueSubmit");
+        assert_eq!((c.class, c.ret, c.supported), (CmdClass::DeferredResult, Ret::VkResult, true));
+        assert_eq!(c.params().len(), 4);
+        assert_eq!(c.as_struct().size, 32);
+        assert!(find_command("vkNieMaTakiego").is_none());
     }
 }
