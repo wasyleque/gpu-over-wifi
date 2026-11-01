@@ -79,6 +79,12 @@ pub fn parse_structs(xml: &str) -> Result<Vec<StructDef>, String> {
         
         let mut members: Vec<Member> = Vec::new();
         for member_node in type_node.children().filter(|n| n.has_tag_name("member")) {
+            // Pola innego API (np. `vulkansc`) nie należą do wariantu `vulkan` z nagłówków C.
+            if let Some(api) = member_node.attribute("api") {
+                if !api.split(',').any(|t| t.trim() == "vulkan") {
+                    continue;
+                }
+            }
             let mut loose_text = String::new();
             
             let mut ty = String::new();
@@ -386,5 +392,17 @@ mod tests {
         assert_eq!(b.members[1].bit_width, Some(8));
         assert_eq!(b.members[2].bit_width, None);
         assert!(b.members[0].array_dims.is_empty());
+    }
+
+    #[test]
+    fn members_of_other_apis_are_skipped() {
+        let xml = r#"<registry><types><type category="struct" name="VkC">
+          <member><type>uint32_t</type> <name>a</name></member>
+          <member api="vulkansc"><type>uint64_t</type> <name>sc_only</name></member>
+          <member api="vulkan,vulkansc"><type>uint32_t</type> <name>both</name></member>
+          <member api="vulkan"><type>uint32_t</type> <name>vk_only</name></member>
+        </type></types></registry>"#;
+        let names: Vec<String> = parse_structs(xml).unwrap()[0].members.iter().map(|m| m.name.clone()).collect();
+        assert_eq!(names, vec!["a", "both", "vk_only"]);
     }
 }

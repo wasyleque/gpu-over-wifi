@@ -23,6 +23,8 @@ for t in reg.findall("./types/type"):
         if name in in_header:
             members = []
             for m in t.findall("member"):
+                if m.get("api") and "vulkan" not in m.get("api").split(","):
+                    continue
                 n = m.find("name").text
                 text = "".join(m.itertext())
                 members.append((n, ":" in text.split(n, 1)[-1][:6]))  # pole bitowe: "name:24"

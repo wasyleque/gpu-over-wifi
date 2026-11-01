@@ -730,7 +730,6 @@ M	VkCommandBufferInheritanceRenderingInfo	pNext	8
 M	VkCommandBufferInheritanceRenderingInfo	flags	16
 M	VkCommandBufferInheritanceRenderingInfo	viewMask	20
 M	VkCommandBufferInheritanceRenderingInfo	colorAttachmentCount	24
-M	VkCommandBufferInheritanceRenderingInfo	colorAttachmentCount	24
 M	VkCommandBufferInheritanceRenderingInfo	pColorAttachmentFormats	32
 M	VkCommandBufferInheritanceRenderingInfo	depthAttachmentFormat	40
 M	VkCommandBufferInheritanceRenderingInfo	stencilAttachmentFormat	44
@@ -2223,7 +2222,6 @@ M	VkGraphicsPipelineCreateInfo	sType	0
 M	VkGraphicsPipelineCreateInfo	pNext	8
 M	VkGraphicsPipelineCreateInfo	flags	16
 M	VkGraphicsPipelineCreateInfo	stageCount	20
-M	VkGraphicsPipelineCreateInfo	pStages	24
 M	VkGraphicsPipelineCreateInfo	pStages	24
 M	VkGraphicsPipelineCreateInfo	pVertexInputState	32
 M	VkGraphicsPipelineCreateInfo	pInputAssemblyState	40
@@ -5924,7 +5922,6 @@ M	VkPipelineCacheCreateInfo	sType	0
 M	VkPipelineCacheCreateInfo	pNext	8
 M	VkPipelineCacheCreateInfo	flags	16
 M	VkPipelineCacheCreateInfo	initialDataSize	24
-M	VkPipelineCacheCreateInfo	initialDataSize	24
 M	VkPipelineCacheCreateInfo	pInitialData	32
 S	VkPipelineCacheHeaderVersionDataGraphQCOM	28	4
 M	VkPipelineCacheHeaderVersionDataGraphQCOM	headerSize	0
@@ -6196,7 +6193,6 @@ M	VkPipelineShaderStageCreateInfo	pNext	8
 M	VkPipelineShaderStageCreateInfo	flags	16
 M	VkPipelineShaderStageCreateInfo	stage	20
 M	VkPipelineShaderStageCreateInfo	module	24
-M	VkPipelineShaderStageCreateInfo	pName	32
 M	VkPipelineShaderStageCreateInfo	pName	32
 M	VkPipelineShaderStageCreateInfo	pSpecializationInfo	40
 S	VkPipelineShaderStageModuleIdentifierCreateInfoEXT	32	8
@@ -7258,7 +7254,6 @@ M	VkSwapchainCreateInfoKHR	preTransform	80
 M	VkSwapchainCreateInfoKHR	compositeAlpha	84
 M	VkSwapchainCreateInfoKHR	presentMode	88
 M	VkSwapchainCreateInfoKHR	clipped	92
-M	VkSwapchainCreateInfoKHR	oldSwapchain	96
 M	VkSwapchainCreateInfoKHR	oldSwapchain	96
 S	VkSwapchainDisplayNativeHdrCreateInfoAMD	24	8
 M	VkSwapchainDisplayNativeHdrCreateInfoAMD	sType	0
