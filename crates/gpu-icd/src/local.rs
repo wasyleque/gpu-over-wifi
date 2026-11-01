@@ -40,19 +40,51 @@ pub fn find_local_manifests() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("GPU_ICD_LOCAL_ICD") {
         return vec![PathBuf::from(p)];
     }
-    let mut dirs = vec![PathBuf::from("/usr/share/vulkan/icd.d"), PathBuf::from("/etc/vulkan/icd.d"), PathBuf::from("/usr/local/share/vulkan/icd.d")];
-    if let Ok(h) = std::env::var("HOME") {
+    let env_entries: Vec<String> = ["VK_DRIVER_FILES", "VK_ICD_FILENAMES"].iter().filter_map(|k| std::env::var(k).ok()).collect();
+    let home = std::env::var("HOME").ok();
+    if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        eprintln!("[gpu-icd] wpisy środowiska: {env_entries:?}; HOME={home:?}; overrides istnieje: {}", Path::new("/usr/lib/pressure-vessel/overrides/share/vulkan/icd.d").is_dir());
+    }
+    collect_manifests(&env_entries, home.as_deref(), &mut |d| std::fs::read_dir(d).map(|rd| rd.flatten().map(|e| e.path()).collect()).ok())
+}
+
+/// Domyślne katalogi z manifestami ICD. W kontenerze Steam Linux Runtime (pressure-vessel) sterowniki hosta leżą w `overrides`.
+const MANIFEST_DIRS: &[&str] = &[
+    "/usr/share/vulkan/icd.d",
+    "/etc/vulkan/icd.d",
+    "/usr/local/share/vulkan/icd.d",
+    "/usr/lib/pressure-vessel/overrides/share/vulkan/icd.d",
+    "/run/host/usr/share/vulkan/icd.d",
+    "/run/host/etc/vulkan/icd.d",
+];
+
+/// Zbiera manifesty lokalnych sterowników z domyślnych katalogów, z `$HOME/.local/share/vulkan/icd.d` i z wpisów zmiennych
+/// `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` (listy rozdzielone `:`; wpis może być plikiem albo katalogiem). Nasze własne manifesty i
+/// programowe renderery są pomijane. `list_dir` zwraca zawartość katalogu albo `None`, gdy go nie ma (wstrzykiwane w testach).
+fn collect_manifests(env_entries: &[String], home: Option<&str>, list_dir: &mut dyn FnMut(&Path) -> Option<Vec<PathBuf>>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = MANIFEST_DIRS.iter().map(PathBuf::from).collect();
+    if let Some(h) = home {
         dirs.push(PathBuf::from(h).join(".local/share/vulkan/icd.d"));
     }
-    let mut out = Vec::new();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for e in env_entries.iter().flat_map(|v| v.split(':')).filter(|e| !e.is_empty()) {
+        let p = PathBuf::from(e);
+        match list_dir(&p) {
+            Some(files) => candidates.extend(files),
+            None => candidates.push(p),
+        }
+    }
     for d in dirs {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_lowercase();
-            let skip = ["lvp", "virtio", "gfxstream", "gpu_icd", "gpu-icd", "lavapipe"].iter().any(|x| name.contains(x));
-            if name.ends_with(".json") && !skip {
-                out.push(e.path());
-            }
+        if let Some(files) = list_dir(&d) {
+            candidates.extend(files);
+        }
+    }
+    let mut out = Vec::new();
+    for path in candidates {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let skip = ["lvp", "virtio", "gfxstream", "gpu_icd", "gpu-icd", "lavapipe"].iter().any(|x| name.contains(x));
+        if name.ends_with(".json") && !skip {
+            out.push(path);
         }
     }
     let rank = |p: &PathBuf| {
@@ -71,6 +103,33 @@ pub fn find_local_manifests() -> Vec<PathBuf> {
     out.sort_by_key(rank);
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn manifests_come_from_default_dirs_and_env_lists_and_skip_ours() {
+        let mut fs = |d: &Path| -> Option<Vec<PathBuf>> {
+            match d.to_str()? {
+                "/usr/lib/pressure-vessel/overrides/share/vulkan/icd.d" => Some(["nvidia_icd.json", "intel_hasvk_icd.json", "intel_icd.json", "virtio_icd.json"].iter().map(|n| d.join(n)).collect()),
+                "/home/u/.config/dir" => Some(vec![d.join("radeon_icd.json"), d.join("readme.txt")]),
+                "/usr/share/vulkan/icd.d" | "/etc/vulkan/icd.d" | "/usr/local/share/vulkan/icd.d" => None,
+                _ => None,
+            }
+        };
+        let env = vec!["/home/u/.local/share/gpu-hub/gpu_icd_release.json:/home/u/.config/dir:/opt/custom_icd.json".to_string()];
+        let m = collect_manifests(&env, Some("/home/u"), &mut fs);
+        let names: Vec<String> = m.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names.first().map(String::as_str), Some("intel_icd.json"), "{names:?}");
+        for skipped in ["gpu_icd_release.json", "virtio_icd.json", "readme.txt"] {
+            assert!(!names.iter().any(|n| n == skipped), "{skipped} w {names:?}");
+        }
+        for wanted in ["intel_hasvk_icd.json", "nvidia_icd.json", "radeon_icd.json", "custom_icd.json"] {
+            assert!(names.iter().any(|n| n == wanted), "{wanted} w {names:?}");
+        }
+    }
 }
 
 pub struct LocalVulkan {
@@ -166,14 +225,21 @@ impl LocalVulkan {
 
     /// Otwiera pierwszy działający sterownik Intela z manifestów i wybiera jego pierwsze urządzenie.
     pub fn open() -> Result<LocalVulkan, String> {
-        let mut last = "nie znaleziono manifestu lokalnego sterownika Vulkana".to_string();
-        for m in find_local_manifests() {
+        let mut errors: Vec<String> = Vec::new();
+        let found = find_local_manifests();
+        if std::env::var("GPU_ICD_DEBUG").is_ok() {
+            eprintln!("[gpu-icd] manifesty lokalnych sterowników: {found:?}");
+        }
+        for m in found {
             match Self::open_manifest(&m) {
                 Ok(l) => return Ok(l),
-                Err(e) => last = format!("{}: {e}", m.display()),
+                Err(e) => errors.push(format!("{}: {e}", m.display())),
             }
         }
-        Err(last)
+        if errors.is_empty() {
+            return Err("nie znaleziono manifestu lokalnego sterownika Vulkana".to_string());
+        }
+        Err(errors.join("; "))
     }
 
     pub fn open_manifest(manifest: &Path) -> Result<LocalVulkan, String> {
