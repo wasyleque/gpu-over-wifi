@@ -393,6 +393,25 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     let fail = |e: i32| -> u64 { e as u32 as u64 };
     let args = slots.as_ptr() as *const u8;
 
+    // Księgowość deskryptorów: układy i pule zapamiętujemy, a alokację zestawów odpowiadamy od razu tylko wtedy, gdy pula na pewno starczy.
+    let mut speculated = false;
+    let mut alloc_ctx: Option<(u64, Vec<u64>)> = None;
+    match cmd.name {
+        "vkResetDescriptorPool" => st.desc.pool_reset(slots[1]),
+        "vkDestroyDescriptorPool" => st.desc.pool_destroyed(slots[1]),
+        "vkDestroyDescriptorSetLayout" => st.desc.layout_destroyed(slots[1]),
+        "vkAllocateDescriptorSets" if slots[1] != 0 => {
+            let info = slots[1] as *const u8;
+            let pnext = std::ptr::read_unaligned(info.add(8) as *const u64) != 0;
+            let pool = std::ptr::read_unaligned(info.add(16) as *const u64);
+            let n = std::ptr::read_unaligned(info.add(24) as *const u32).min(4096) as usize;
+            let lp = std::ptr::read_unaligned(info.add(32) as *const u64) as *const u64;
+            let layouts: Vec<u64> = if lp.is_null() { Vec::new() } else { (0..n).map(|i| std::ptr::read_unaligned(lp.add(i))).collect() };
+            speculated = st.desc.try_allocate(pool, &layouts, pnext);
+            alloc_ctx = Some((pool, layouts));
+        }
+        _ => {}
+    }
     // Aktualizacja deskryptorów szablonem: dane zawierają uchwyty, więc rozwijamy ją do zwykłego vkUpdateDescriptorSets.
     if cmd.name == "vkUpdateDescriptorSetWithTemplate" {
         return update_with_template(st, slots);
@@ -435,6 +454,12 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let refresh = size <= REFRESH_ALWAYS_BELOW || is_cached_type(st, slots, cmd, args);
             st.mem_refresh.insert(mem_id, refresh);
         }
+    }
+    if cmd.name == "vkCreateDescriptorSetLayout" && slots[1] != 0 && slots[3] != 0 {
+        st.desc.layout_created(std::ptr::read_unaligned(slots[3] as *const u64), slots[1] as *const u8);
+    }
+    if cmd.name == "vkCreateDescriptorPool" && slots[1] != 0 && slots[3] != 0 {
+        st.desc.pool_created(std::ptr::read_unaligned(slots[3] as *const u64), slots[1] as *const u8);
     }
     if cmd.name == "vkCreateDescriptorUpdateTemplate" && slots[1] != 0 && slots[3] != 0 {
         // Identyfikator szablonu został już wpisany w pamięć aplikacji; zapamiętujemy jego wpisy.
@@ -479,7 +504,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
 
     st.stats.commands += 1;
     let has_data_out = params.iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1);
-    if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64 && !is_pipeline_probe(cmd.name, slots) && !may_fail_legitimately(cmd.name)) {
+    if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64 && !is_pipeline_probe(cmd.name, slots) && !(may_fail_legitimately(cmd.name) && !speculated)) {
         st.batch.extend(bytes);
         if st.batch.len() > BATCH_FLUSH {
             st.flush();
@@ -509,6 +534,11 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     if cmd.ret == Ret::U64 {
         // Wartość zwracana (np. adres bufora) idzie na końcu odpowiedzi; brak = 0, czyli adres nieprawidłowy.
         return if result >= 0 { dec.get_u64().unwrap_or(0) } else { 0 };
+    }
+    if let Some((pool, layouts)) = &alloc_ctx {
+        if !speculated {
+            st.desc.after_sync(*pool, layouts, result >= 0);
+        }
     }
     if result < 0 {
         // Nieudana alokacja: uchwyty wyjściowe mają być VK_NULL_HANDLE, a rozmiar pamięci nie ma być zapamiętany.
