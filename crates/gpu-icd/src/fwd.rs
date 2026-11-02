@@ -52,14 +52,18 @@ pub struct Stats {
     pub t_scan_ns: u64,
     pub scan_bytes: u64,
     pub t_memsend_ns: u64,
+    /// Odświeżanie odwzorowanej pamięci po oczekiwaniu (czas, liczba zapytań) oraz czas samej odpowiedzi serwera na polecenia synchroniczne.
+    pub t_refresh_ns: u64,
+    pub refreshes: u64,
+    pub t_syncrecv_ns: u64,
 }
 
 impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: odświeżenia pamięci {} ({:.0} ms), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.refreshes, self.t_refresh_ns as f64 / 1e6, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -192,9 +196,16 @@ impl InstState {
     /// Po zakończonym oczekiwaniu (fence/idle) GPU mogło zapisać odwzorowaną pamięć: dociągamy z serwera tylko zmienione strony.
     /// Bez nowego `vkQueueSubmit` od ostatniego odświeżenia nic nie mogło się zmienić, więc nie pytamy.
     fn read_mapped(&mut self) {
+        let t = std::time::Instant::now();
+        self.read_mapped_inner();
+        self.stats.t_refresh_ns += t.elapsed().as_nanos() as u64;
+    }
+
+    fn read_mapped_inner(&mut self) {
         if !std::mem::take(&mut self.gpu_dirty) {
             return;
         }
+        self.stats.refreshes += 1;
         let ids: Vec<u64> = self.mems.iter().filter(|(i, s)| s.mapped && self.mem_refresh.get(i).copied().unwrap_or(true)).map(|(i, _)| *i).collect();
         for id in ids {
             loop {
@@ -516,7 +527,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     st.stats.query_bytes += bytes.len() as u64;
     st.stats.roundtrips += 1;
     let ok = st.client.send(&Request::Query { data: bytes }).is_ok() && st.client.send(&Request::Sync).is_ok();
+    let t_recv = std::time::Instant::now();
     let (q, sy) = if ok { (st.client.recv(), st.client.recv()) } else { (Err(gpu_renderd::client::ClientError::Closed), Err(gpu_renderd::client::ClientError::Closed)) };
+    st.stats.t_syncrecv_ns += t_recv.elapsed().as_nanos() as u64;
     if let Ok(Response::Synced { error }) = sy {
         if error < 0 {
             st.lose();
