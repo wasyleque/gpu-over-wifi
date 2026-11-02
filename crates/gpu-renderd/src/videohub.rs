@@ -7,7 +7,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Mutex;
 
 /// Ile ramek może czekać na wysłanie; dalej nadawca (sesja sterująca) blokuje się.
-pub const QUEUE_DEPTH: usize = 2;
+pub const QUEUE_DEPTH: usize = 1;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 static PENDING: Mutex<Option<HashMap<u64, Receiver<Vec<u8>>>>> = Mutex::new(None);

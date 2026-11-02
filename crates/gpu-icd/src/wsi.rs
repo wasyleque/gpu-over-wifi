@@ -15,8 +15,14 @@ pub const SURFACE_EXTENSIONS: &[(&str, u32)] = &[
     ("VK_EXT_headless_surface", 1),
 ];
 
-/// Liczba obrazów wirtualnego swapchaina (min = max): 3 daje aplikacji płynność bez wzrostu opóźnienia.
-pub const SWAPCHAIN_IMAGES: u32 = 3;
+/// Domyślna liczba obrazów wirtualnego swapchaina (min = max).
+pub const SWAPCHAIN_IMAGES: u32 = 2;
+
+/// Liczba obrazów wirtualnego swapchaina: z `GPU_ICD_SWAPCHAIN_IMAGES` (2..=8) albo domyślna. Mniej obrazów = mniej klatek w locie,
+/// czyli mniejsze opóźnienie między wejściem a obrazem (gra nie wyprzedza wyświetlania o więcej niż jedną klatkę).
+pub fn swapchain_images() -> u32 {
+    std::env::var("GPU_ICD_SWAPCHAIN_IMAGES").ok().and_then(|v| v.parse().ok()).filter(|n| (2..=8).contains(n)).unwrap_or(SWAPCHAIN_IMAGES)
+}
 
 /// Użycia obrazów, które potrafi zdalna karta (obrazy żyją na serwerze): kopiowanie, próbkowanie, zapis, kolor.
 pub const SUPPORTED_USAGE: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x80;
@@ -70,8 +76,9 @@ pub fn patch_capabilities(caps: &mut [u8]) -> bool {
     if caps.len() != 52 {
         return false;
     }
-    caps[0..4].copy_from_slice(&SWAPCHAIN_IMAGES.to_le_bytes()); // minImageCount
-    caps[4..8].copy_from_slice(&SWAPCHAIN_IMAGES.to_le_bytes()); // maxImageCount
+    let n = swapchain_images();
+    caps[0..4].copy_from_slice(&n.to_le_bytes()); // minImageCount
+    caps[4..8].copy_from_slice(&n.to_le_bytes()); // maxImageCount
     caps[48..52].copy_from_slice(&SUPPORTED_USAGE.to_le_bytes()); // supportedUsageFlags
     true
 }
@@ -116,8 +123,8 @@ mod tests {
         let mut c = vec![0xAAu8; 52];
         c[8..12].copy_from_slice(&800u32.to_le_bytes()); // currentExtent.width zostaje
         assert!(patch_capabilities(&mut c));
-        assert_eq!(u32::from_le_bytes(c[0..4].try_into().unwrap()), 3);
-        assert_eq!(u32::from_le_bytes(c[4..8].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(c[0..4].try_into().unwrap()), SWAPCHAIN_IMAGES);
+        assert_eq!(u32::from_le_bytes(c[4..8].try_into().unwrap()), SWAPCHAIN_IMAGES);
         assert_eq!(u32::from_le_bytes(c[8..12].try_into().unwrap()), 800, "rozmiar okna od lokalnego sterownika");
         let usage = u32::from_le_bytes(c[48..52].try_into().unwrap());
         assert_eq!(usage & 0x10, 0x10, "COLOR_ATTACHMENT");
