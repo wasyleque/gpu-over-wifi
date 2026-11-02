@@ -129,13 +129,15 @@ impl DescriptorAccounts {
         true
     }
 
-    /// Po synchronicznej alokacji: serwer powiedział prawdę. Przy sukcesie odejmujemy zasoby (jak przy spekulacji), przy porażce
-    /// pula przestaje być spekulowana aż do resetu.
+    /// Po synchronicznej alokacji: serwer powiedział prawdę. Jeśli się udała i umiemy ją policzyć, odejmujemy zasoby jak przy spekulacji.
+    /// Jeśli się nie udała ALBO się udała, ale nie umiemy jej policzyć (nieznany układ, pNext), serwer zużył albo wyczerpał pulę poza
+    /// naszą księgowością, więc do resetu puli nie spekulujemy na niej już wcale.
     pub fn after_sync(&mut self, pool: u64, layouts: &[u64], ok: bool) {
-        if ok {
-            self.try_allocate(pool, layouts, false);
-        } else if let Some(p) = self.pools.get_mut(&pool) {
-            p.sets_left = 0;
+        let counted = ok && self.try_allocate(pool, layouts, false);
+        if !counted {
+            if let Some(p) = self.pools.get_mut(&pool) {
+                p.sets_left = 0;
+            }
         }
     }
 }
@@ -214,6 +216,16 @@ mod tests {
         let (pi, _ps) = pool_info(0, 10, &[(1, 10)], 0x1234);
         unsafe { b.pool_created(9, pi.as_ptr()) };
         assert!(!b.try_allocate(9, &[10], false), "pula z pNext");
+    }
+
+    #[test]
+    fn an_uncounted_successful_allocation_stops_speculation_on_that_pool_until_reset() {
+        let mut a = setup(0, 100, &[(1, 100), (6, 100)]);
+        // Układ 999 jest nieznany: serwer go zaalokował, ale nie umiemy odjąć zasobów.
+        a.after_sync(7, &[999], true);
+        assert!(!a.try_allocate(7, &[10], false), "liczniki nie są już wiarygodne");
+        a.pool_reset(7);
+        assert!(a.try_allocate(7, &[10], false), "po resecie pula jest znowu w pełni znana");
     }
 
     #[test]
