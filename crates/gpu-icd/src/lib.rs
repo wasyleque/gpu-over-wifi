@@ -21,6 +21,7 @@ use gpu_renderd::handler::decode_extensions;
 mod exts;
 mod fwd;
 mod local;
+mod memtrack;
 mod present;
 mod swapchain;
 mod templates;

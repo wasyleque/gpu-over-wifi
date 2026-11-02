@@ -79,6 +79,30 @@ impl PageTracker {
         (out, false)
     }
 
+    /// Jak `changed`, ale sprawdza tylko strony z `candidates` (zakresy wyrównane do stron, np. z jądrowego śledzenia zapisów):
+    /// strony zapisane, lecz o tej samej zawartości, nie są zgłaszane. Bez limitu rozmiaru.
+    pub fn changed_within(&mut self, data: &[u8], candidates: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        for &(from, to) in candidates {
+            for i in (from / PAGE)..to.div_ceil(PAGE).min(self.known.len()) {
+                let (a, b) = self.page_range(i);
+                if b > data.len() {
+                    break;
+                }
+                let now = page_hash(&data[a..b]);
+                if now == self.known[i] {
+                    continue;
+                }
+                self.known[i] = now;
+                match out.last_mut() {
+                    Some(last) if last.1 == a => last.1 = b,
+                    _ => out.push((a, b)),
+                }
+            }
+        }
+        out
+    }
+
     /// Zapis `data` pod `offset`: zapamiętuje skróty stron w całości objętych zapisem, liczone z `data` (bez czytania pamięci,
     /// która po stronie serwera bywa wolna, bo write-combined). Strony częściowo objęte zapisem zostają bez zmian.
     pub fn mark_data(&mut self, offset: usize, data: &[u8]) {
@@ -205,6 +229,18 @@ mod tests {
         t.mark_data(PAGE, &payload);
         let (r, _) = t.changed(&mem, usize::MAX);
         assert_eq!(r, vec![(PAGE * 3, PAGE * 4)], "pełne strony 1 i 2 są znane, niepełna strona 3 nie");
+    }
+
+    #[test]
+    fn candidates_limit_the_scan_and_unchanged_rewrites_are_not_reported() {
+        let mut data = vec![0u8; PAGE * 8];
+        let mut t = PageTracker::new(data.len());
+        data[PAGE * 2] = 1;
+        data[PAGE * 6] = 1; // zmiana poza kandydatami: ma nie zostać zgłoszona w tym wywołaniu
+        let r = t.changed_within(&data, &[(PAGE * 2, PAGE * 4)]);
+        assert_eq!(r, vec![(PAGE * 2, PAGE * 3)]);
+        assert!(t.changed_within(&data, &[(PAGE * 2, PAGE * 4)]).is_empty(), "ta sama zawartość, nic nowego");
+        assert_eq!(t.changed_within(&data, &[(PAGE * 6, PAGE * 7)]), vec![(PAGE * 6, PAGE * 7)]);
     }
 
     #[test]

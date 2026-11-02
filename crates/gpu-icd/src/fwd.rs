@@ -48,33 +48,51 @@ pub struct Stats {
     pub t_read_ns: u64,
     pub t_local_ns: u64,
     pub frames: u64,
+    /// Skanowanie odwzorowanej pamięci przed `vkQueueSubmit`: czas (ns), przeskanowane bajty, wysłane bajty różnic i czas wysyłki.
+    pub t_scan_ns: u64,
+    pub scan_bytes: u64,
+    pub t_memsend_ns: u64,
 }
 
 impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
 
 /// Lokalna kopia odwzorowanej pamięci (M2a: całe obiekty, M3: tylko zmienione strony).
 pub struct Shadow {
-    data: Vec<u8>,
+    data: crate::memtrack::PageAlignedBuf,
     mapped: bool,
     /// Stan stron znany serwerowi: wysyłamy i odbieramy tylko różnice.
     pages: gpu_proto::pagediff::PageTracker,
+    /// Jądrowe śledzenie zapisów aplikacji (duże pamięci): zamiast skrótów całej pamięci sprawdzamy tylko zapisane strony.
+    tracker: Option<crate::memtrack::Tracker>,
 }
+
+/// Od tego rozmiaru pamięć ma jądrowe śledzenie zapisów (mniejsze są tanie do przeskanowania w całości).
+const TRACK_FROM: usize = 1024 * 1024;
 
 impl Shadow {
     pub fn new(len: usize) -> Shadow {
-        Shadow { data: vec![0u8; len], mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len) }
+        let data = crate::memtrack::PageAlignedBuf::new(len);
+        let tracker = if len >= TRACK_FROM && std::env::var("GPU_ICD_NO_MEMTRACK").is_err() { crate::memtrack::Tracker::new(data.as_ptr(), data.capacity()) } else { None };
+        Shadow { data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker }
     }
 
-    /// Zakresy zmienione przez aplikację od ostatniego wysłania.
+    /// Zakresy zmienione przez aplikację od ostatniego wysłania. Z jądrowym śledzeniem sprawdzamy tylko zapisane strony
+    /// (potwierdzone skrótem, więc strony zapisane bez zmiany treści nie idą do sieci); bez niego skanujemy całość.
     pub fn dirty_ranges(&mut self) -> Vec<(usize, usize)> {
+        if let Some(t) = &self.tracker {
+            match t.take_dirty(0, self.data.capacity()) {
+                Some(cand) => return self.pages.changed_within(&self.data, &cand),
+                None => self.tracker = None, // śledzenie przestało działać: wracamy do pełnego skanowania
+            }
+        }
         self.pages.changed(&self.data, usize::MAX).0
     }
 
@@ -138,13 +156,18 @@ impl InstState {
     fn write_mapped(&mut self) {
         let ids: Vec<u64> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, _)| *i).collect();
         for id in ids {
-            let Some(ranges) = self.mems.get_mut(&id).map(|s| s.dirty_ranges()) else { continue };
+            let t0 = std::time::Instant::now();
+            let Some((ranges, len)) = self.mems.get_mut(&id).map(|s| (s.dirty_ranges(), s.data.len())) else { continue };
+            self.stats.t_scan_ns += t0.elapsed().as_nanos() as u64;
+            self.stats.scan_bytes += len as u64;
             let Some(p) = self.mems.get(&id).map(|s| s.data.as_ptr()) else { continue };
+            let t1 = std::time::Instant::now();
             for (a, b) in ranges {
                 // SAFETY: bufor kopii nie zmienia adresu ani rozmiaru po utworzeniu; zakres leży w jego granicach.
                 let data = unsafe { std::slice::from_raw_parts(p.add(a), b - a) };
                 self.send_mem(id, a as u64, data);
             }
+            self.stats.t_memsend_ns += t1.elapsed().as_nanos() as u64;
         }
     }
 
@@ -643,5 +666,42 @@ mod alloc_tests {
         assert!(may_fail_legitimately("vkAllocateMemory"));
         assert!(!may_fail_legitimately("vkAllocateCommandBuffers"));
         assert!(!may_fail_legitimately("vkCreateBuffer"));
+    }
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::*;
+    use gpu_proto::pagediff::PAGE;
+
+    #[test]
+    fn large_shadow_reports_only_written_pages_and_ignores_rewrites_of_the_same_bytes() {
+        let mut s = Shadow::new(4 * 1024 * 1024 + 100);
+        assert!(s.dirty_ranges().is_empty());
+        s.data[PAGE * 10 + 1] = 7;
+        s.data[PAGE * 11] = 8;
+        s.data[4 * 1024 * 1024 + 50] = 9; // niepełna ostatnia strona
+        assert_eq!(s.dirty_ranges(), vec![(PAGE * 10, PAGE * 12), (4 * 1024 * 1024, 4 * 1024 * 1024 + 100)]);
+        assert!(s.dirty_ranges().is_empty());
+        s.data[PAGE * 10 + 1] = 7; // zapis tej samej wartości: strona zapisana, treść bez zmian
+        assert!(s.dirty_ranges().is_empty());
+        s.data[PAGE * 10 + 1] = 1;
+        assert_eq!(s.dirty_ranges(), vec![(PAGE * 10, PAGE * 11)]);
+    }
+
+    #[test]
+    fn data_copied_from_the_server_into_a_large_shadow_is_not_sent_back() {
+        let mut s = Shadow::new(2 * 1024 * 1024);
+        s.dirty_ranges();
+        s.data[PAGE * 3..PAGE * 4].fill(0x5A);
+        s.mark_synced(PAGE * 3, PAGE * 4);
+        assert!(s.dirty_ranges().is_empty());
+    }
+
+    #[test]
+    fn small_shadow_without_kernel_tracking_still_works() {
+        let mut s = Shadow::new(PAGE * 8);
+        s.data[PAGE * 2] = 1;
+        assert_eq!(s.dirty_ranges(), vec![(PAGE * 2, PAGE * 3)]);
     }
 }
