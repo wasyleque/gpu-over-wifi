@@ -106,12 +106,16 @@ pub struct Flags {
     pub periodic: bool,
     /// Doświadczalnie: nie odświeżaj z serwera pamięci, które nie są HOST_CACHED (`GPU_ICD_NO_REFRESH_UNCACHED=1`).
     pub no_refresh_uncached: bool,
+    /// Szybka ścieżka poleceń `vkCmd*` bez blokady (`GPU_ICD_FASTPATH=1`): doświadczalna, domyślnie wyłączona (jedno uruchomienie Cyberpunka
+    /// wywróciło po niej sterownik NVIDIA na serwerze, przyczyna w badaniu).
+    pub fastpath: bool,
 }
 
 pub fn flags() -> &'static Flags {
     static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
     F.get_or_init(|| Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
+        fastpath: std::env::var_os("GPU_ICD_FASTPATH").is_some(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
         // Cykliczne liczniki co 5 s: `GPU_ICD_STATS=periodic` albo (jak dotąd) razem z `GPU_ICD_DEBUG`.
@@ -533,7 +537,7 @@ pub(crate) fn lock_state(inst: &InstanceObj) -> std::sync::MutexGuard<'_, InstSt
 
 unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
-    if fast_table().get(op as usize).copied().unwrap_or(false) && !flags().trace && fast_record(op, cmd, &ints, &floats) {
+    if flags().fastpath && fast_table().get(op as usize).copied().unwrap_or(false) && !flags().trace && fast_record(op, cmd, &ints, &floats) {
         return 0;
     }
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
