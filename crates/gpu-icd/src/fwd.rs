@@ -51,6 +51,7 @@ pub struct Stats {
     pub refresh_ranged: u64,
     pub refresh_ranged_bytes: u64,
     /// `vkGetDescriptorEXT`: odpowiedzi z cache / z serwera.
+    pub desc_synth: u64,
     pub desc_hits: u64,
     pub desc_misses: u64,
     /// Chybienia cache deskryptorów według `VkDescriptorType` (0..=10; ostatnia pozycja: inne).
@@ -84,8 +85,8 @@ impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; deskryptory (cache/serwer) {}/{}, chybienia wg typu {:?}; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.desc_hits, self.desc_misses, self.desc_miss_by_type, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; deskryptory (lokalnie/cache/serwer) {}/{}/{}, chybienia wg typu {:?}; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.desc_synth, self.desc_hits, self.desc_misses, self.desc_miss_by_type, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -660,6 +661,16 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     if let Some(done) = memreq_cached(st, cmd.name, slots) {
         return done;
     }
+    // Deskryptory buforów (UNIFORM/STORAGE) liczone lokalnie, gdy wzór został sprawdzony na odpowiedziach serwera (patrz `descsynth`).
+    if cmd.name == "vkGetDescriptorEXT" && slots.len() >= 4 && slots[3] != 0 {
+        if let Some((ty, address, range)) = crate::descsynth::input_of(slots[1] as *const u8) {
+            if let Some(d) = st.synth.try_local(ty, slots[2] as usize, address, range) {
+                std::ptr::copy_nonoverlapping(d.as_ptr(), slots[3] as *mut u8, d.len());
+                st.stats.desc_synth += 1;
+                return 0;
+            }
+        }
+    }
     // Aktualizacja deskryptorów szablonem: dane zawierają uchwyty, więc rozwijamy ją do zwykłego vkUpdateDescriptorSets.
     if cmd.name == "vkUpdateDescriptorSetWithTemplate" {
         return update_with_template(st, slots);
@@ -801,16 +812,25 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         return 0;
     }
     // Droga synchroniczna: partia, potem polecenie, potem `Sync` (błąd asynchroniczny); jeden obieg po sieci.
-    st.flush();
     st.stats.query_bytes += bytes.len() as u64;
     st.stats.roundtrips += 1;
     // Po oczekiwaniu trzeba odświeżyć odwzorowane pamięci: żądania wysyłamy zaraz za `Sync`, w tym samym obiegu po sieci.
     let pre_ids: Vec<u64> = if cmd.class == CmdClass::Sync && st.gpu_dirty { st.refresh_ids() } else { Vec::new() };
-    let mut ok = st.client.send(&Request::Query { data: bytes }).is_ok() && st.client.send(&Request::Sync).is_ok();
+    // Wszystko (zaległa partia poleceń, zapytanie, Sync i odświeżenia) idzie jednym zapisem do gniazda, czyli jednym pakietem.
+    let mut reqs: Vec<Request> = Vec::with_capacity(3 + pre_ids.len());
+    if !st.batch.is_empty() {
+        let data = std::mem::take(&mut st.batch);
+        st.stats.cmd_bytes += data.len() as u64;
+        st.stats.cmd_batches += 1;
+        reqs.push(Request::Cmds { data });
+    }
+    reqs.push(Request::Query { data: bytes });
+    reqs.push(Request::Sync);
     for id in &pre_ids {
         let req = st.delta_request(*id);
-        ok = ok && st.client.send(&req).is_ok();
+        reqs.push(req);
     }
+    let ok = st.client.send_many(&reqs).is_ok();
     let t_recv = std::time::Instant::now();
     let (q, sy) = if ok { (st.client.recv(), st.client.recv()) } else { (Err(gpu_renderd::client::ClientError::Closed), Err(gpu_renderd::client::ClientError::Closed)) };
     // Odpowiedzi na odświeżenia przychodzą zawsze, więc czytamy je od razu (także przy późniejszym błędzie), żeby nie rozsynchronizować strumienia.
@@ -851,6 +871,16 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     if result >= 0 {
         memreq_store(st, cmd.name, slots);
+        if cmd.name == "vkGetDescriptorEXT" && slots.len() >= 4 && slots[3] != 0 && slots[2] <= DESC_CACHE_MAX_BYTES {
+            if let Some((ty, address, range)) = crate::descsynth::input_of(slots[1] as *const u8) {
+                let actual = std::slice::from_raw_parts(slots[3] as *const u8, slots[2] as usize);
+                match st.synth.observe(ty, address, range, actual) {
+                    crate::descsynth::Event::Verified => eprintln!("gpu-icd: deskryptory buforów typu {ty} liczone lokalnie (wzór potwierdzony {} odpowiedziami serwera)", crate::descsynth::LEARN_NEEDED),
+                    crate::descsynth::Event::Disabled => eprintln!("gpu-icd: wzór deskryptora typu {ty} NIE zgadza się z serwerem (adres {address:#x}, zakres {range:#x}); liczenie lokalne wyłączone"),
+                    crate::descsynth::Event::None => {}
+                }
+            }
+        }
         if let Some(key) = desc_key {
             if st.desc_cache.len() >= DESC_CACHE_MAX_ENTRIES {
                 st.desc_cache.clear();

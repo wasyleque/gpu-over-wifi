@@ -77,6 +77,19 @@ impl Client {
         Ok(())
     }
 
+    /// Wysyła kilka żądań jednym zapisem do gniazda (jeden pakiet zamiast kilku, a przy karcie USB każdy pakiet to osobna transakcja).
+    /// Kolejność w strumieniu i semantyka jak przy kolejnych `send`.
+    pub fn send_many(&mut self, reqs: &[Request]) -> Result<(), ClientError> {
+        let mut out = Vec::new();
+        for req in reqs {
+            self.seq = self.seq.wrapping_add(1);
+            let frame = Frame::new(0, flags::CRC, self.seq, 0, req.encode()).map_err(ClientError::Frame)?;
+            out.extend_from_slice(&frame.encode());
+        }
+        self.stream.write_all(&out)?;
+        Ok(())
+    }
+
     /// Czeka na jedną odpowiedź; `Response::Error` zamienia na `Err(Remote)`.
     pub fn recv(&mut self) -> Result<Response, ClientError> {
         let mut buf = [0u8; 65536];

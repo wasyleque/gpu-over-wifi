@@ -57,6 +57,16 @@ fn video_loop<W: Write>(rx: std::sync::mpsc::Receiver<Vec<u8>>, writer: &mut W) 
     Ok(())
 }
 
+/// Wypisuje zaległe odpowiedzi jednym zapisem (kolejność bajtów w strumieniu bez zmian).
+fn flush_pending<W: Write>(writer: &mut W, pending: &mut Vec<u8>) -> Result<(), ServeError> {
+    if !pending.is_empty() {
+        writer.write_all(pending)?;
+        writer.flush()?;
+        pending.clear();
+    }
+    Ok(())
+}
+
 /// Obsługuje połączenie aż do czystego EOF (na granicy ramki => `Ok`) albo błędu.
 ///
 /// Zasady:
@@ -67,14 +77,16 @@ fn video_loop<W: Write>(rx: std::sync::mpsc::Receiver<Vec<u8>>, writer: &mut W) 
 /// - błąd ramki (np. zły CRC, zarezerwowane flagi) => `Err(Frame(..))` bez odpowiedzi;
 /// - `session.cleanup()` jest wywoływane ZAWSZE na końcu (także przy błędach), dokładnie raz.
 ///
-/// Czyta porcjami po najwyżej 4096 bajtów; nie może panikować na żadnych danych.
+/// Czyta porcjami po najwyżej 64 KiB; nie może panikować na żadnych danych.
 pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
     session: &mut Session<B>,
     reader: &mut R,
     writer: &mut W,
 ) -> Result<(), ServeError> {
     let mut fr = FrameReader::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = vec![0u8; 64 * 1024];
+    // Odpowiedzi na wszystkie żądania z jednego odczytu idą jednym zapisem (patrz `flush_pending`): mniej pakietów i wywołań systemowych.
+    let mut pending: Vec<u8> = Vec::new();
 
     // Inner function to handle the main loop logic
     let result = (|| -> Result<(), ServeError> {
@@ -102,9 +114,18 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
             }
 
             // Process all complete frames from the buffer
-            while let Some(frame) = fr.next_frame()? {
+            loop {
+                let frame = match fr.next_frame() {
+                    Ok(Some(f)) => f,
+                    Ok(None) => break,
+                    Err(e) => {
+                        flush_pending(writer, &mut pending)?;
+                        return Err(e.into());
+                    }
+                };
                 // Check if frame is on the correct stream or has ZSTD compression (unsupported)
                 if frame.header.stream != STREAM_CONTROL || frame.header.flags & flags::ZSTD != 0 {
+                    flush_pending(writer, &mut pending)?;
                     return Err(ServeError::Unsupported);
                 }
 
@@ -124,6 +145,7 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
                             frame.header.epoch,
                             error_resp.encode(),
                         )?;
+                        flush_pending(writer, &mut pending)?;
                         writer.write_all(&error_frame.encode())?;
                         writer.flush()?;
                         return Err(ServeError::Msg(e));
@@ -133,6 +155,7 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
                 // Handle the request
                 // Połączenie wideo: po uwierzytelnieniu `AttachVideo` zamienia to połączenie w strumień ramek sesji sterującej.
                 if let (Request::AttachVideo { session: sid }, true) = (&req, session.is_authenticated()) {
+                    flush_pending(writer, &mut pending)?;
                     let reply = match crate::videohub::claim(*sid) {
                         Some(rx) => {
                             send_reply(writer, &frame, &Response::U32(0))?;
@@ -153,14 +176,16 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
                     frame.header.epoch,
                     response.encode(),
                 )?;
-                writer.write_all(&response_frame.encode())?;
-                writer.flush()?;
+                pending.extend_from_slice(&response_frame.encode());
 
                 // Check if authentication was successful
                 if !session.is_authenticated() {
+                    flush_pending(writer, &mut pending)?;
                     return Err(ServeError::AuthFailed);
                 }
             }
+            // Przetworzono wszystko, co przyszło w tym odczycie: odpowiedzi idą razem.
+            flush_pending(writer, &mut pending)?;
         }
     })();
 
@@ -295,6 +320,47 @@ mod tests {
         assert_eq!(r[1].1, Response::U32(0x0040_3000));
         assert_eq!((r[1].0.header.seq, r[1].0.header.epoch), (8, 42));
         assert_ne!(r[1].0.header.flags & flags::CRC, 0, "odpowiedzi mają CRC");
+    }
+
+    /// Zapisy do gniazda liczone osobno, żeby sprawdzić, że odpowiedzi na grupę żądań idą razem.
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+    impl Write for CountingWriter {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn responses_to_requests_read_together_are_written_together_in_order() {
+        let (mut s, _) = session();
+        let mut input = req_frame(1, 0, &hello());
+        for seq in 2..=6 {
+            input.extend(req_frame(seq, 0, &Request::EnumInstanceVersion));
+        }
+        let mut out = CountingWriter { bytes: Vec::new(), writes: 0 };
+        assert_eq!(serve_connection(&mut s, &mut Cursor::new(input), &mut out), Ok(()));
+        let r = parse_responses(&out.bytes);
+        assert_eq!(r.len(), 6);
+        assert_eq!(r.iter().map(|(f, _)| f.header.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6], "kolejność zachowana");
+        assert_eq!(out.writes, 1, "sześć odpowiedzi z jednego odczytu to jeden zapis do gniazda");
+    }
+
+    #[test]
+    fn responses_before_a_failure_are_still_delivered() {
+        // Hello z błędnym tokenem: odpowiedź błędu musi dojść mimo zwrotu AuthFailed (opróżnienie zaległych odpowiedzi).
+        let (mut s, _) = session();
+        let bad = Request::Hello { version: PROTOCOL_VERSION, token: b"zly".to_vec() };
+        let mut out = CountingWriter { bytes: Vec::new(), writes: 0 };
+        assert_eq!(serve_connection(&mut s, &mut Cursor::new(req_frame(1, 0, &bad)), &mut out), Err(ServeError::AuthFailed));
+        assert_eq!(parse_responses(&out.bytes).len(), 1);
     }
 
     #[test]
