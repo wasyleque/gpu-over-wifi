@@ -84,6 +84,10 @@ struct InstState {
     desc: descpool::DescriptorAccounts,
     /// Czy pamięć wolno odświeżać z serwera po oczekiwaniu (typ HOST_CACHED albo mała); duże pamięci write-combined czyta się wolno.
     mem_refresh: HashMap<u64, bool>,
+    /// Użycie (VkBufferUsageFlags) zasobów-buforów; `u32::MAX` = nieznane (np. rozszerzenie w pNext), traktowane jako zapisywalne.
+    buf_usage: HashMap<u64, u32>,
+    /// Pamięć -> czy wszystko, co do niej przypisano, to bufory tylko do odczytu przez GPU (wtedy nie ma czego odświeżać). Brak wpisu = nie wiadomo.
+    mem_gpu_readonly: HashMap<u64, bool>,
     /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
     gpu_dirty: bool,
     mems: HashMap<u64, fwd::Shadow>,
@@ -321,6 +325,8 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             seen_pages: Default::default(),
             memreq: Default::default(),
             mem_refresh: HashMap::new(),
+            buf_usage: HashMap::new(),
+            mem_gpu_readonly: HashMap::new(),
             gpu_dirty: false,
             templates: HashMap::new(),
             mems: HashMap::new(),

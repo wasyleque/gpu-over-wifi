@@ -26,6 +26,31 @@ pub fn page_hash(page: &[u8]) -> u64 {
     lanes.iter().fold(0u64, |h, l| (h ^ l).wrapping_mul(K).rotate_left(31))
 }
 
+/// Od tylu stron wzwyż skróty liczy się równolegle (poniżej koszt uruchomienia wątków przewyższa zysk).
+const PARALLEL_MIN_PAGES: usize = 512;
+
+/// Skróty pierwszych `n` stron `data` (strona `i` = bajty `i*PAGE..min((i+1)*PAGE, len)`); duże obszary dzielone na wątki.
+fn page_hashes(data: &[u8], n: usize, len: usize) -> Vec<u64> {
+    let one = |i: usize| page_hash(&data[i * PAGE..((i + 1) * PAGE).min(len)]);
+    let threads = std::thread::available_parallelism().map_or(1, |c| c.get()).min(8).min(n / 256);
+    if n < PARALLEL_MIN_PAGES || threads < 2 {
+        return (0..n).map(one).collect();
+    }
+    let mut out = vec![0u64; n];
+    let per = n.div_ceil(threads);
+    std::thread::scope(|sc| {
+        for (t, chunk) in out.chunks_mut(per).enumerate() {
+            let one = &one;
+            sc.spawn(move || {
+                for (k, slot) in chunk.iter_mut().enumerate() {
+                    *slot = one(t * per + k);
+                }
+            });
+        }
+    });
+    out
+}
+
 /// Skróty stron wspólnie znane obu stronom dla jednego obszaru pamięci o stałym rozmiarze.
 #[derive(Debug, Clone)]
 pub struct PageTracker {
@@ -57,12 +82,11 @@ impl PageTracker {
         let mut out: Vec<(usize, usize)> = Vec::new();
         let mut total = 0usize;
         let n = self.known.len().min(data.len().div_ceil(PAGE));
-        for i in 0..n {
+        // Strona niepełna na końcu `data` kończy pętlę (jak dotąd), więc liczymy tylko strony w całości dostępne.
+        let ready = (0..n).take_while(|&i| self.page_range(i).1 <= data.len()).count();
+        let hashes = page_hashes(data, ready, self.len);
+        for (i, &now) in hashes.iter().enumerate() {
             let (a, b) = self.page_range(i);
-            if b > data.len() {
-                break;
-            }
-            let now = page_hash(&data[a..b]);
             if now == self.known[i] {
                 continue;
             }
@@ -253,4 +277,25 @@ mod tests {
         a[0] = 1;
         assert!(h0 != h1 && h1 != page_hash(&a) && h0 != page_hash(&a));
     }
+    #[test]
+    fn parallel_hashing_of_large_memory_matches_page_by_page_hashing() {
+        // 5 MiB + 123 B (niepełna ostatnia strona), zmiany rozsiane po całym obszarze, w tym w ostatniej stronie.
+        let len = 5 * 1024 * 1024 + 123;
+        let mut data = vec![0u8; len];
+        let mut t = PageTracker::new(len);
+        assert!(t.changed(&data, usize::MAX).0.is_empty());
+        let touched = [0usize, 4095, 4096, 700_000, 2_500_000, 5_000_000, len - 1];
+        for &o in &touched {
+            data[o] = 0xAB;
+        }
+        let (ranges, more) = t.changed(&data, usize::MAX);
+        assert!(!more);
+        let mut pages: Vec<usize> = touched.iter().map(|o| o / PAGE).collect();
+        pages.dedup();
+        let got: Vec<usize> = ranges.iter().flat_map(|&(a, b)| (a / PAGE)..b.div_ceil(PAGE)).collect();
+        assert_eq!(got, pages);
+        // Po zatwierdzeniu nic się już nie zmienia.
+        assert!(t.changed(&data, usize::MAX).0.is_empty());
+    }
+
 }

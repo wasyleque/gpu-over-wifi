@@ -92,6 +92,37 @@ pub fn decode_extensions(bytes: &[u8]) -> Option<Vec<(String, u32)>> {
 }
 
 /// Jedna sesja klienta. Dopóki `Hello` nie przejdzie, wszystkie inne żądania są odrzucane.
+/// Czas spędzony w obsłudze żądań (µs i liczba), według rodzaju; `GPU_RENDERD_STATS=1` wypisuje to co 5 s.
+/// Pozwala odróżnić koszt wykonania poleceń, kopiowania klatki i kodowania od czekania na sieć.
+mod acct {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    pub const NAMES: [&str; 8] = ["cmds", "memwrite", "query", "memreaddelta", "sync", "present_read", "present_encode", "present_send"];
+    struct State {
+        us: [u64; 8],
+        n: [u64; 8],
+        last: Option<Instant>,
+    }
+    static S: Mutex<State> = Mutex::new(State { us: [0; 8], n: [0; 8], last: None });
+    pub fn enabled() -> bool {
+        static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *E.get_or_init(|| std::env::var_os("GPU_RENDERD_STATS").is_some())
+    }
+    pub fn add(kind: usize, d: Duration) {
+        let mut s = S.lock().unwrap_or_else(|e| e.into_inner());
+        s.us[kind] += d.as_micros() as u64;
+        s.n[kind] += 1;
+        let now = Instant::now();
+        if s.last.is_none_or(|t| now.duration_since(t).as_secs() >= 5) {
+            if s.last.is_some() {
+                let line: Vec<String> = (0..8).filter(|&k| s.n[k] > 0).map(|k| format!("{} {}x {}ms", NAMES[k], s.n[k], s.us[k] / 1000)).collect();
+                eprintln!("gpu-renderd czas (od startu): {}", line.join(", "));
+            }
+            s.last = Some(now);
+        }
+    }
+}
+
 pub struct Session<B: GpuBackend> {
     backend: B,
     token: Vec<u8>,
@@ -157,10 +188,15 @@ impl<B: GpuBackend> Session<B> {
         if width == 0 || height == 0 || len as u64 != expected {
             return Err(ERR_UNKNOWN);
         }
+        let t = acct::enabled().then(std::time::Instant::now);
         let data = self.backend.mem_read(memory, 0, len)?;
+        if let Some(t) = t {
+            acct::add(5, t.elapsed());
+        }
         if data.len() != len as usize {
             return Err(ERR_UNKNOWN);
         }
+        let t = acct::enabled().then(std::time::Instant::now);
         let (codec, body) = match codec {
             Codec::H264 => match self.encode_h264(&data, width, height, format == PixelFormat::Rgba8) {
                 Some(b) => (Codec::H264, b),
@@ -170,6 +206,9 @@ impl<B: GpuBackend> Session<B> {
             Codec::Lz4 => (Codec::Lz4, compress_lz4(&data)),
             c => (c, data),
         };
+        if let Some(t) = t {
+            acct::add(6, t.elapsed());
+        }
         let header = VideoHeader { swapchain: 0, image_index: 0, seq, width, height, format, codec, payload_len: body.len() as u32 };
         // Nagłówek sam się waliduje: niepoprawna ramka nie wychodzi z serwera.
         let hb = header.encode();
@@ -178,7 +217,11 @@ impl<B: GpuBackend> Session<B> {
         payload.extend_from_slice(&hb);
         payload.extend_from_slice(&body);
         // Blokuje, gdy odbiorca nie nadąża (backpressure); brak odbiorcy (odłączone wideo) nie jest błędem sesji.
+        let t = acct::enabled().then(std::time::Instant::now);
         let _ = self.video_tx.send(payload);
+        if let Some(t) = t {
+            acct::add(7, t.elapsed());
+        }
         Ok(())
     }
 
@@ -193,6 +236,16 @@ impl<B: GpuBackend> Session<B> {
             self.encoder = Some(H264Encoder::new(&nv, cfg).map_err(|e| eprintln!("gpu-renderd: koder H.264: {e}")).ok()?);
         }
         self.encoder.as_mut()?.encode(data, false).map_err(|e| eprintln!("gpu-renderd: kodowanie H.264: {e}")).ok()
+    }
+
+    /// Wykonuje `f` na backendzie i (przy `GPU_RENDERD_STATS`) zalicza czas do rodzaju `kind` (patrz `acct`).
+    fn timed<T>(&mut self, kind: usize, f: impl FnOnce(&mut B) -> T) -> T {
+        let t = acct::enabled().then(std::time::Instant::now);
+        let r = f(&mut self.backend);
+        if let Some(t) = t {
+            acct::add(kind, t.elapsed());
+        }
+        r
     }
 
     /// Identyfikator sesji (do podłączenia połączenia wideo).
@@ -267,14 +320,22 @@ impl<B: GpuBackend> Session<B> {
                     self.note_async(r)
                 }
                 Request::Cmds { data } => {
+                    let t = acct::enabled().then(std::time::Instant::now);
                     let r = self.backend.execute(&data);
+                    if let Some(t) = t {
+                        acct::add(0, t.elapsed());
+                    }
                     self.note_async(r)
                 }
                 Request::MemWrite { memory, offset, data } => {
+                    let t = acct::enabled().then(std::time::Instant::now);
                     let r = self.backend.mem_write(memory, offset, &data);
+                    if let Some(t) = t {
+                        acct::add(1, t.elapsed());
+                    }
                     self.note_async(r)
                 }
-                Request::Query { data } => match self.backend.query(&data) {
+                Request::Query { data } => match self.timed(2, |b| b.query(&data)) {
                     Ok(v) => Response::Data(v),
                     Err(code) => Response::Error { code, message: "query error".to_string() },
                 },
@@ -282,12 +343,16 @@ impl<B: GpuBackend> Session<B> {
                     Ok(v) => Response::Data(v),
                     Err(code) => Response::Error { code, message: "memory read error".to_string() },
                 },
-                Request::MemReadDelta { memory } => match self.backend.mem_read_delta(memory, gpu_proto::msg::MAX_BATCH - 64) {
+                Request::MemReadDelta { memory } => match self.timed(3, |b| b.mem_read_delta(memory, gpu_proto::msg::MAX_BATCH - 64)) {
                     Ok(v) => Response::Data(v),
                     Err(code) => Response::Error { code, message: "memory delta read error".to_string() },
                 },
                 Request::Sync => {
+                    let t = acct::enabled().then(std::time::Instant::now);
                     let r = self.backend.sync();
+                    if let Some(t) = t {
+                        acct::add(4, t.elapsed());
+                    }
                     self.note_async(r);
                     Response::Synced { error: std::mem::take(&mut self.async_error) }
                 }
