@@ -681,7 +681,14 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         st.gpu_dirty = true;
     }
     let mut e = Encoder::new();
-    if encode_command(op, args, &mut e, &IcdCtx).is_err() {
+    if let Err(err) = encode_command(op, args, &mut e, &IcdCtx) {
+        // Dotąd cichy błąd: polecenie znikało bez śladu (tak "zniknęły" deskryptory z `vkGetDescriptorEXT`). Raz na nazwę polecenia.
+        static REPORTED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+        let mut seen = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.contains(&cmd.name) {
+            seen.push(cmd.name);
+            eprintln!("gpu-icd: nie umiem zakodować {}: {err:?}", cmd.name);
+        }
         return fail(VK_ERROR_INITIALIZATION_FAILED);
     }
     let bytes = e.finish();

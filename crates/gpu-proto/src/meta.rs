@@ -207,3 +207,30 @@ mod command_tests {
         assert!(find_command("vkNieMaTakiego").is_none());
     }
 }
+
+/// Dlaczego kodek poleceń nie umie przenieść parametrów polecenia (unia ze wskaźnikiem albo pole bitowe, także zagnieżdżone), albo `None`.
+/// Metadane oznaczają takie polecenia jako `supported`, więc to osobna kontrola: `enc_struct` zwraca dla nich błąd.
+pub fn unencodable_reason(cmd: &CommandMeta) -> Option<String> {
+    fn walk(name: &str, seen: &mut Vec<String>) -> Option<String> {
+        if seen.iter().any(|s| s == name) {
+            return None;
+        }
+        seen.push(name.to_string());
+        let meta = find_struct(name)?;
+        if meta.is_union && meta.members().iter().any(|m| m.shape != Shape::Value) {
+            return Some(format!("unia {name} ze wskaźnikiem"));
+        }
+        for m in meta.members() {
+            if m.shape == Shape::Bitfield {
+                return Some(format!("pole bitowe {name}.{}", m.name));
+            }
+            if matches!(m.elem, Elem::Struct | Elem::Union) {
+                if let Some(r) = walk(m.type_name, seen) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+    cmd.params().iter().filter(|p| matches!(p.elem, Elem::Struct | Elem::Union)).find_map(|p| walk(p.type_name, &mut Vec::new()).map(|why| format!("{} -> {why}", p.name)))
+}
