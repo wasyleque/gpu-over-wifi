@@ -5,7 +5,14 @@
 /// Rozszerzenia instancji ogłaszane zawsze. `VK_KHR_get_physical_device_properties2` jest potrzebne, żeby aplikacja (np. gra
 /// ze Steama, gdy lokalny sterownik jest dla niej ukryty) mogła je włączyć i dostać funkcje `vkGetPhysicalDevice*2KHR`,
 /// które ICD obsługuje.
-pub const BASE_INSTANCE_EXTENSIONS: &[(&str, u32)] = &[("VK_KHR_get_physical_device_properties2", 2)];
+pub const BASE_INSTANCE_EXTENSIONS: &[(&str, u32)] = &[
+    ("VK_KHR_get_physical_device_properties2", 2),
+    // Tylko zapytania o możliwości zewnętrznych uchwytów (DXVK i vkd3d-proton wymagają ich przy tworzeniu instancji); ICD odpowiada
+    // lokalnie, że żadnych typów uchwytów nie obsługuje (patrz `external_properties_none` w lib.rs).
+    ("VK_KHR_external_memory_capabilities", 1),
+    ("VK_KHR_external_semaphore_capabilities", 1),
+    ("VK_KHR_external_fence_capabilities", 1),
+];
 
 pub const SURFACE_EXTENSIONS: &[(&str, u32)] = &[
     ("VK_KHR_surface", 25),
@@ -142,9 +149,12 @@ mod instance_ext_tests {
     #[test]
     fn base_extension_is_always_there_and_surfaces_need_the_local_driver() {
         let none = advertised_instance_extensions(&[]);
-        assert_eq!(none, vec![("VK_KHR_get_physical_device_properties2", 2)]);
+        assert_eq!(none, BASE_INSTANCE_EXTENSIONS.to_vec(), "bez lokalnego sterownika zostaje sama lista podstawowa");
+        assert_eq!(none[0], ("VK_KHR_get_physical_device_properties2", 2));
         let local = vec!["VK_KHR_surface".to_string(), "VK_KHR_xcb_surface".to_string()];
         let names: Vec<&str> = advertised_instance_extensions(&local).iter().map(|e| e.0).collect();
-        assert_eq!(names, vec!["VK_KHR_get_physical_device_properties2", "VK_KHR_surface", "VK_KHR_xcb_surface"]);
+        let base: Vec<&str> = BASE_INSTANCE_EXTENSIONS.iter().map(|e| e.0).collect();
+        assert_eq!(names[..base.len()], base[..]);
+        assert_eq!(names[base.len()..], ["VK_KHR_surface", "VK_KHR_xcb_surface"]);
     }
 }

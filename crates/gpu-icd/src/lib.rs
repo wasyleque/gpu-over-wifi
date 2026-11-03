@@ -695,6 +695,18 @@ macro_rules! table {
 }
 
 /// Adres funkcji o danej nazwie: ręczne (lokalne) albo generyczny punkt wejścia przekazujący do serwera.
+/// `vkGetPhysicalDeviceExternal{Buffer,Semaphore,Fence}Properties[KHR]`: zewnętrzne uchwyty (fd, win32) nie istnieją po stronie klienta,
+/// więc odpowiadamy lokalnie, że nie są obsługiwane (serwer zgłosiłby typy swojego systemu, których klient nie umie użyć).
+/// Wszystkie trzy wyniki mają te same trzy pola `u32` zaraz po `sType`/`pNext` (od offsetu 16): funkcje/cechy, typy do eksportu, typy zgodne.
+///
+/// # Safety
+/// `out` musi wskazywać na poprawną strukturę wynikową jednego z trzech rodzajów (min. 28 bajtów) albo być null.
+unsafe extern "C" fn external_properties_none(_pd: *mut c_void, _info: *const u8, out: *mut u8) {
+    if !out.is_null() {
+        std::ptr::write_bytes(out.add(16), 0, 12);
+    }
+}
+
 pub fn proc_addr_by_name(name: &str) -> *const c_void {
     let p = proc_addr_lookup(name);
     if p.is_null() {
@@ -749,6 +761,12 @@ fn local_proc_addr(name: &str) -> *const c_void {
         "vkGetPhysicalDeviceQueueFamilyProperties2KHR" => get_queue_family_properties2 as unsafe extern "C" fn(*mut c_void, *mut u32, *mut u8),
         "vkEnumerateDeviceExtensionProperties" => enumerate_device_extension_properties as unsafe extern "C" fn(*mut c_void, *const c_char, *mut u32, *mut u8) -> VkResult,
         "vkEnumerateDeviceLayerProperties" => enumerate_device_layer_properties as unsafe extern "C" fn(*mut c_void, *mut u32, *mut c_void) -> VkResult,
+        "vkGetPhysicalDeviceExternalBufferProperties" => external_properties_none as unsafe extern "C" fn(*mut c_void, *const u8, *mut u8),
+        "vkGetPhysicalDeviceExternalBufferPropertiesKHR" => external_properties_none as unsafe extern "C" fn(*mut c_void, *const u8, *mut u8),
+        "vkGetPhysicalDeviceExternalSemaphoreProperties" => external_properties_none as unsafe extern "C" fn(*mut c_void, *const u8, *mut u8),
+        "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR" => external_properties_none as unsafe extern "C" fn(*mut c_void, *const u8, *mut u8),
+        "vkGetPhysicalDeviceExternalFenceProperties" => external_properties_none as unsafe extern "C" fn(*mut c_void, *const u8, *mut u8),
+        "vkGetPhysicalDeviceExternalFencePropertiesKHR" => external_properties_none as unsafe extern "C" fn(*mut c_void, *const u8, *mut u8),
         "vkGetPhysicalDeviceImageFormatProperties" => get_image_format_properties as unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, *mut u8) -> VkResult,
         "vkGetPhysicalDeviceSparseImageFormatProperties" => get_sparse_image_format_properties as unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32, u32, *mut u32, *mut u8),
         "vkGetDeviceProcAddr" => get_device_proc_addr as unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_void,
@@ -891,4 +909,26 @@ mod tests {
         with_ext[6] = 1; // enabledExtensionCount @48
         assert_eq!(unsafe { create_instance(with_ext.as_ptr() as *const u8, std::ptr::null(), &mut out) }, VK_ERROR_EXTENSION_NOT_PRESENT);
     }
+    #[test]
+    fn external_handle_queries_report_no_support_and_keep_the_header() {
+        // sType, pNext i pole `externalMemoryFeatures`/typy: bajty od 16 wyzerowane, nagłówek nietknięty.
+        let mut out = [0xAAu8; 40];
+        unsafe { external_properties_none(std::ptr::null_mut(), std::ptr::null(), out.as_mut_ptr()) };
+        assert!(out[..16].iter().all(|b| *b == 0xAA));
+        assert!(out[16..28].iter().all(|b| *b == 0));
+        assert!(out[28..].iter().all(|b| *b == 0xAA));
+        unsafe { external_properties_none(std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut()) };
+        for name in ["vkGetPhysicalDeviceExternalBufferProperties", "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR", "vkGetPhysicalDeviceExternalFenceProperties"] {
+            assert!(!local_proc_addr(name).is_null(), "{name}");
+        }
+    }
+
+    #[test]
+    fn instance_extensions_include_the_external_capability_queries_dxvk_requires() {
+        let names: Vec<&str> = wsi::advertised_instance_extensions(&[]).iter().map(|(n, _)| *n).collect();
+        for n in ["VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities", "VK_KHR_external_fence_capabilities"] {
+            assert!(names.contains(&n), "{n}");
+        }
+    }
+
 }
