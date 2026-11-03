@@ -376,8 +376,8 @@ impl GpuBackend for VulkanBackend {
         self.replay.mem_read_delta(memory, max_bytes)
     }
 
-    fn mem_read_delta_ranges(&mut self, memory: u64, ranges: &[(u64, u64)], max_bytes: usize) -> Result<Vec<u8>, i32> {
-        self.replay.mem_read_delta_ranges(memory, ranges, max_bytes)
+    fn mem_read_delta_ranges(&mut self, memory: u64, ranges: &[(u64, u64)], max_bytes: usize, cached: bool) -> Result<Vec<u8>, i32> {
+        self.replay.mem_read_delta_ranges(memory, ranges, max_bytes, cached)
     }
 
     fn device_extensions(&mut self, pdev: u64) -> Result<Vec<(String, u32)>, i32> {

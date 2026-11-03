@@ -49,7 +49,7 @@ pub trait GpuBackend {
         Err(ERR_UNKNOWN)
     }
     /// Jak `mem_read_delta`, ale porównuje tylko podane zakresy bajtów (patrz `Request::MemReadDeltaRanges`).
-    fn mem_read_delta_ranges(&mut self, _memory: u64, _ranges: &[(u64, u64)], _max_bytes: usize) -> Result<Vec<u8>, i32> {
+    fn mem_read_delta_ranges(&mut self, _memory: u64, _ranges: &[(u64, u64)], _max_bytes: usize, _cached: bool) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
     }
     /// Czeka, aż wszystko wysłane wcześniej zostanie wykonane po stronie backendu.
@@ -363,7 +363,7 @@ impl<B: GpuBackend> Session<B> {
                     Ok(v) => Response::Data(v),
                     Err(code) => Response::Error { code, message: "memory delta read error".to_string() },
                 },
-                Request::MemReadDeltaRanges { memory, ranges } => match self.timed(3, |b| b.mem_read_delta_ranges(memory, &ranges, gpu_proto::msg::MAX_BATCH - 64)) {
+                Request::MemReadDeltaRanges { memory, ranges, cached } => match self.timed(3, |b| b.mem_read_delta_ranges(memory, &ranges, gpu_proto::msg::MAX_BATCH - 64, cached)) {
                     Ok(v) => Response::Data(v),
                     Err(code) => Response::Error { code, message: "memory delta read error".to_string() },
                 },

@@ -85,7 +85,8 @@ pub enum Request {
     MemReadDelta { memory: u64 },
     /// Jak `MemReadDelta`, ale serwer porównuje tylko wskazane zakresy bajtów (`(offset, długość)`, najwyżej `MAX_DELTA_RANGES`):
     /// tam, gdzie GPU może pisać; reszta pamięci jest pomijana, więc koszt nie zależy od jej rozmiaru.
-    MemReadDeltaRanges { memory: u64, ranges: Vec<(u64, u64)> },
+    /// `cached`: pamięć jest HOST_CACHED (szybki odczyt), więc serwer porównuje ją w miejscu bez kopii pośredniej.
+    MemReadDeltaRanges { memory: u64, ranges: Vec<(u64, u64)>, cached: bool },
     /// Identyfikator tej sesji (do podłączenia drugiego połączenia z wideo).
     SessionId,
     /// Drugie połączenie (po `Hello`): odtąd serwer wypycha na nie ramki obrazu sesji `session`.
@@ -199,9 +200,10 @@ impl Request {
                 e.put_u32(*raw_len);
                 e.put_bytes(data);
             }
-            Request::MemReadDeltaRanges { memory, ranges } => {
+            Request::MemReadDeltaRanges { memory, ranges, cached } => {
                 e.put_u8(18);
                 e.put_u64(*memory);
+                e.put_u8(u8::from(*cached));
                 e.put_u32(ranges.len() as u32);
                 for (off, len) in ranges {
                     e.put_u64(*off);
@@ -317,6 +319,7 @@ impl Request {
             16 => Request::MemReadDelta { memory: d.get_u64()? },
             18 => {
                 let memory = d.get_u64()?;
+                let cached = d.get_u8()? != 0;
                 let n = d.get_u32()? as usize;
                 if n > MAX_DELTA_RANGES {
                     return Err(MsgError::LimitExceeded("delta ranges"));
@@ -325,7 +328,7 @@ impl Request {
                 for _ in 0..n {
                     ranges.push((d.get_u64()?, d.get_u64()?));
                 }
-                Request::MemReadDeltaRanges { memory, ranges }
+                Request::MemReadDeltaRanges { memory, ranges, cached }
             }
             17 => {
                 let memory = d.get_u64()?;
@@ -467,8 +470,8 @@ mod tests {
             Request::MemWrite { memory: 5, offset: 4096, data: vec![0xAA; 100] },
             Request::MemRead { memory: 5, offset: 0, len: 4096 },
             Request::MemReadDelta { memory: 9 },
-            Request::MemReadDeltaRanges { memory: 9, ranges: vec![(0, 4096), (1 << 40, 17)] },
-            Request::MemReadDeltaRanges { memory: 9, ranges: vec![] },
+            Request::MemReadDeltaRanges { memory: 9, ranges: vec![(0, 4096), (1 << 40, 17)], cached: true },
+            Request::MemReadDeltaRanges { memory: 9, ranges: vec![], cached: false },
             Request::MemWriteLz4 { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },

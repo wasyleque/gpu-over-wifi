@@ -89,6 +89,8 @@ struct InstState {
     desc: descpool::DescriptorAccounts,
     /// Czy pamięć wolno odświeżać z serwera po oczekiwaniu (typ HOST_CACHED albo mała); duże pamięci write-combined czyta się wolno.
     mem_refresh: HashMap<u64, bool>,
+    /// Pamięć o pewnie znanym typie HOST_CACHED (nieznany typ = `false`): serwer porównuje ją w miejscu, bez kopii pośredniej.
+    mem_cached: HashMap<u64, bool>,
     /// Które zakresy odwzorowanej pamięci GPU może zapisać (decyduje, co odświeżać po oczekiwaniu).
     gpuw: gpuwrite::GpuWrites,
     /// Wyniki `vkGetDescriptorEXT` według zakodowanego żądania (urządzenie, typ, uchwyty/adresy): deskryptor jest funkcją tych danych,
@@ -335,6 +337,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             seen_pages: Default::default(),
             memreq: Default::default(),
             mem_refresh: HashMap::new(),
+            mem_cached: HashMap::new(),
             gpuw: Default::default(),
             desc_cache: HashMap::new(),
             synth: Default::default(),

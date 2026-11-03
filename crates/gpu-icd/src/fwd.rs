@@ -345,7 +345,7 @@ impl InstState {
             crate::gpuwrite::Plan::Ranges(ranges) => {
                 self.stats.refresh_ranged += 1;
                 self.stats.refresh_ranged_bytes += ranges.iter().map(|r| r.1).sum::<u64>();
-                Request::MemReadDeltaRanges { memory: id, ranges }
+                Request::MemReadDeltaRanges { memory: id, ranges, cached: self.mem_cached.get(&id).copied().unwrap_or(false) }
             }
             _ => {
                 self.stats.refresh_whole += 1;
@@ -556,14 +556,14 @@ const REFRESH_ALWAYS_BELOW: u64 = 16 * 1024 * 1024;
 
 /// Czy typ pamięci ma HOST_CACHED (0x8): z takiej pamięci aplikacje czytają wyniki GPU i ona jest szybka do odczytu.
 /// Duże pamięci bez tej flagi to sterty wysyłkowe (write-combined), z których CPU praktycznie nie czyta (natywnie też jest to wolne).
-unsafe fn is_cached_type(st: &mut InstState, slots: &[u64], cmd: &gpu_proto::meta::CommandMeta, args: *const u8) -> bool {
-    let Some(idx) = gpu_vkcodec::codec::arg_uint(cmd, args, "pAllocateInfo->memoryTypeIndex") else { return true };
+/// Czy typ pamięci przydzielanej przez `vkAllocateMemory` ma HOST_CACHED; `None`, gdy typu nie da się ustalić.
+unsafe fn memory_is_cached(st: &mut InstState, slots: &[u64], cmd: &gpu_proto::meta::CommandMeta, args: *const u8) -> Option<bool> {
+    let idx = gpu_vkcodec::codec::arg_uint(cmd, args, "pAllocateInfo->memoryTypeIndex")?;
     let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
-    let Some(pdev) = st.device_pdev.get(&dev).copied() else { return true };
-    let Some(props) = st.query_props(pdev) else { return true };
+    let pdev = st.device_pdev.get(&dev).copied()?;
+    let props = st.query_props(pdev)?;
     let at = 20 + idx as usize * 8;
-    // Nieznany typ: bezpieczniej odświeżać (poprawność przed szybkością).
-    props.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8 != 0).unwrap_or(true)
+    props.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8 != 0)
 }
 
 const STYPE_MEMORY_DEDICATED_REQUIREMENTS: u32 = 1_000_127_000;
@@ -755,7 +755,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let mem_id = std::ptr::read_unaligned(slots[3] as *const u64);
             let _ = id;
             st.mem_sizes.insert(mem_id, size);
-            let cached = is_cached_type(st, slots, cmd, args);
+            let known = memory_is_cached(st, slots, cmd, args);
+            let cached = known.unwrap_or(true);
+            st.mem_cached.insert(mem_id, known.unwrap_or(false));
             let refresh = if flags().no_refresh_uncached { cached } else { size <= REFRESH_ALWAYS_BELOW || cached };
             st.mem_refresh.insert(mem_id, refresh);
         }
@@ -822,6 +824,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         st.mems.remove(&slots[1]);
         st.mem_sizes.remove(&slots[1]);
         st.mem_refresh.remove(&slots[1]);
+        st.mem_cached.remove(&slots[1]);
         st.gpuw.memory_freed(slots[1]);
     }
 
@@ -928,6 +931,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let id = std::ptr::read_unaligned(slots[3] as *const u64);
             st.mem_sizes.remove(&id);
             st.mem_refresh.remove(&id);
+            st.mem_cached.remove(&id);
             std::ptr::write_unaligned(slots[3] as *mut u64, 0);
         }
     }

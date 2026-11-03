@@ -395,13 +395,15 @@ impl Replayer {
     }
 
     /// Jak `mem_read_delta`, ale tylko dla stron w `ranges`: pamięć poza nimi nie jest czytana ani haszowana.
-    pub fn mem_read_delta_ranges(&mut self, memory: u64, ranges: &[(u64, u64)], max_bytes: usize) -> Result<Vec<u8>, i32> {
+    pub fn mem_read_delta_ranges(&mut self, memory: u64, ranges: &[(u64, u64)], max_bytes: usize, cached: bool) -> Result<Vec<u8>, i32> {
         let (ptr, e, device) = self.mapping(memory)?;
         self.range_call("vkInvalidateMappedMemoryRanges", device, e.real)?;
         let size = e.size as usize;
         let spans = gpu_proto::pagediff::page_spans(ranges, size);
+        // Pamięć HOST_CACHED czyta się szybko: kopia pośrednia (potrzebna tylko dla wolnej pamięci write-combined) byłaby stratą.
+        let spans_for_stage: &[(usize, usize)] = if cached { &[] } else { &spans };
         // SAFETY: odwzorowanie ma `e.size` bajtów.
-        let (data, scratch) = unsafe { stage(ptr, size, &spans, std::mem::take(&mut self.scratch)) };
+        let (data, scratch) = unsafe { stage(ptr, size, spans_for_stage, std::mem::take(&mut self.scratch)) };
         let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(size));
         let (changed, more) = tracker.changed_in(data.get(&scratch), ranges, max_bytes);
         let out = gpu_proto::pagediff::encode_segments(data.get(&scratch), &changed, more);
