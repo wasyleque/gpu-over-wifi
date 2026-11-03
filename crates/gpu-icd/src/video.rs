@@ -132,6 +132,7 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
             let _ = with_local(|l| p.present(l, frame_bgra));
         }
         st.present_ns += t1.elapsed().as_nanos() as u64;
+        crate::latency::shown(h.seq);
         st.frames += 1;
         if std::env::var("GPU_ICD_DEBUG").is_ok() && (st.frames <= 3 || st.frames % 120 == 0) {
             // Średnia jasność próbki pikseli: odróżnia czarne klatki od pustego strumienia.

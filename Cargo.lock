@@ -481,6 +481,7 @@ dependencies = [
  "gpu-proto",
  "gpu-vkcodec",
  "gpu-wire",
+ "lz4_flex",
 ]
 
 [[package]]

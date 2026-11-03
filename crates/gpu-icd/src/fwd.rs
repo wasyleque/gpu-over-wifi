@@ -23,6 +23,8 @@ const VK_ERROR_DEVICE_LOST: i32 = -4;
 /// Partia wychodzi, gdy przekroczy ten rozmiar (albo na punkcie synchronizacji).
 const BATCH_FLUSH: usize = 64 * 1024;
 const MEM_CHUNK: usize = 4 * 1024 * 1024;
+/// Najmniejszy zapis, dla którego warto próbować LZ4 (mniejsze idą surowo: narzut przewyższa zysk).
+const LZ4_MIN_WRITE: usize = 4096;
 
 const DISPATCHABLE: &[&str] = &["VkInstance", "VkPhysicalDevice", "VkDevice", "VkQueue", "VkCommandBuffer"];
 
@@ -39,6 +41,8 @@ pub struct Stats {
     pub cmd_bytes: u64,
     pub cmd_batches: u64,
     pub memw_bytes: u64,
+    /// Bajty zapisów pamięci faktycznie wysłane łączem (po kompresji LZ4).
+    pub memw_wire_bytes: u64,
     pub memr_bytes: u64,
     pub query_bytes: u64,
     pub roundtrips: u64,
@@ -68,8 +72,8 @@ impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; odświeżenia pamięci {} ({:.0} ms), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; odświeżenia pamięci {} ({:.0} ms), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -176,7 +180,19 @@ impl InstState {
         }
         self.stats.memw_bytes += data.len() as u64;
         for (i, chunk) in data.chunks(MEM_CHUNK.min(MAX_BATCH)).enumerate() {
-            let req = Request::MemWrite { memory, offset: offset + (i * MEM_CHUNK) as u64, data: chunk.to_vec() };
+            let at = offset + (i * MEM_CHUNK) as u64;
+            // Strony małe albo źle kompresowalne (np. tekstury BCn) idą surowo: LZ4 wysyłamy tylko, gdy oszczędza co najmniej 10%.
+            let packed = (chunk.len() >= LZ4_MIN_WRITE).then(|| gpu_proto::video::compress_lz4(chunk)).filter(|c| c.len() * 10 <= chunk.len() * 9);
+            let req = match packed {
+                Some(c) => {
+                    self.stats.memw_wire_bytes += c.len() as u64;
+                    Request::MemWriteLz4 { memory, offset: at, raw_len: chunk.len() as u32, data: c }
+                }
+                None => {
+                    self.stats.memw_wire_bytes += chunk.len() as u64;
+                    Request::MemWrite { memory, offset: at, data: chunk.to_vec() }
+                }
+            };
             if self.client.send(&req).is_err() {
                 self.lose();
             }
@@ -401,6 +417,9 @@ fn periodic_stats(stats: &Stats) {
     if last.is_none_or(|t| now.duration_since(t).as_secs() >= 5) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
+        if let Some(l) = crate::latency::report_and_reset() {
+            eprintln!("[gpu-icd] {l}");
+        }
         trace_flush();
     }
 }

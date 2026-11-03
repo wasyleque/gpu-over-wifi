@@ -9,3 +9,4 @@ gpu-proto = { path = "../gpu-proto" }
 gpu-wire = { path = "../gpu-wire" }
 gpu-vkcodec = { path = "../gpu-vkcodec" }
 gpu-nvenc = { path = "../gpu-nvenc" }
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }

@@ -75,6 +75,8 @@ pub enum Request {
     Sync,
     /// Zapis do pamięci serwera (bez odpowiedzi).
     MemWrite { memory: u64, offset: u64, data: Vec<u8> },
+    /// Jak `MemWrite`, ale `data` to blok LZ4, który po rozpakowaniu ma dokładnie `raw_len` bajtów (limit `MAX_BATCH`).
+    MemWriteLz4 { memory: u64, offset: u64, raw_len: u32, data: Vec<u8> },
     /// Odczyt pamięci serwera.
     MemRead { memory: u64, offset: u64, len: u32 },
     /// Odczyt różnic: serwer odsyła tylko strony pamięci zmienione od ostatniego zapisu/odczytu (format: `pagediff::encode_segments`).
@@ -185,6 +187,13 @@ impl Request {
                 e.put_u64(*offset);
                 e.put_u32(*len);
             }
+            Request::MemWriteLz4 { memory, offset, raw_len, data } => {
+                e.put_u8(17);
+                e.put_u64(*memory);
+                e.put_u64(*offset);
+                e.put_u32(*raw_len);
+                e.put_bytes(data);
+            }
             Request::MemReadDelta { memory } => {
                 e.put_u8(16);
                 e.put_u64(*memory);
@@ -292,6 +301,16 @@ impl Request {
             }
             13 => Request::SessionId,
             16 => Request::MemReadDelta { memory: d.get_u64()? },
+            17 => {
+                let memory = d.get_u64()?;
+                let offset = d.get_u64()?;
+                let raw_len = d.get_u32()?;
+                let data = d.get_bytes()?;
+                if raw_len as usize > MAX_BATCH || data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("compressed memory write"));
+                }
+                Request::MemWriteLz4 { memory, offset, raw_len, data: data.to_vec() }
+            }
             14 => Request::AttachVideo { session: d.get_u64()? },
             15 => {
                 let memory = d.get_u64()?;
@@ -422,6 +441,7 @@ mod tests {
             Request::MemWrite { memory: 5, offset: 4096, data: vec![0xAA; 100] },
             Request::MemRead { memory: 5, offset: 0, len: 4096 },
             Request::MemReadDelta { memory: 9 },
+            Request::MemWriteLz4 { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },
             Request::PresentFrame { memory: 9, len: 1_870_000, seq: 77, width: 650, height: 718, format: 1, codec: 2 },

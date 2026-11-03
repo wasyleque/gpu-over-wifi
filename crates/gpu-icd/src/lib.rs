@@ -27,6 +27,7 @@ mod memtrack;
 mod present;
 mod swapchain;
 mod templates;
+mod latency;
 mod video;
 mod sbuild;
 mod wsi;

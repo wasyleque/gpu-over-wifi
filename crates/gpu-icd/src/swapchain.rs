@@ -324,6 +324,7 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         let req = gpu_proto::msg::Request::PresentFrame { memory: readback, len: (w * h * 4), seq, width: w as u16, height: h as u16, format, codec };
         st.stats.frames += 1;
         st.stats.t_wait_ns += t0.elapsed().as_nanos() as u64;
+        crate::latency::sent(seq);
         return if st.client.send(&req).is_ok() { 0 } else { VK_ERROR_INITIALIZATION_FAILED };
     }
     if exec_named(st, "vkQueueSubmit", &mut [queue, 1, si.p(), fence]) < 0 {
