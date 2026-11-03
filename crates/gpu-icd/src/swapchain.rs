@@ -324,6 +324,7 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         let req = gpu_proto::msg::Request::PresentFrame { memory: readback, len: (w * h * 4), seq, width: w as u16, height: h as u16, format, codec };
         st.stats.frames += 1;
         st.stats.t_wait_ns += t0.elapsed().as_nanos() as u64;
+        crate::latency::wait_for_room(max_inflight_frames(), std::time::Duration::from_millis(100));
         crate::latency::sent(seq);
         return if st.client.send(&req).is_ok() { 0 } else { VK_ERROR_INITIALIZATION_FAILED };
     }
@@ -374,6 +375,16 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
     };
     st.stats.t_local_ns += t2.elapsed().as_nanos() as u64;
     r
+}
+
+/// Ile klatek wolno mieć oddanych, a jeszcze niewyświetlonych (`GPU_ICD_MAX_INFLIGHT`, domyślnie 3; 0 wyłącza hamowanie).
+/// Więcej oznacza gładszy FPS przy dużym RTT, mniej: mniejsze opóźnienie (kursor, sterowanie).
+fn max_inflight_frames() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    match *N.get_or_init(|| std::env::var("GPU_ICD_MAX_INFLIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(3)) {
+        0 => usize::MAX,
+        n => n,
+    }
 }
 
 #[cfg(test)]

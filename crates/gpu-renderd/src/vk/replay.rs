@@ -77,6 +77,9 @@ pub struct Replayer {
     last_ret: u64,
     /// Nazwa ostatnio wykonanego polecenia (do komunikatów o błędzie dekodowania następnego).
     last_name: &'static str,
+    /// Opis `VkDescriptorPoolCreateInfo` po prawdziwym uchwycie puli i licznik nieudanych alokacji (diagnostyka odmów `OUT_OF_POOL_MEMORY`).
+    pool_desc: HashMap<u64, String>,
+    failed_allocs: u32,
 }
 
 // SAFETY: wskaźniki to uchwyty i adresy odwzorowań sterownika używane wyłącznie przez wątek sesji.
@@ -110,7 +113,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "" }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), failed_allocs: 0 }
     }
 
     pub fn set_instance(&mut self, raw: VkInstance) {
@@ -233,6 +236,23 @@ impl Replayer {
         }
         self.last_ret = rax;
         let result = if cmd.ret == Ret::VkResult { rax as u32 as i32 } else { 0 };
+        if result >= 0 && cmd.name == "vkCreateDescriptorPool" {
+            // SAFETY: parametr 1 to zdekodowana struktura w arenie, parametr 3 wskaźnik na uchwyt, który sterownik właśnie wpisał.
+            unsafe {
+                let info = std::ptr::read_unaligned(args.add(8) as *const u64) as *const u8;
+                let pool = std::ptr::read_unaligned(std::ptr::read_unaligned(args.add(24) as *const u64) as *const u64);
+                self.pool_desc.insert(pool, gpu_proto::debug::describe_descriptor_pool_info(info));
+            }
+        }
+        if result < 0 && cmd.name == "vkAllocateDescriptorSets" && self.failed_allocs < 20 {
+            self.failed_allocs += 1;
+            // SAFETY: parametr 1 to zdekodowane `VkDescriptorSetAllocateInfo` (pula @16 jako prawdziwy uchwyt).
+            unsafe {
+                let info = std::ptr::read_unaligned(args.add(8) as *const u64) as *const u8;
+                let pool = std::ptr::read_unaligned(info.add(16) as *const u64);
+                eprintln!("replay: odmowa alokacji {result}: {} ; pula: {}", gpu_proto::debug::describe_descriptor_set_alloc(info), self.pool_desc.get(&pool).map_or("(nieznana)", |s| s.as_str()));
+            }
+        }
         if result < 0 {
             eprintln!("replay: {} zwróciło {result}", cmd.name);
             return if tolerate { Ok(result) } else { Err(result) };

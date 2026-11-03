@@ -2,7 +2,7 @@
 //! kursor rysowany przez grę. Mierzone na tym samym zegarze po obu końcach (oba w procesie klienta). Diagnostyka, `GPU_ICD_STATS`.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Ile oddanych, a jeszcze nie wyświetlonych klatek pamiętamy (starsze są pomijane jako zgubione).
@@ -17,9 +17,16 @@ struct State {
     max_us: u64,
     n: u64,
     hist: [u64; 6],
+    /// Ile razy `wait_for_room` musiał czekać i ile łącznie to trwało (µs): koszt hamowania gry.
+    waits: u64,
+    waited_us: u64,
+    /// Kolejne przekroczenia czasu oczekiwania: gdy klatki w ogóle nie są wyświetlane (brak wideo), hamowanie się wyłącza.
+    timeouts_in_row: u32,
+    throttle_off: bool,
 }
 
 static S: Mutex<Option<State>> = Mutex::new(None);
+static ROOM: Condvar = Condvar::new();
 
 fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
     let mut g = S.lock().unwrap_or_else(|e| e.into_inner());
@@ -49,9 +56,40 @@ pub fn shown(seq: u32) {
             if q == seq {
                 s.pending.pop_front();
                 s.record(t.elapsed());
+                s.timeouts_in_row = 0;
             }
         }
     });
+    ROOM.notify_all();
+}
+
+/// Ogranicza liczbę klatek oddanych, a jeszcze niewyświetlonych, do `max`: bez tego gra (która nie czeka na wyświetlenie)
+/// produkuje klatki szybciej, niż potok je dostarcza, i opóźnienie rośnie do sekund. Czeka najwyżej `limit` na klatkę;
+/// po 5 kolejnych przekroczeniach (klatki nie są wyświetlane wcale) hamowanie się wyłącza.
+pub fn wait_for_room(max: usize, limit: Duration) {
+    let start = Instant::now();
+    let mut g = S.lock().unwrap_or_else(|e| e.into_inner());
+    let mut waited = false;
+    loop {
+        let st = g.get_or_insert_with(State::default);
+        if st.throttle_off || st.pending.len() < max {
+            break;
+        }
+        let left = limit.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            st.timeouts_in_row += 1;
+            st.throttle_off = st.timeouts_in_row >= 5;
+            break;
+        }
+        waited = true;
+        g = ROOM.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
+    }
+    if waited {
+        if let Some(st) = g.as_mut() {
+            st.waits += 1;
+            st.waited_us += start.elapsed().as_micros() as u64;
+        }
+    }
 }
 
 impl State {
@@ -73,7 +111,7 @@ pub fn report_and_reset() -> Option<String> {
             return None;
         }
         let pct = |c: u64| c * 100 / s.n;
-        let out = format!(
+        let mut out = format!(
             "opóźnienie klatki (oddanie→wyświetlenie): {} klatek, średnio {:.0} ms, maks {:.0} ms; <20 ms {}%, <40 {}%, <70 {}%, <120 {}%, <250 {}%, więcej {}%",
             s.n,
             s.sum_us as f64 / s.n as f64 / 1000.0,
@@ -85,8 +123,9 @@ pub fn report_and_reset() -> Option<String> {
             pct(s.hist[4]),
             pct(s.hist[5])
         );
+        out.push_str(&format!("; hamowanie gry: {} razy, łącznie {:.0} ms", s.waits, s.waited_us as f64 / 1000.0));
         let pending = std::mem::take(&mut s.pending);
-        *s = State { pending, ..State::default() };
+        *s = State { pending, timeouts_in_row: s.timeouts_in_row, throttle_off: s.throttle_off, ..State::default() };
         Some(out)
     })
 }
@@ -95,9 +134,13 @@ pub fn report_and_reset() -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Testy współdzielą stan globalny, więc nie mogą biec równolegle.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     #[test]
     fn measures_delay_skips_lost_frames_and_resets_between_reports() {
-        let _ = report_and_reset();
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        with(|s| *s = State::default());
         sent(10);
         sent(11);
         sent(12);
@@ -109,4 +152,35 @@ mod tests {
         shown(99); // nieznana klatka nic nie zmienia
         assert!(report_and_reset().is_none());
     }
+    #[test]
+    fn throttling_waits_for_a_shown_frame_and_gives_up_when_nothing_is_shown() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        with(|s| *s = State::default());
+        // Jest miejsce: wraca od razu.
+        let t = Instant::now();
+        wait_for_room(2, Duration::from_millis(500));
+        assert!(t.elapsed() < Duration::from_millis(100));
+        sent(1);
+        sent(2);
+        // Brak miejsca: czeka na wyświetlenie klatki 1 w drugim wątku.
+        let h = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(60));
+            shown(1);
+        });
+        let t = Instant::now();
+        wait_for_room(2, Duration::from_millis(2000));
+        let waited = t.elapsed();
+        h.join().unwrap();
+        assert!(waited >= Duration::from_millis(40) && waited < Duration::from_millis(1500), "{waited:?}");
+        // Nic nie jest wyświetlane: po limicie wraca, a po 5 razach wyłącza hamowanie.
+        sent(3);
+        for _ in 0..5 {
+            wait_for_room(2, Duration::from_millis(5));
+        }
+        let t = Instant::now();
+        wait_for_room(2, Duration::from_millis(500));
+        assert!(t.elapsed() < Duration::from_millis(50), "hamowanie powinno być wyłączone");
+        with(|s| *s = State::default());
+    }
+
 }
