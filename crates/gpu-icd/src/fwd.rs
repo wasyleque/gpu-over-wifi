@@ -52,6 +52,13 @@ pub struct Stats {
     pub refresh_ranged_bytes: u64,
     /// `vkGetDescriptorEXT`: odpowiedzi z cache / z serwera.
     pub desc_synth: u64,
+    /// Skanowanie pamięci przy submit: przejścia przez jądrowe śledzenie (liczba, ns) i pełne haszowanie bez śledzenia (liczba, ns, bajty).
+    pub scan_tracked_n: u64,
+    pub scan_tracked_ns: u64,
+    pub scan_hashed_n: u64,
+    pub scan_hashed_ns: u64,
+    pub scan_hashed_bytes: u64,
+    pub mapped_count_max: u64,
     pub desc_hits: u64,
     pub desc_misses: u64,
     /// Chybienia cache deskryptorów według `VkDescriptorType` (0..=10; ostatnia pozycja: inne).
@@ -85,8 +92,8 @@ impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; deskryptory (lokalnie/cache/serwer) {}/{}/{}, chybienia wg typu {:?}; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.desc_synth, self.desc_hits, self.desc_misses, self.desc_miss_by_type, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; skan: śledzone {} razy ({:.0} ms), haszowane {} razy ({:.0} ms, {} MB), pamięci odwzorowanych maks. {}; deskryptory (lokalnie/cache/serwer) {}/{}/{}, chybienia wg typu {:?}; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.scan_tracked_n, self.scan_tracked_ns as f64 / 1e6, self.scan_hashed_n, self.scan_hashed_ns as f64 / 1e6, self.scan_hashed_bytes / 1_000_000, self.mapped_count_max, self.desc_synth, self.desc_hits, self.desc_misses, self.desc_miss_by_type, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -135,13 +142,19 @@ impl Shadow {
     /// Zakresy zmienione przez aplikację od ostatniego wysłania. Z jądrowym śledzeniem sprawdzamy tylko zapisane strony
     /// (potwierdzone skrótem, więc strony zapisane bez zmiany treści nie idą do sieci); bez niego skanujemy całość.
     pub fn dirty_ranges(&mut self) -> Vec<(usize, usize)> {
+        self.dirty_ranges_timed().0
+    }
+
+    /// Jak `dirty_ranges`, ale zwraca też, czy użyto jądrowego śledzenia (`true`) i ile bajtów zahaszowano w pełnym skanie (0 przy śledzeniu).
+    pub fn dirty_ranges_timed(&mut self) -> (Vec<(usize, usize)>, bool, usize) {
         if let Some(t) = &self.tracker {
             match t.take_dirty(0, self.data.capacity()) {
-                Some(cand) => return self.pages.changed_within(&self.data, &cand),
+                Some(cand) => return (self.pages.changed_within(&self.data, &cand), true, 0),
                 None => self.tracker = None, // śledzenie przestało działać: wracamy do pełnego skanowania
             }
         }
-        self.pages.changed(&self.data, usize::MAX).0
+        let n = self.data.len();
+        (self.pages.changed(&self.data, usize::MAX).0, false, n)
     }
 
     pub fn mark_synced(&mut self, from: usize, to: usize) {
@@ -240,10 +253,20 @@ impl InstState {
     /// Przed `vkQueueSubmit`: serwer musi zobaczyć wszystko, co aplikacja wpisała w odwzorowaną pamięć.
     fn write_mapped(&mut self) {
         let ids: Vec<u64> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, _)| *i).collect();
+        self.stats.mapped_count_max = self.stats.mapped_count_max.max(ids.len() as u64);
         for id in ids {
             let t0 = std::time::Instant::now();
-            let Some((ranges, len)) = self.mems.get_mut(&id).map(|s| (s.dirty_ranges(), s.data.len())) else { continue };
-            self.stats.t_scan_ns += t0.elapsed().as_nanos() as u64;
+            let Some(((ranges, tracked, hashed), len)) = self.mems.get_mut(&id).map(|s| (s.dirty_ranges_timed(), s.data.len())) else { continue };
+            let ns = t0.elapsed().as_nanos() as u64;
+            self.stats.t_scan_ns += ns;
+            if tracked {
+                self.stats.scan_tracked_n += 1;
+                self.stats.scan_tracked_ns += ns;
+            } else {
+                self.stats.scan_hashed_n += 1;
+                self.stats.scan_hashed_ns += ns;
+                self.stats.scan_hashed_bytes += hashed as u64;
+            }
             self.stats.scan_bytes += len as u64;
             let Some(p) = self.mems.get(&id).map(|s| s.data.as_ptr()) else { continue };
             let t1 = std::time::Instant::now();

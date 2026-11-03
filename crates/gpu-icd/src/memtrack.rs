@@ -260,4 +260,57 @@ mod tests {
             assert!(t.take_dirty(0, PAGE * 5).is_none());
         }
     }
+    /// Pomiar (ręczny): ile kosztuje jedno `take_dirty` bez zapisów dla jednego dużego obszaru i dla wielu mniejszych.
+    #[test]
+    #[ignore = "mikropomiar; uruchamiać ręcznie z --nocapture"]
+    fn timing_of_take_dirty_by_region_size_and_count() {
+        let populate = |b: &mut PageAlignedBuf| {
+            for p in (0..b.capacity()).step_by(PAGE) {
+                b[p] = 1;
+            }
+        };
+        let measure = |regions: &[(Tracker, usize)]| {
+            let n = 400;
+            let t0 = std::time::Instant::now();
+            for _ in 0..n {
+                for (t, len) in regions {
+                    let _ = t.take_dirty(0, *len);
+                }
+            }
+            t0.elapsed().as_micros() as f64 / n as f64
+        };
+        let mut one = PageAlignedBuf::new(320 << 20);
+        populate(&mut one);
+        let Some(t) = Tracker::new(one.as_ptr(), one.capacity()) else { return };
+        let len = one.capacity();
+        t.take_dirty(0, len);
+        println!("TIMING jeden obszar 320 MB w pełni zapełniony: {:.0} us na przejście", measure(&[(t, len)]));
+        let mut bufs: Vec<PageAlignedBuf> = (0..20).map(|_| PageAlignedBuf::new(16 << 20)).collect();
+        let mut trackers = Vec::new();
+        for b in bufs.iter_mut() {
+            populate(b);
+            let t = Tracker::new(b.as_ptr(), b.capacity()).unwrap();
+            let l = b.capacity();
+            t.take_dirty(0, l);
+            trackers.push((t, l));
+        }
+        println!("TIMING 20 obszarów po 16 MB (razem 320 MB): {:.0} us na przejście", measure(&trackers));
+        let mut empty = PageAlignedBuf::new(320 << 20);
+        let Some(t) = Tracker::new(empty.as_ptr(), empty.capacity()) else { return };
+        let l = empty.capacity();
+        t.take_dirty(0, l);
+        let _ = &mut empty;
+        println!("TIMING jeden obszar 320 MB niezapełniony: {:.0} us na przejście", measure(&[(t, l)]));
+        let mut small: Vec<PageAlignedBuf> = (0..20).map(|_| PageAlignedBuf::new(1 << 20)).collect();
+        let mut st = Vec::new();
+        for b in small.iter_mut() {
+            populate(b);
+            let t = Tracker::new(b.as_ptr(), b.capacity()).unwrap();
+            let l = b.capacity();
+            t.take_dirty(0, l);
+            st.push((t, l));
+        }
+        println!("TIMING 20 obszarów po 1 MB: {:.0} us na przejście", measure(&st));
+    }
+
 }
