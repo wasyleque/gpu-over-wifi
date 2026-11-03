@@ -30,8 +30,11 @@ pub fn page_hash(page: &[u8]) -> u64 {
 const PARALLEL_MIN_PAGES: usize = 512;
 
 /// Skróty pierwszych `n` stron `data` (strona `i` = bajty `i*PAGE..min((i+1)*PAGE, len)`); duże obszary dzielone na wątki.
-fn page_hashes(data: &[u8], n: usize, len: usize) -> Vec<u64> {
-    let one = |i: usize| page_hash(&data[i * PAGE..((i + 1) * PAGE).min(len)]);
+fn page_hashes(data: &[u8], first: usize, n: usize, len: usize) -> Vec<u64> {
+    let one = |k: usize| {
+        let i = first + k;
+        page_hash(&data[i * PAGE..((i + 1) * PAGE).min(len)])
+    };
     let threads = std::thread::available_parallelism().map_or(1, |c| c.get()).min(8).min(n / 256);
     if n < PARALLEL_MIN_PAGES || threads < 2 {
         return (0..n).map(one).collect();
@@ -84,7 +87,7 @@ impl PageTracker {
         let n = self.known.len().min(data.len().div_ceil(PAGE));
         // Strona niepełna na końcu `data` kończy pętlę (jak dotąd), więc liczymy tylko strony w całości dostępne.
         let ready = (0..n).take_while(|&i| self.page_range(i).1 <= data.len()).count();
-        let hashes = page_hashes(data, ready, self.len);
+        let hashes = page_hashes(data, 0, ready, self.len);
         for (i, &now) in hashes.iter().enumerate() {
             let (a, b) = self.page_range(i);
             if now == self.known[i] {
@@ -98,6 +101,56 @@ impl PageTracker {
             match out.last_mut() {
                 Some(last) if last.1 == a => last.1 = b,
                 _ => out.push((a, b)),
+            }
+        }
+        (out, false)
+    }
+
+    /// Jak `changed`, ale porównuje tylko strony objęte zakresami bajtów `candidates` (dowolne, mogą się nakładać; obejmujemy całe strony)
+    /// i zwraca najwyżej `max_bytes` zmian naraz: `(zakresy, true)`, gdy zostały jeszcze zmiany (kolejne wywołanie je dobierze).
+    /// Strony poza zakresami nie są czytane, więc koszt zależy od rozmiaru zakresów, a nie całej pamięci.
+    pub fn changed_in(&mut self, data: &[u8], candidates: &[(u64, u64)], max_bytes: usize) -> (Vec<(usize, usize)>, bool) {
+        let pages = self.known.len().min(data.len() / PAGE + usize::from(data.len() % PAGE != 0));
+        // Zakresy bajtów -> przedziały stron [od, do), posortowane i scalone.
+        let mut spans: Vec<(usize, usize)> = candidates
+            .iter()
+            .filter(|(_, len)| *len > 0)
+            .map(|&(off, len)| {
+                let a = (off / PAGE as u64).min(pages as u64) as usize;
+                let b = (off.saturating_add(len).div_ceil(PAGE as u64)).min(pages as u64) as usize;
+                (a, b)
+            })
+            .filter(|(a, b)| a < b)
+            .collect();
+        spans.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (a, b) in spans {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        let mut total = 0usize;
+        for (first, end) in merged {
+            // Strona niepełna na końcu `data` nie jest porównywana (jak w `changed`).
+            let ready = (first..end).take_while(|&i| self.page_range(i).1 <= data.len()).count();
+            let hashes = page_hashes(data, first, ready, self.len);
+            for (k, &now) in hashes.iter().enumerate() {
+                let i = first + k;
+                if now == self.known[i] {
+                    continue;
+                }
+                let (a, b) = self.page_range(i);
+                if total + (b - a) > max_bytes && total > 0 {
+                    return (out, true);
+                }
+                self.known[i] = now;
+                total += b - a;
+                match out.last_mut() {
+                    Some(last) if last.1 == a => last.1 = b,
+                    _ => out.push((a, b)),
+                }
             }
         }
         (out, false)
@@ -296,6 +349,36 @@ mod tests {
         assert_eq!(got, pages);
         // Po zatwierdzeniu nic się już nie zmienia.
         assert!(t.changed(&data, usize::MAX).0.is_empty());
+    }
+
+    #[test]
+    fn changed_in_reads_only_the_candidate_ranges_and_continues_after_the_limit() {
+        let len = 3 * 1024 * 1024 + 77;
+        let mut data = vec![0u8; len];
+        let mut t = PageTracker::new(len);
+        // Zmiany: dwie w kandydatach, jedna poza nimi (ma pozostać niezauważona).
+        data[10] = 1;
+        data[2 * 1024 * 1024 + 5] = 2;
+        data[1_500_000] = 3;
+        let cands = [(0u64, 4096u64), (2 * 1024 * 1024, 8192), (5, 10), (u64::MAX - 1, 100), (3_000_000, 0)];
+        let (r, more) = t.changed_in(&data, &cands, usize::MAX);
+        assert!(!more);
+        let pages: Vec<usize> = r.iter().flat_map(|&(a, b)| (a / PAGE)..b.div_ceil(PAGE)).collect();
+        assert_eq!(pages, vec![0, 2 * 1024 * 1024 / PAGE]);
+        // Zmiana poza zakresami zostaje do czasu, gdy obejmie ją zakres.
+        let (r, _) = t.changed_in(&data, &[(1_500_000, 1)], usize::MAX);
+        assert_eq!(r.iter().map(|&(a, _)| a / PAGE).collect::<Vec<_>>(), vec![1_500_000 / PAGE]);
+        // Limit: pierwsze wywołanie zwraca część i `more`, drugie dobiera resztę.
+        let mut t2 = PageTracker::new(len);
+        let mut d2 = vec![0u8; len];
+        for p in [0usize, 5, 9] {
+            d2[p * PAGE] = 7;
+        }
+        let (r1, more1) = t2.changed_in(&d2, &[(0, len as u64)], PAGE);
+        assert!(more1 && r1.len() == 1);
+        let (r2, more2) = t2.changed_in(&d2, &[(0, len as u64)], usize::MAX);
+        assert!(!more2);
+        assert_eq!(r2.iter().flat_map(|&(a, b)| (a / PAGE)..b.div_ceil(PAGE)).collect::<Vec<_>>(), vec![5, 9]);
     }
 
 }

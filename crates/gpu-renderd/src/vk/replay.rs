@@ -349,6 +349,17 @@ impl Replayer {
         Ok(gpu_proto::pagediff::encode_segments(whole, &ranges, more))
     }
 
+    /// Jak `mem_read_delta`, ale tylko dla stron w `ranges`: pamięć poza nimi nie jest czytana ani haszowana.
+    pub fn mem_read_delta_ranges(&mut self, memory: u64, ranges: &[(u64, u64)], max_bytes: usize) -> Result<Vec<u8>, i32> {
+        let (ptr, e, device) = self.mapping(memory)?;
+        self.range_call("vkInvalidateMappedMemoryRanges", device, e.real)?;
+        // SAFETY: odwzorowanie ma `e.size` bajtów.
+        let whole = unsafe { std::slice::from_raw_parts(ptr, e.size as usize) };
+        let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize));
+        let (changed, more) = tracker.changed_in(whole, ranges, max_bytes);
+        Ok(gpu_proto::pagediff::encode_segments(whole, &changed, more))
+    }
+
     pub fn mem_read(&mut self, memory: u64, offset: u64, len: u32) -> Result<Vec<u8>, i32> {
         let (ptr, e, device) = self.mapping(memory)?;
         let end = offset.checked_add(len as u64).ok_or(ERR_UNKNOWN)?;

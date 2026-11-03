@@ -19,6 +19,8 @@ pub const MAX_COUNT: u32 = 1024;
 /// Maksymalny rozmiar danych w odpowiedzi (bajty).
 pub const MAX_DATA: usize = 4 * 1024 * 1024;
 /// Maksymalny rozmiar jednej partii poleceń / jednego zapisu pamięci (M2).
+/// Najwięcej zakresów w jednym `MemReadDeltaRanges`.
+pub const MAX_DELTA_RANGES: usize = 4096;
 pub const MAX_BATCH: usize = 8 * 1024 * 1024;
 
 /// Którą funkcję `vkGetPhysicalDevice*` wywołać na serwerze.
@@ -81,6 +83,9 @@ pub enum Request {
     MemRead { memory: u64, offset: u64, len: u32 },
     /// Odczyt różnic: serwer odsyła tylko strony pamięci zmienione od ostatniego zapisu/odczytu (format: `pagediff::encode_segments`).
     MemReadDelta { memory: u64 },
+    /// Jak `MemReadDelta`, ale serwer porównuje tylko wskazane zakresy bajtów (`(offset, długość)`, najwyżej `MAX_DELTA_RANGES`):
+    /// tam, gdzie GPU może pisać; reszta pamięci jest pomijana, więc koszt nie zależy od jej rozmiaru.
+    MemReadDeltaRanges { memory: u64, ranges: Vec<(u64, u64)> },
     /// Identyfikator tej sesji (do podłączenia drugiego połączenia z wideo).
     SessionId,
     /// Drugie połączenie (po `Hello`): odtąd serwer wypycha na nie ramki obrazu sesji `session`.
@@ -194,6 +199,15 @@ impl Request {
                 e.put_u32(*raw_len);
                 e.put_bytes(data);
             }
+            Request::MemReadDeltaRanges { memory, ranges } => {
+                e.put_u8(18);
+                e.put_u64(*memory);
+                e.put_u32(ranges.len() as u32);
+                for (off, len) in ranges {
+                    e.put_u64(*off);
+                    e.put_u64(*len);
+                }
+            }
             Request::MemReadDelta { memory } => {
                 e.put_u8(16);
                 e.put_u64(*memory);
@@ -301,6 +315,18 @@ impl Request {
             }
             13 => Request::SessionId,
             16 => Request::MemReadDelta { memory: d.get_u64()? },
+            18 => {
+                let memory = d.get_u64()?;
+                let n = d.get_u32()? as usize;
+                if n > MAX_DELTA_RANGES {
+                    return Err(MsgError::LimitExceeded("delta ranges"));
+                }
+                let mut ranges = Vec::with_capacity(n);
+                for _ in 0..n {
+                    ranges.push((d.get_u64()?, d.get_u64()?));
+                }
+                Request::MemReadDeltaRanges { memory, ranges }
+            }
             17 => {
                 let memory = d.get_u64()?;
                 let offset = d.get_u64()?;
@@ -441,6 +467,8 @@ mod tests {
             Request::MemWrite { memory: 5, offset: 4096, data: vec![0xAA; 100] },
             Request::MemRead { memory: 5, offset: 0, len: 4096 },
             Request::MemReadDelta { memory: 9 },
+            Request::MemReadDeltaRanges { memory: 9, ranges: vec![(0, 4096), (1 << 40, 17)] },
+            Request::MemReadDeltaRanges { memory: 9, ranges: vec![] },
             Request::MemWriteLz4 { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },

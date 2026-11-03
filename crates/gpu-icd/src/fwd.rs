@@ -270,7 +270,7 @@ impl InstState {
     fn refresh_ids(&self) -> Vec<u64> {
         self.mems
             .iter()
-            .filter(|(i, s)| s.mapped && self.mem_refresh.get(i).copied().unwrap_or(true) && !self.mem_gpu_readonly.get(i).copied().unwrap_or(false))
+            .filter(|(i, s)| s.mapped && self.mem_refresh.get(i).copied().unwrap_or(true) && self.gpuw.plan(**i) != crate::gpuwrite::Plan::Skip)
             .map(|(i, _)| *i)
             .collect()
     }
@@ -292,12 +292,21 @@ impl InstState {
         more
     }
 
+    /// Żądanie odświeżenia pamięci `id`: tylko zakresy, które GPU może zapisać, albo cała pamięć, gdy nie wiadomo.
+    fn delta_request(&self, id: u64) -> Request {
+        match self.gpuw.plan(id) {
+            crate::gpuwrite::Plan::Ranges(ranges) => Request::MemReadDeltaRanges { memory: id, ranges },
+            _ => Request::MemReadDelta { memory: id },
+        }
+    }
+
     /// Dociąga resztę zmian pamięci `id`, gdy pierwsza odpowiedź nie zmieściła się w limicie.
     fn drain_delta(&mut self, id: u64) {
         loop {
             self.flush();
             self.stats.roundtrips += 1;
-            let Ok(Response::Data(d)) = self.client.call(&Request::MemReadDelta { memory: id }) else { return };
+            let req = self.delta_request(id);
+            let Ok(Response::Data(d)) = self.client.call(&req) else { return };
             if !self.apply_delta(id, &d) {
                 return;
             }
@@ -370,27 +379,14 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     r
 }
 
-/// Bity użycia bufora, przy których GPU może go tylko czytać (TRANSFER_SRC, UNIFORM_TEXEL, UNIFORM, INDEX, VERTEX, INDIRECT).
-/// Każdy inny bit (też nieznany, w tym SHADER_DEVICE_ADDRESS, który pozwala pisać przez wskaźnik) oznacza możliwy zapis.
-const READ_ONLY_BUFFER_USAGE: u32 = 0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x100;
-
-fn usage_is_read_only(usage: u32) -> bool {
-    usage != 0 && usage & !READ_ONLY_BUFFER_USAGE == 0
-}
-
-/// Zapamiętuje, czy pamięć, do której przypisano zasób, może być zapisywana przez GPU (decyduje o odświeżaniu po oczekiwaniu).
+/// Zapamiętuje, co przypisano do pamięci (bufory: zakres i użycie; obrazy: cała pamięć), żeby po oczekiwaniu odświeżać tylko to,
+/// co GPU może zapisać (patrz `gpuwrite`).
 /// SAFETY: `slots` pochodzi z wywołania aplikacji: wskaźniki `pBindInfos` muszą być ważne dla `bindInfoCount` elementów.
 unsafe fn note_memory_binding(st: &mut InstState, name: &str, slots: &[u64]) {
-    let bind = |st: &mut InstState, memory: u64, read_only: bool| {
-        let e = st.mem_gpu_readonly.entry(memory).or_insert(true);
-        *e &= read_only;
-    };
     match name {
-        "vkBindBufferMemory" if slots.len() >= 3 => {
-            let ro = st.buf_usage.get(&slots[1]).is_some_and(|u| usage_is_read_only(*u));
-            bind(st, slots[2], ro);
-        }
-        "vkBindImageMemory" if slots.len() >= 3 => bind(st, slots[2], false),
+        // vkBindBufferMemory(device, buffer, memory, memoryOffset)
+        "vkBindBufferMemory" if slots.len() >= 4 => st.gpuw.bind_buffer(slots[2], slots[1], slots[3]),
+        "vkBindImageMemory" if slots.len() >= 3 => st.gpuw.bind_image(slots[2]),
         // VkBindBufferMemoryInfo / VkBindImageMemoryInfo: sType, pNext, zasób@16, pamięć@24, offset@32 (40 B).
         "vkBindBufferMemory2" | "vkBindBufferMemory2KHR" | "vkBindImageMemory2" | "vkBindImageMemory2KHR" if slots.len() >= 3 && slots[2] != 0 => {
             let buffers = name.starts_with("vkBindBuffer");
@@ -398,8 +394,12 @@ unsafe fn note_memory_binding(st: &mut InstState, name: &str, slots: &[u64]) {
                 let base = (slots[2] as *const u8).add(i * 40);
                 let resource = std::ptr::read_unaligned(base.add(16) as *const u64);
                 let memory = std::ptr::read_unaligned(base.add(24) as *const u64);
-                let ro = buffers && st.buf_usage.get(&resource).is_some_and(|u| usage_is_read_only(*u));
-                bind(st, memory, ro);
+                let offset = std::ptr::read_unaligned(base.add(32) as *const u64);
+                if buffers {
+                    st.gpuw.bind_buffer(memory, resource, offset);
+                } else {
+                    st.gpuw.bind_image(memory);
+                }
             }
         }
         _ => {}
@@ -680,13 +680,14 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     if (cmd.name == "vkDestroyImage" || cmd.name == "vkDestroyBuffer") && slots[1] != 0 {
         st.memreq.object_destroyed(slots[1]);
-        st.buf_usage.remove(&slots[1]);
+        st.gpuw.buffer_destroyed(slots[1]);
     }
     if cmd.name == "vkCreateBuffer" && slots[1] != 0 && slots[3] != 0 {
         let id = std::ptr::read_unaligned(slots[3] as *const u64);
         let has_pnext = std::ptr::read_unaligned((slots[1] as *const u8).add(8) as *const u64) != 0;
         let usage = if has_pnext { None } else { gpu_vkcodec::codec::arg_uint(cmd, args, "pCreateInfo->usage") };
-        st.buf_usage.insert(id, usage.map_or(u32::MAX, |u| u as u32));
+        let size = gpu_vkcodec::codec::arg_uint(cmd, args, "pCreateInfo->size").unwrap_or(0);
+        st.gpuw.buffer_created(id, size, usage.map_or(u32::MAX, |u| u as u32));
     }
     note_memory_binding(st, cmd.name, slots);
     if cmd.name == "vkCreateDescriptorSetLayout" && slots[1] != 0 && slots[3] != 0 {
@@ -734,7 +735,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         st.mems.remove(&slots[1]);
         st.mem_sizes.remove(&slots[1]);
         st.mem_refresh.remove(&slots[1]);
-        st.mem_gpu_readonly.remove(&slots[1]);
+        st.gpuw.memory_freed(slots[1]);
     }
 
     st.stats.commands += 1;
@@ -754,7 +755,8 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     let pre_ids: Vec<u64> = if cmd.class == CmdClass::Sync && st.gpu_dirty { st.refresh_ids() } else { Vec::new() };
     let mut ok = st.client.send(&Request::Query { data: bytes }).is_ok() && st.client.send(&Request::Sync).is_ok();
     for id in &pre_ids {
-        ok = ok && st.client.send(&Request::MemReadDelta { memory: *id }).is_ok();
+        let req = st.delta_request(*id);
+        ok = ok && st.client.send(&req).is_ok();
     }
     let t_recv = std::time::Instant::now();
     let (q, sy) = if ok { (st.client.recv(), st.client.recv()) } else { (Err(gpu_renderd::client::ClientError::Closed), Err(gpu_renderd::client::ClientError::Closed)) };
@@ -1037,17 +1039,6 @@ mod memreq_target_tests {
             assert_eq!(memreq_target("vkGetBufferMemoryRequirements", &s1).unwrap().0, 55);
             assert!(memreq_target("vkCreateBuffer", &s1).is_none());
         }
-    }
-    #[test]
-    fn only_pure_read_buffer_usages_are_treated_as_gpu_read_only() {
-        assert!(usage_is_read_only(0x1)); // TRANSFER_SRC
-        assert!(usage_is_read_only(0x10 | 0x80 | 0x40)); // UNIFORM | VERTEX | INDEX
-        assert!(!usage_is_read_only(0)); // brak informacji
-        assert!(!usage_is_read_only(0x2)); // TRANSFER_DST
-        assert!(!usage_is_read_only(0x10 | 0x20)); // UNIFORM | STORAGE
-        assert!(!usage_is_read_only(0x20000)); // SHADER_DEVICE_ADDRESS: zapis przez wskaźnik
-        assert!(!usage_is_read_only(0x1 | 0x8000_0000)); // nieznany bit
-        assert!(!usage_is_read_only(u32::MAX));
     }
 
 }
