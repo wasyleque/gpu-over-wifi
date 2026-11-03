@@ -435,6 +435,39 @@ pub fn lock_report() -> String {
 struct LocalBatch {
     buf: Vec<u8>,
     count: u64,
+    /// Pokolenie instancji, dla którego zebrano polecenia: bufor z innego pokolenia jest odrzucany (patrz `GENERATION`).
+    generation: u64,
+}
+
+/// Numer pokolenia instancji sterownika, zwiększany przy tworzeniu i niszczeniu instancji. Uchwyty są numerowane od początku dla każdej
+/// instancji, więc polecenia nagrane dla poprzedniej (np. urządzenia testowego vkd3d-proton) NIE mogą trafić do strumienia następnej:
+/// te same liczby oznaczałyby inne obiekty, a sterownik NVIDIA na serwerze kończył się wtedy zerowym wskaźnikiem.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn bump_generation() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+impl LocalBatch {
+    /// Dopisuje zakodowane polecenie; bufor z innego pokolenia jest najpierw wyrzucany. Zwraca, czy bufor osiągnął próg opróżnienia.
+    fn push(&mut self, generation: u64, bytes: &[u8]) -> bool {
+        if self.generation != generation {
+            self.buf.clear();
+            self.count = 0;
+            self.generation = generation;
+        }
+        self.buf.extend_from_slice(bytes);
+        self.count += 1;
+        self.buf.len() >= LOCAL_FLUSH_BYTES
+    }
+
+    /// Zawartość do wspólnej partii: pusta, jeśli bufor pochodzi z innego pokolenia (wtedy jest odrzucany).
+    fn take(&mut self, generation: u64) -> (Vec<u8>, u64) {
+        let out = if self.generation == generation { (std::mem::take(&mut self.buf), self.count) } else { (Vec::new(), 0) };
+        self.buf.clear();
+        self.count = 0;
+        out
+    }
 }
 
 thread_local! {
@@ -498,12 +531,8 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
         return false; // błąd zgłosi zwykła ścieżka (z komunikatem w logu)
     }
     let bytes = e.finish();
-    let full = LOCAL.with(|l| {
-        let mut l = l.borrow_mut();
-        l.buf.extend_from_slice(&bytes);
-        l.count += 1;
-        l.buf.len() >= LOCAL_FLUSH_BYTES
-    });
+    let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let full = LOCAL.with(|l| l.borrow_mut().push(generation, &bytes));
     if full {
         if let Some(inst) = state() {
             drop(lock_state(inst));
@@ -514,15 +543,12 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
 
 /// Przenosi bufor poleceń tego wątku do wspólnej partii (pod blokadą stanu), żeby kolejność poleceń wątku względem jego następnych wywołań została zachowana.
 fn drain_local(st: &mut InstState) {
-    LOCAL.with(|l| {
-        let mut l = l.borrow_mut();
-        if !l.buf.is_empty() {
-            st.batch.extend_from_slice(&l.buf);
-            st.stats.commands += l.count;
-            l.buf.clear();
-            l.count = 0;
-        }
-    });
+    let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let (buf, count) = LOCAL.with(|l| l.borrow_mut().take(generation));
+    if !buf.is_empty() {
+        st.batch.extend_from_slice(&buf);
+        st.stats.commands += count;
+    }
     if st.batch.len() > BATCH_FLUSH {
         st.flush();
     }
@@ -1309,6 +1335,25 @@ mod memreq_target_tests {
                 assert!(c.name.starts_with("vkCmd"), "{}", c.name);
             }
         }
+    }
+
+    #[test]
+    fn local_commands_from_an_older_instance_generation_are_discarded() {
+        let mut l = LocalBatch::default();
+        assert!(!l.push(1, &[1, 2, 3]));
+        assert!(!l.push(1, &[4, 5]));
+        // Ta sama generacja: zawartość i licznik zostają wydane, bufor jest pusty.
+        assert_eq!(l.take(1), (vec![1, 2, 3, 4, 5], 2));
+        assert_eq!(l.take(1), (Vec::new(), 0));
+        // Polecenia z pokolenia 1 nie mogą trafić do pokolenia 2.
+        l.push(1, &[9, 9, 9]);
+        assert_eq!(l.take(2), (Vec::new(), 0));
+        // Nowy push w nowym pokoleniu wyrzuca zaległości starego.
+        l.push(1, &[7]);
+        l.push(3, &[8]);
+        assert_eq!(l.take(3), (vec![8], 1));
+        // Próg opróżnienia.
+        assert!(l.push(3, &vec![0u8; LOCAL_FLUSH_BYTES]));
     }
 
 }
