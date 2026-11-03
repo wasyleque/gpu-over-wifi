@@ -43,6 +43,10 @@ pub struct Stats {
     pub memw_bytes: u64,
     /// Bajty zapisów pamięci faktycznie wysłane łączem (po kompresji LZ4).
     pub memw_wire_bytes: u64,
+    /// Odświeżenia pamięci według planu: całe / tylko zakresy (i ile bajtów obejmowały zakresy łącznie).
+    pub refresh_whole: u64,
+    pub refresh_ranged: u64,
+    pub refresh_ranged_bytes: u64,
     pub memr_bytes: u64,
     pub query_bytes: u64,
     pub roundtrips: u64,
@@ -72,8 +76,8 @@ impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; odświeżenia pamięci {} ({:.0} ms), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -293,10 +297,25 @@ impl InstState {
     }
 
     /// Żądanie odświeżenia pamięci `id`: tylko zakresy, które GPU może zapisać, albo cała pamięć, gdy nie wiadomo.
-    fn delta_request(&self, id: u64) -> Request {
-        match self.gpuw.plan(id) {
-            crate::gpuwrite::Plan::Ranges(ranges) => Request::MemReadDeltaRanges { memory: id, ranges },
-            _ => Request::MemReadDelta { memory: id },
+    fn delta_request(&mut self, id: u64) -> Request {
+        let plan = self.gpuw.plan(id);
+        let size = self.mem_sizes.get(&id).copied().unwrap_or(0);
+        if flags().periodic && self.plans_logged.insert(id) {
+            match &plan {
+                crate::gpuwrite::Plan::Ranges(r) => eprintln!("[gpu-icd] odświeżanie pamięci {id:#x} ({} MB): {} zakresów, razem {} KB", size >> 20, r.len(), r.iter().map(|x| x.1).sum::<u64>() >> 10),
+                p => eprintln!("[gpu-icd] odświeżanie pamięci {id:#x} ({} MB): {p:?}", size >> 20),
+            }
+        }
+        match plan {
+            crate::gpuwrite::Plan::Ranges(ranges) => {
+                self.stats.refresh_ranged += 1;
+                self.stats.refresh_ranged_bytes += ranges.iter().map(|r| r.1).sum::<u64>();
+                Request::MemReadDeltaRanges { memory: id, ranges }
+            }
+            _ => {
+                self.stats.refresh_whole += 1;
+                Request::MemReadDelta { memory: id }
+            }
         }
     }
 

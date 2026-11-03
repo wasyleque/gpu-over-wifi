@@ -80,6 +80,8 @@ pub struct Replayer {
     /// Opis `VkDescriptorPoolCreateInfo` po prawdziwym uchwycie puli i licznik nieudanych alokacji (diagnostyka odmów `OUT_OF_POOL_MEMORY`).
     pool_desc: HashMap<u64, String>,
     failed_allocs: u32,
+    /// Bufor na kopię odczytywanej pamięci (patrz `stage`), używany wielokrotnie.
+    scratch: Vec<u8>,
 }
 
 // SAFETY: wskaźniki to uchwyty i adresy odwzorowań sterownika używane wyłącznie przez wątek sesji.
@@ -106,6 +108,45 @@ fn trace_text(line: &str) {
     }
 }
 
+/// Do tylu bajtów (łącznie) odczytywane zakresy kopiujemy strumieniowo do zwykłej pamięci i dopiero z niej liczymy skróty:
+/// odczyty pamięci write-combined albo przez PCIe są tam o rząd wielkości wolniejsze (patrz `stream`). Większe odczyty idą bez kopii
+/// (to pamięci HOST_CACHED, które klient odświeża także, gdy są duże).
+const STAGE_MAX_BYTES: usize = 32 << 20;
+
+/// Skąd czytać dane do porównania: z pamięci odwzorowanej albo z kopii w `scratch`.
+enum Staged {
+    Mapped(*const u8, usize),
+    Scratch(usize),
+}
+
+impl Staged {
+    fn get<'a>(&self, scratch: &'a [u8]) -> &'a [u8] {
+        match *self {
+            // SAFETY: wskaźnik i długość pochodzą z odwzorowania, które żyje do końca wywołania (patrz `stage`).
+            Staged::Mapped(p, n) => unsafe { std::slice::from_raw_parts(p, n) },
+            Staged::Scratch(n) => &scratch[..n],
+        }
+    }
+}
+
+/// Przygotowuje dane do porównania obszaru `ptr[..size]`: czytane są tylko `spans` (przedziały bajtów).
+///
+/// # Safety
+/// `ptr` musi wskazywać na odwzorowanie o długości `size`, ważne do końca użycia wyniku.
+unsafe fn stage(ptr: *const u8, size: usize, spans: &[(usize, usize)], mut scratch: Vec<u8>) -> (Staged, Vec<u8>) {
+    let total: usize = spans.iter().map(|(a, b)| b - a).sum();
+    if total == 0 || total > STAGE_MAX_BYTES {
+        return (Staged::Mapped(ptr, size), scratch);
+    }
+    if scratch.len() < size {
+        scratch.resize(size, 0);
+    }
+    for &(a, b) in spans {
+        crate::vk::stream::stream_copy(scratch.as_mut_ptr().add(a), ptr.add(a), b - a);
+    }
+    (Staged::Scratch(size), scratch)
+}
+
 fn code(e: CodecError) -> i32 {
     eprintln!("replay: {e:?}");
     ERR_UNKNOWN
@@ -113,7 +154,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), failed_allocs: 0 }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), failed_allocs: 0, scratch: Vec::new() }
     }
 
     pub fn set_instance(&mut self, raw: VkInstance) {
@@ -342,22 +383,30 @@ impl Replayer {
     pub fn mem_read_delta(&mut self, memory: u64, max_bytes: usize) -> Result<Vec<u8>, i32> {
         let (ptr, e, device) = self.mapping(memory)?;
         self.range_call("vkInvalidateMappedMemoryRanges", device, e.real)?;
+        let size = e.size as usize;
+        let spans = [(0usize, size)];
         // SAFETY: odwzorowanie ma `e.size` bajtów.
-        let whole = unsafe { std::slice::from_raw_parts(ptr, e.size as usize) };
-        let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize));
-        let (ranges, more) = tracker.changed(whole, max_bytes);
-        Ok(gpu_proto::pagediff::encode_segments(whole, &ranges, more))
+        let (data, scratch) = unsafe { stage(ptr, size, &spans, std::mem::take(&mut self.scratch)) };
+        let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(size));
+        let (ranges, more) = tracker.changed(data.get(&scratch), max_bytes);
+        let out = gpu_proto::pagediff::encode_segments(data.get(&scratch), &ranges, more);
+        self.scratch = scratch;
+        Ok(out)
     }
 
     /// Jak `mem_read_delta`, ale tylko dla stron w `ranges`: pamięć poza nimi nie jest czytana ani haszowana.
     pub fn mem_read_delta_ranges(&mut self, memory: u64, ranges: &[(u64, u64)], max_bytes: usize) -> Result<Vec<u8>, i32> {
         let (ptr, e, device) = self.mapping(memory)?;
         self.range_call("vkInvalidateMappedMemoryRanges", device, e.real)?;
+        let size = e.size as usize;
+        let spans = gpu_proto::pagediff::page_spans(ranges, size);
         // SAFETY: odwzorowanie ma `e.size` bajtów.
-        let whole = unsafe { std::slice::from_raw_parts(ptr, e.size as usize) };
-        let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize));
-        let (changed, more) = tracker.changed_in(whole, ranges, max_bytes);
-        Ok(gpu_proto::pagediff::encode_segments(whole, &changed, more))
+        let (data, scratch) = unsafe { stage(ptr, size, &spans, std::mem::take(&mut self.scratch)) };
+        let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(size));
+        let (changed, more) = tracker.changed_in(data.get(&scratch), ranges, max_bytes);
+        let out = gpu_proto::pagediff::encode_segments(data.get(&scratch), &changed, more);
+        self.scratch = scratch;
+        Ok(out)
     }
 
     pub fn mem_read(&mut self, memory: u64, offset: u64, len: u32) -> Result<Vec<u8>, i32> {

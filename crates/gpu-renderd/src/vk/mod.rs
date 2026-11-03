@@ -5,3 +5,4 @@ pub mod handles;
 pub mod loader;
 pub mod registry;
 pub mod replay;
+pub mod stream;

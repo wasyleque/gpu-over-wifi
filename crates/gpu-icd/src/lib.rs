@@ -88,6 +88,8 @@ struct InstState {
     mem_refresh: HashMap<u64, bool>,
     /// Które zakresy odwzorowanej pamięci GPU może zapisać (decyduje, co odświeżać po oczekiwaniu).
     gpuw: gpuwrite::GpuWrites,
+    /// Pamięci, dla których plan odświeżania został już zapisany w logu (jednorazowo, przy `GPU_ICD_STATS=periodic`).
+    plans_logged: std::collections::HashSet<u64>,
     /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
     gpu_dirty: bool,
     mems: HashMap<u64, fwd::Shadow>,
@@ -326,6 +328,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             memreq: Default::default(),
             mem_refresh: HashMap::new(),
             gpuw: Default::default(),
+            plans_logged: Default::default(),
             gpu_dirty: false,
             templates: HashMap::new(),
             mems: HashMap::new(),

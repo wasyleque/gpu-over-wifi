@@ -54,6 +54,31 @@ fn page_hashes(data: &[u8], first: usize, n: usize, len: usize) -> Vec<u64> {
     out
 }
 
+/// Zakresy bajtów `candidates` (`(offset, długość)`, mogą się nakładać i wychodzić poza obszar) -> posortowane, scalone przedziały
+/// `[od, do)` bajtów wyrównane do stron i obcięte do `size` (ostatnia strona obszaru może być niepełna).
+pub fn page_spans(candidates: &[(u64, u64)], size: usize) -> Vec<(usize, usize)> {
+    let pages = size.div_ceil(PAGE) as u64;
+    let mut spans: Vec<(usize, usize)> = candidates
+        .iter()
+        .filter(|(_, len)| *len > 0)
+        .map(|&(off, len)| {
+            let a = (off / PAGE as u64).min(pages);
+            let b = off.saturating_add(len).div_ceil(PAGE as u64).min(pages);
+            ((a as usize) * PAGE, ((b as usize) * PAGE).min(size))
+        })
+        .filter(|(a, b)| a < b)
+        .collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in spans {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
 /// Skróty stron wspólnie znane obu stronom dla jednego obszaru pamięci o stałym rozmiarze.
 #[derive(Debug, Clone)]
 pub struct PageTracker {
@@ -111,25 +136,7 @@ impl PageTracker {
     /// Strony poza zakresami nie są czytane, więc koszt zależy od rozmiaru zakresów, a nie całej pamięci.
     pub fn changed_in(&mut self, data: &[u8], candidates: &[(u64, u64)], max_bytes: usize) -> (Vec<(usize, usize)>, bool) {
         let pages = self.known.len().min(data.len() / PAGE + usize::from(data.len() % PAGE != 0));
-        // Zakresy bajtów -> przedziały stron [od, do), posortowane i scalone.
-        let mut spans: Vec<(usize, usize)> = candidates
-            .iter()
-            .filter(|(_, len)| *len > 0)
-            .map(|&(off, len)| {
-                let a = (off / PAGE as u64).min(pages as u64) as usize;
-                let b = (off.saturating_add(len).div_ceil(PAGE as u64)).min(pages as u64) as usize;
-                (a, b)
-            })
-            .filter(|(a, b)| a < b)
-            .collect();
-        spans.sort_unstable();
-        let mut merged: Vec<(usize, usize)> = Vec::new();
-        for (a, b) in spans {
-            match merged.last_mut() {
-                Some(last) if a <= last.1 => last.1 = last.1.max(b),
-                _ => merged.push((a, b)),
-            }
-        }
+        let merged: Vec<(usize, usize)> = page_spans(candidates, pages * PAGE).into_iter().map(|(a, b)| (a / PAGE, b / PAGE)).collect();
         let mut out: Vec<(usize, usize)> = Vec::new();
         let mut total = 0usize;
         for (first, end) in merged {
