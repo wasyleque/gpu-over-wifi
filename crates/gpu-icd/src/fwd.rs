@@ -369,6 +369,51 @@ unsafe fn is_cached_type(st: &mut InstState, slots: &[u64], cmd: &gpu_proto::met
     props.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8 != 0).unwrap_or(true)
 }
 
+/// Rozpoznaje zapytania o wymagania pamięci: zwraca (obiekt, wskaźnik na wynik, czy wariant `2`, czy to obraz).
+unsafe fn memreq_target(name: &str, slots: &[u64]) -> Option<(u64, *mut u8, bool)> {
+    let two = name.ends_with("2");
+    let image = match name {
+        "vkGetImageMemoryRequirements" | "vkGetImageMemoryRequirements2" => true,
+        "vkGetBufferMemoryRequirements" | "vkGetBufferMemoryRequirements2" => false,
+        _ => return None,
+    };
+    let _ = image;
+    if slots.len() < 3 || slots[2] == 0 {
+        return None;
+    }
+    if two {
+        // pInfo: sType @0, pNext @8 (musi być puste), obiekt @16; wynik: VkMemoryRequirements2 (pNext @8 puste, dane @16).
+        let (info, out) = (slots[1] as *const u8, slots[2] as *mut u8);
+        if info.is_null() || std::ptr::read_unaligned(info.add(8) as *const u64) != 0 || std::ptr::read_unaligned(out.add(8) as *const u64) != 0 {
+            return None;
+        }
+        Some((std::ptr::read_unaligned(info.add(16) as *const u64), out.add(16), true))
+    } else {
+        Some((slots[1], slots[2] as *mut u8, false))
+    }
+}
+
+/// Odpowiedź z cache; `Some(0)` oznacza, że wynik został wpisany i polecenie jest załatwione.
+unsafe fn memreq_cached(st: &mut InstState, name: &str, slots: &[u64]) -> Option<u64> {
+    let (obj, out, _) = memreq_target(name, slots)?;
+    let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
+    let (size, align, bits) = st.memreq.lookup(dev, obj)?;
+    std::ptr::write_unaligned(out as *mut u64, size);
+    std::ptr::write_unaligned(out.add(8) as *mut u64, align);
+    std::ptr::write_unaligned(out.add(16) as *mut u32, bits);
+    Some(0)
+}
+
+/// Po prawdziwej odpowiedzi serwera zapamiętuje wynik dla klucza tego obiektu.
+unsafe fn memreq_store(st: &mut InstState, name: &str, slots: &[u64]) {
+    let Some((obj, out, _)) = memreq_target(name, slots) else { return };
+    let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
+    let size = std::ptr::read_unaligned(out as *const u64);
+    let align = std::ptr::read_unaligned(out.add(8) as *const u64);
+    let bits = std::ptr::read_unaligned(out.add(16) as *const u32);
+    st.memreq.store(dev, obj, (size, align, bits));
+}
+
 /// Rozwija `vkUpdateDescriptorSetWithTemplate(device, set, template, pData)` do `vkUpdateDescriptorSets` z jawnymi zapisami.
 unsafe fn update_with_template(st: &mut InstState, slots: &[u64]) -> u64 {
     let (device, set, template, data) = (slots[0], slots[1], slots[2], slots[3] as *const u8);
@@ -423,6 +468,10 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         }
         _ => {}
     }
+    // Wymagania pamięci: identyczne obrazy i bufory dostają odpowiedź z cache, bez obiegu po sieci.
+    if let Some(done) = memreq_cached(st, cmd.name, slots) {
+        return done;
+    }
     // Aktualizacja deskryptorów szablonem: dane zawierają uchwyty, więc rozwijamy ją do zwykłego vkUpdateDescriptorSets.
     if cmd.name == "vkUpdateDescriptorSetWithTemplate" {
         return update_with_template(st, slots);
@@ -465,6 +514,14 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let refresh = size <= REFRESH_ALWAYS_BELOW || is_cached_type(st, slots, cmd, args);
             st.mem_refresh.insert(mem_id, refresh);
         }
+    }
+    if (cmd.name == "vkCreateImage" || cmd.name == "vkCreateBuffer") && slots[1] != 0 && slots[3] != 0 {
+        let id = std::ptr::read_unaligned(slots[3] as *const u64);
+        let key = if cmd.name == "vkCreateImage" { crate::memreq::MemReqCache::image_key(slots[1] as *const u8) } else { crate::memreq::MemReqCache::buffer_key(slots[1] as *const u8) };
+        st.memreq.object_created(id, key);
+    }
+    if (cmd.name == "vkDestroyImage" || cmd.name == "vkDestroyBuffer") && slots[1] != 0 {
+        st.memreq.object_destroyed(slots[1]);
     }
     if cmd.name == "vkCreateDescriptorSetLayout" && slots[1] != 0 && slots[3] != 0 {
         st.desc.layout_created(std::ptr::read_unaligned(slots[3] as *const u64), slots[1] as *const u8);
@@ -547,6 +604,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     if cmd.ret == Ret::U64 {
         // Wartość zwracana (np. adres bufora) idzie na końcu odpowiedzi; brak = 0, czyli adres nieprawidłowy.
         return if result >= 0 { dec.get_u64().unwrap_or(0) } else { 0 };
+    }
+    if result >= 0 {
+        memreq_store(st, cmd.name, slots);
     }
     if let Some((pool, layouts)) = &alloc_ctx {
         if !speculated {

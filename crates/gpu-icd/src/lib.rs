@@ -22,6 +22,7 @@ mod descpool;
 mod exts;
 mod fwd;
 mod local;
+mod memreq;
 mod memtrack;
 mod present;
 mod swapchain;
@@ -75,6 +76,8 @@ struct InstState {
     next_id: u64,
     /// Rozmiary pamięci przydzielonych na serwerze i lokalne kopie (tylko odwzorowane).
     mem_sizes: HashMap<u64, u64>,
+    /// Cache wymagań pamięci obrazów i buforów (bez obiegu po sieci dla identycznych obiektów).
+    memreq: memreq::MemReqCache,
     /// Księgowość pul i układów deskryptorów (spekulatywne odpowiedzi na `vkAllocateDescriptorSets`).
     desc: descpool::DescriptorAccounts,
     /// Czy pamięć wolno odświeżać z serwera po oczekiwaniu (typ HOST_CACHED albo mała); duże pamięci write-combined czyta się wolno.
@@ -313,6 +316,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             next_id: 1 << 20,
             mem_sizes: HashMap::new(),
             desc: Default::default(),
+            memreq: Default::default(),
             mem_refresh: HashMap::new(),
             gpu_dirty: false,
             templates: HashMap::new(),
