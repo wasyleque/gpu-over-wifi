@@ -870,6 +870,7 @@ mod memreq_target_tests {
     use super::*;
 
     #[test]
+    #[allow(unused_assignments)] // wartości czytane przez surowe wskaźniki, których kompilator nie śledzi
     fn dedicated_requirements_chain_is_accepted_but_other_chains_and_info_pnext_are_not() {
         let mut info = [0u64; 3]; // VkImageMemoryRequirementsInfo2: obiekt @16
         info[2] = 77;
