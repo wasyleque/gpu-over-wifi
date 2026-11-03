@@ -74,6 +74,24 @@ impl Stats {
     }
 }
 
+/// Flagi diagnostyczne czytane RAZ (zmienne środowiskowe nie zmieniają się w trakcie procesu, a odczyt przy każdym poleceniu
+/// kosztował zauważalnie przy setkach tysięcy poleceń na sekundę).
+pub struct Flags {
+    pub debug: bool,
+    pub trace: bool,
+    pub periodic: bool,
+}
+
+pub fn flags() -> &'static Flags {
+    static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
+    F.get_or_init(|| Flags {
+        debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
+        trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
+        // Cykliczne liczniki co 5 s: `GPU_ICD_STATS=periodic` albo (jak dotąd) razem z `GPU_ICD_DEBUG`.
+        periodic: std::env::var("GPU_ICD_STATS").is_ok_and(|v| v == "periodic") || std::env::var_os("GPU_ICD_DEBUG").is_some(),
+    })
+}
+
 /// Lokalna kopia odwzorowanej pamięci (M2a: całe obiekty, M3: tylko zmienione strony).
 pub struct Shadow {
     data: crate::memtrack::PageAlignedBuf,
@@ -153,7 +171,7 @@ impl InstState {
 
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
         self.flush();
-        if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        if flags().debug {
             self.survey_write(data);
         }
         self.stats.memw_bytes += data.len() as u64;
@@ -319,7 +337,7 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             }
         };
     }
-    if cmd.name == "vkCreateGraphicsPipelines" && std::env::var("GPU_ICD_TRACE").is_ok() {
+    if cmd.name == "vkCreateGraphicsPipelines" && flags().trace {
         for i in 0..slots.get(2).copied().unwrap_or(0).min(8) as usize {
             let info = (slots[3] as *const u8).add(i * 144);
             trace_text(&format!("  pipeline[{i}] app: {}", gpu_proto::debug::describe_graphics_pipeline_info(info)));
@@ -335,7 +353,7 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
 /// Co 5 s (przy `GPU_ICD_DEBUG`) wypisuje liczniki sieci do logu: pokazuje, czy ładowanie ogranicza przepustowość pamięci.
 fn periodic_stats(stats: &Stats) {
     static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-    if std::env::var("GPU_ICD_DEBUG").is_err() {
+    if !flags().periodic {
         return;
     }
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
@@ -343,26 +361,47 @@ fn periodic_stats(stats: &Stats) {
     if last.is_none_or(|t| now.duration_since(t).as_secs() >= 5) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
+        trace_flush();
     }
 }
 
+/// Plik śladu otwarty raz i buforowany (poprzednio: otwarcie, zapis i zamknięcie przy KAŻDYM poleceniu).
+fn trace_sink() -> Option<&'static std::sync::Mutex<std::io::BufWriter<std::fs::File>>> {
+    static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>> = std::sync::OnceLock::new();
+    SINK.get_or_init(|| {
+        let path = std::env::var("GPU_ICD_TRACE").ok()?;
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+        Some(std::sync::Mutex::new(std::io::BufWriter::with_capacity(1 << 20, f)))
+    })
+    .as_ref()
+}
+
 fn trace_text(line: &str) {
-    if let Ok(path) = std::env::var("GPU_ICD_TRACE") {
+    if !flags().trace {
+        return;
+    }
+    if let Some(sink) = trace_sink() {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(f, "{line}");
-        }
+        let _ = writeln!(sink.lock().unwrap_or_else(|e| e.into_inner()), "{line}");
+    }
+}
+
+/// Zapisuje bufor śladu na dysk (wołane z cyklicznych liczników i przy zniszczeniu instancji).
+pub fn trace_flush() {
+    if let Some(sink) = trace_sink() {
+        use std::io::Write;
+        let _ = sink.lock().unwrap_or_else(|e| e.into_inner()).flush();
     }
 }
 
 /// `GPU_ICD_TRACE=<plik>`: dopisuje nazwę każdego polecenia aplikacji i zwróconą wartość (diagnostyka awarii gier).
 fn trace(name: &str, ret: u64, micros: u128) {
-    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if let Some(path) = PATH.get_or_init(|| std::env::var("GPU_ICD_TRACE").ok()) {
+    if !flags().trace {
+        return;
+    }
+    if let Some(sink) = trace_sink() {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(f, "{name} -> {:#x} [{micros}us]", ret as u32 as i32);
-        }
+        let _ = writeln!(sink.lock().unwrap_or_else(|e| e.into_inner()), "{name} -> {:#x} [{micros}us]", ret as u32 as i32);
     }
 }
 

@@ -365,6 +365,7 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
     let obj = Box::from_raw(inst);
     let mut st = lock(&obj.state);
     st.flush();
+    fwd::trace_flush();
     if std::env::var("GPU_ICD_STATS").is_ok() {
         eprintln!("{}", st.stats.report());
     }
