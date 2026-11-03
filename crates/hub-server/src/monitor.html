@@ -249,7 +249,8 @@ function render(d){
   lineChart("cGpu",[{data:S.gpu,color:COL.gpu,fill:1},{data:S.temp,color:COL.hot}],{max:100});
   lineChart("cVram",[{data:S.vram,color:COL.gpu,fill:1}],{max:S.vramMax||24});
   lineChart("cPow",[{data:S.pow,color:COL.ram,fill:1}],{max:Math.max(S.powLim,50)});
-  lineChart("cCpu",[{data:S.cpu,color:COL.ssd,fill:1}],{max:100});
+  // Serwer ma 32 wątki, a gra zajmuje 1-2 rdzenie (3-6% łącznie): skala dopasowuje się do danych (min. 10%), żeby wykres było widać.
+  lineChart("cCpu",[{data:S.cpu,color:COL.ssd,fill:1}],{minMax:10});
   lineChart("cRam",[{data:S.ram,color:COL.ram,fill:1}],{max:S.ramMax||64});
   lineChart("cDisk",[{data:S.dR,color:COL.ssd,fill:1},{data:S.dW,color:COL.hot}],{minMax:100});
   lineChart("cNet",[{data:S.nRx,color:COL.gpu,fill:1},{data:S.nTx,color:COL.ram}],{minMax:10});
