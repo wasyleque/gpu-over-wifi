@@ -54,7 +54,7 @@ fn descriptor_data_union_roundtrips_every_variant_with_handle_translation() {
             assert!(!bytes.windows(8).any(|w| w == 0xDEAD_BEEFu64.to_le_bytes()), "śmieci nie wychodzą na łącze");
         }
         // Bufory: VkDescriptorAddressInfoEXT (address, range, format) bez zmian.
-        let mut addr = vec![0u64; 5];
+        let mut addr = [0u64; 5];
         addr[0] = gpu_proto::stype::STYPE_TABLE.iter().find(|e| e.name == "VkDescriptorAddressInfoEXT").unwrap().stype as u64;
         addr[2] = 0x7000_0000_1000;
         addr[3] = 4096;
