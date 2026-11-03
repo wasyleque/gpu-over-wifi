@@ -208,7 +208,7 @@ unsafe fn walk_chain(head: *mut u8) -> Vec<(*mut u8, u32)> {
 unsafe fn fill2(pd: &PdevObj, func: PdFunc, arg: u32, head: *mut u8, head_stype: u32) {
     let Some(entry) = lookup(head_stype) else { return };
     let inst = &*pd.instance;
-    let mut st = lock(&inst.state);
+    let mut st = crate::fwd::lock_state(inst);
     if let Some(d) = st.query(pd.remote, func, arg, 0, &[]) {
         let mut d = d;
         if let Some(h) = d.get_mut(..entry.size as usize) {
@@ -356,7 +356,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
     }));
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
     {
-        let mut st = lock(&(*obj).state);
+        let mut st = crate::fwd::lock_state(&*obj);
         for rp in remote_pds {
             if !all {
                 let q = st.query(rp, PdFunc::Properties2, 0, 0, &[]);
@@ -371,7 +371,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             st.pdevs.push(Box::into_raw(Box::new(PdevObj { loader_data: 0, remote: rp, instance: obj })));
         }
     }
-    if lock(&(*obj).state).pdevs.is_empty() {
+    if crate::fwd::lock_state(&*obj).pdevs.is_empty() {
         eprintln!("gpu-icd: UWAGA: serwer {addr} nie udostępnia żadnej karty innej niż CPU (llvmpipe); sprawdź sterownik GPU na serwerze albo ustaw GPU_ICD_ALL_DEVICES=1");
     }
     *out = obj;
@@ -384,7 +384,7 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
     }
     CURRENT.store(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
     let obj = Box::from_raw(inst);
-    let mut st = lock(&obj.state);
+    let mut st = crate::fwd::lock_state(&obj);
     st.flush();
     fwd::trace_flush();
     if std::env::var("GPU_ICD_STATS").is_ok() {
@@ -401,7 +401,7 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
 
 unsafe extern "C" fn enumerate_physical_devices(inst: *mut InstanceObj, count: *mut u32, out: *mut *mut PdevObj) -> VkResult {
     let (Some(inst), Some(count)) = (inst.as_ref(), count.as_mut()) else { return VK_ERROR_INITIALIZATION_FAILED };
-    let st = lock(&inst.state);
+    let st = crate::fwd::lock_state(inst);
     if std::env::var("GPU_ICD_DEBUG").is_ok() {
         eprintln!("[gpu-icd] vkEnumeratePhysicalDevices: {} urządzeń, żądana liczba {}, bufor {}", st.pdevs.len(), *count, if out.is_null() { "null" } else { "jest" });
     }
@@ -464,7 +464,7 @@ unsafe fn plain(p: *mut c_void, func: PdFunc, arg: u32, st: u32, out: *mut u8, b
     if out.is_null() {
         return;
     }
-    let mut s = lock(&(*pd.instance).state);
+    let mut s = crate::fwd::lock_state(&*pd.instance);
     if let Some(d) = s.query(pd.remote, func, arg, 0, &[]) {
         if let Some(body) = d.get(16..16usize.min(e.size as usize) + body_len) {
             std::ptr::copy_nonoverlapping(body.as_ptr(), out, body.len().min(body_len));
@@ -494,7 +494,7 @@ unsafe extern "C" fn get_format_properties(p: *mut c_void, format: u32, out: *mu
 /// Rodziny kolejek: dwa wywołania (liczba, potem bloki po 40 B dla `*2` albo 24 B dla wersji bez `2`).
 unsafe fn queue_families(p: *mut c_void, count: *mut u32, out: *mut u8, stride: usize, v2: bool) {
     let (Some(pd), Some(count)) = (pdev(p), count.as_mut()) else { return };
-    let mut s = lock(&(*pd.instance).state);
+    let mut s = crate::fwd::lock_state(&*pd.instance);
     let Some(n) = s.query(pd.remote, PdFunc::QueueFamilyProperties2, 0, 0, &[]).map(|d| u32_at(&d, 0)) else { return };
     if out.is_null() {
         *count = n;
@@ -526,7 +526,7 @@ unsafe extern "C" fn get_queue_family_properties(p: *mut c_void, count: *mut u32
 unsafe extern "C" fn enumerate_device_extension_properties(p: *mut c_void, layer: *const c_char, count: *mut u32, out: *mut u8) -> VkResult {
     let (Some(pd), Some(count)) = (pdev(p), count.as_mut()) else { return VK_ERROR_INITIALIZATION_FAILED };
     let list = if layer.is_null() {
-        let mut s = lock(&(*pd.instance).state);
+        let mut s = crate::fwd::lock_state(&*pd.instance);
         match s.client.call(&Request::EnumDeviceExtensions { pdev: pd.remote }) {
             Ok(Response::Data(d)) => decode_extensions(&d)
                 .unwrap_or_default()

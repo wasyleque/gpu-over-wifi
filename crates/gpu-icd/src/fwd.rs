@@ -423,21 +423,42 @@ pub fn lock_report() -> String {
     )
 }
 
-unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
-    let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
-    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
-    let t_lock = std::time::Instant::now();
-    let mut st = lock(&inst.state);
-    LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-    LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let _hold = HoldTimer(std::time::Instant::now());
-    let fail = |e: i32| -> u64 { e as u32 as u64 };
-    if st.device_lost && cmd.ret == Ret::VkResult {
-        return fail(VK_ERROR_DEVICE_LOST);
-    }
-    // Argumenty -> sloty (odwrotność thunka serwera).
-    let params = cmd.params();
-    let mut slots = vec![0u64; params.len()];
+/// Bufor poleceń zapisu do bufora poleceń (`vkCmd*`) zbierany przez wątek BEZ globalnej blokady instancji: ponad 99% wejść do sterownika
+/// to takie polecenia, a blokada była zajęta w ok. 74% czasu (skan pamięci, wysyłka, czekanie na serwer), więc wątek gry stał w kolejce.
+/// Zawartość trafia do wspólnej partii przy najbliższym wejściu tego wątku w stan instancji (`lock_state`), czyli najpóźniej przy
+/// `vkEndCommandBuffer`, a bufor poleceń może zostać zgłoszony do wykonania dopiero po nim, więc kolejność poleceń każdego bufora jest zachowana.
+#[derive(Default)]
+struct LocalBatch {
+    buf: Vec<u8>,
+    count: u64,
+}
+
+thread_local! {
+    static LOCAL: std::cell::RefCell<LocalBatch> = std::cell::RefCell::new(LocalBatch::default());
+}
+
+/// Po tylu bajtach wątek sam przenosi swój bufor do wspólnej partii (żeby nie rósł bez końca między `vkEndCommandBuffer`).
+const LOCAL_FLUSH_BYTES: usize = 256 * 1024;
+
+/// Które polecenia mogą iść szybką ścieżką: `vkCmd*` bez wyniku i bez parametrów wyjściowych, klasy FireAndForget. Żadne z nich nie ma
+/// obsługi po nazwie w `exec` (wszystkie wyjątki to `vkCreate*`, `vkAllocate*`, `vkBind*`, `vkQueueSubmit*` itd.).
+fn fast_table() -> &'static [bool] {
+    static T: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        COMMANDS
+            .iter()
+            .map(|c| {
+                c.class == CmdClass::FireAndForget
+                    && c.name.starts_with("vkCmd")
+                    && c.ret == Ret::Void
+                    && !c.params().iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1)
+            })
+            .collect()
+    })
+}
+
+/// Zamienia argumenty wejścia ICD na sloty (odwrotność thunka serwera): liczby zmiennoprzecinkowe z rejestrów xmm, reszta z rejestrów całkowitych i stosu.
+fn fill_slots(params: &[gpu_proto::meta::MemberMeta], ints: &[u64; 14], floats: &[f64; 8], slots: &mut [u64]) {
     let (mut ii, mut fi) = (0, 0);
     for (k, p) in params.iter().enumerate() {
         slots[k] = match (p.shape, p.elem, p.type_name) {
@@ -455,6 +476,80 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             }
         };
     }
+}
+
+/// Koduje polecenie do bufora tego wątku bez blokady. `false` = nie obsłużono (idzie zwykłą ścieżką).
+///
+/// # Safety
+/// Argumenty muszą pochodzić z wywołania aplikacji zgodnego z sygnaturą polecenia.
+unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 14], floats: &[f64; 8]) -> bool {
+    let params = cmd.params();
+    let mut slots = [0u64; 32];
+    if params.len() > slots.len() || state().is_none() {
+        return false;
+    }
+    fill_slots(params, ints, floats, &mut slots);
+    let mut e = Encoder::new();
+    if encode_command(op, slots.as_ptr() as *const u8, &mut e, &IcdCtx).is_err() {
+        return false; // błąd zgłosi zwykła ścieżka (z komunikatem w logu)
+    }
+    let bytes = e.finish();
+    let full = LOCAL.with(|l| {
+        let mut l = l.borrow_mut();
+        l.buf.extend_from_slice(&bytes);
+        l.count += 1;
+        l.buf.len() >= LOCAL_FLUSH_BYTES
+    });
+    if full {
+        if let Some(inst) = state() {
+            drop(lock_state(inst));
+        }
+    }
+    true
+}
+
+/// Przenosi bufor poleceń tego wątku do wspólnej partii (pod blokadą stanu), żeby kolejność poleceń wątku względem jego następnych wywołań została zachowana.
+fn drain_local(st: &mut InstState) {
+    LOCAL.with(|l| {
+        let mut l = l.borrow_mut();
+        if !l.buf.is_empty() {
+            st.batch.extend_from_slice(&l.buf);
+            st.stats.commands += l.count;
+            l.buf.clear();
+            l.count = 0;
+        }
+    });
+    if st.batch.len() > BATCH_FLUSH {
+        st.flush();
+    }
+}
+
+/// Blokada stanu instancji z jednoczesnym przeniesieniem bufora poleceń tego wątku do wspólnej partii.
+pub(crate) fn lock_state(inst: &InstanceObj) -> std::sync::MutexGuard<'_, InstState> {
+    let mut g = lock(&inst.state);
+    drain_local(&mut g);
+    g
+}
+
+unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
+    let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    if fast_table().get(op as usize).copied().unwrap_or(false) && !flags().trace && fast_record(op, cmd, &ints, &floats) {
+        return 0;
+    }
+    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    let t_lock = std::time::Instant::now();
+    let mut st = lock_state(inst);
+    LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _hold = HoldTimer(std::time::Instant::now());
+    let fail = |e: i32| -> u64 { e as u32 as u64 };
+    if st.device_lost && cmd.ret == Ret::VkResult {
+        return fail(VK_ERROR_DEVICE_LOST);
+    }
+    // Argumenty -> sloty (odwrotność thunka serwera).
+    let params = cmd.params();
+    let mut slots = vec![0u64; params.len()];
+    fill_slots(params, &ints, &floats, &mut slots);
     if cmd.name == "vkCreateGraphicsPipelines" && flags().trace {
         for i in 0..slots.get(2).copied().unwrap_or(0).min(8) as usize {
             let info = (slots[3] as *const u8).add(i * 144);
@@ -986,7 +1081,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
 
 pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64, _flags: u32, out: *mut *mut u8) -> i32 {
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
-    let mut st = lock(&inst.state);
+    let mut st = lock_state(inst);
     let Some(total) = st.mem_sizes.get(&mem).copied() else { return VK_ERROR_MEMORY_MAP_FAILED };
     if offset > total || (size != u64::MAX && offset.saturating_add(size) > total) || out.is_null() {
         return VK_ERROR_MEMORY_MAP_FAILED;
@@ -999,7 +1094,7 @@ pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64,
 
 pub unsafe extern "C" fn unmap_memory(_dev: u64, mem: u64) {
     if let Some(inst) = state() {
-        let mut st = lock(&inst.state);
+        let mut st = lock_state(inst);
         let span = st.mems.get_mut(&mem).map(|s| {
             s.mapped = false;
             (s.data.as_ptr(), s.dirty_ranges())
@@ -1025,7 +1120,7 @@ unsafe fn ranges(count: u32, r: *const u8) -> Vec<(u64, u64, u64)> {
 
 pub unsafe extern "C" fn flush_ranges(_dev: u64, count: u32, r: *const u8) -> i32 {
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
-    let mut st = lock(&inst.state);
+    let mut st = lock_state(inst);
     for (mem, off, size) in ranges(count, r) {
         let Some(sh) = st.mems.get(&mem) else { continue };
         let end = if size == u64::MAX { sh.data.len() as u64 } else { off.saturating_add(size).min(sh.data.len() as u64) };
@@ -1040,7 +1135,7 @@ pub unsafe extern "C" fn flush_ranges(_dev: u64, count: u32, r: *const u8) -> i3
 
 pub unsafe extern "C" fn invalidate_ranges(_dev: u64, count: u32, r: *const u8) -> i32 {
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
-    let mut st = lock(&inst.state);
+    let mut st = lock_state(inst);
     let mut map: HashMap<u64, ()> = HashMap::new();
     for (mem, off, size) in ranges(count, r) {
         let Some(len) = st.mems.get(&mem).map(|s| s.data.len() as u64) else { continue };
@@ -1190,6 +1285,25 @@ mod memreq_target_tests {
             let s1 = [1u64, 55, out.as_mut_ptr() as u64];
             assert_eq!(memreq_target("vkGetBufferMemoryRequirements", &s1).unwrap().0, 55);
             assert!(memreq_target("vkCreateBuffer", &s1).is_none());
+        }
+    }
+
+    #[test]
+    fn only_plain_command_recording_takes_the_lock_free_fast_path() {
+        let idx = |name: &str| gpu_proto::meta::find_command(name).map(|(op, _)| op as usize).unwrap();
+        let t = fast_table();
+        for yes in ["vkCmdDraw", "vkCmdDrawIndexed", "vkCmdDispatch", "vkCmdBindPipeline", "vkCmdSetViewportWithCount", "vkCmdPipelineBarrier2", "vkCmdPushConstants"] {
+            assert!(t[idx(yes)], "{yes} powinno iść szybką ścieżką");
+        }
+        // Wszystko, co zwraca wynik, ma obsługę w `exec` albo potrzebuje kolejności względem blokady: zwykła ścieżka.
+        for no in ["vkEndCommandBuffer", "vkBeginCommandBuffer", "vkQueueSubmit", "vkQueueSubmit2", "vkCreateBuffer", "vkGetDescriptorEXT", "vkAllocateMemory", "vkWaitForFences", "vkResetCommandPool", "vkUpdateDescriptorSets"] {
+            assert!(!t[idx(no)], "{no} nie może iść szybką ścieżką");
+        }
+        // Żadne polecenie szybkiej ścieżki nie ma specjalnej obsługi po nazwie w `exec` (te zaczynają się od innych przedrostków).
+        for (op, c) in COMMANDS.iter().enumerate() {
+            if t[op] {
+                assert!(c.name.starts_with("vkCmd"), "{}", c.name);
+            }
         }
     }
 

@@ -12,7 +12,7 @@ use crate::fwd::{exec_named, exec_named_async};
 use crate::video::VideoThread;
 use crate::present::{rgba_to_bgra, Presenter};
 use crate::sbuild::S;
-use crate::{lock, with_local, InstState, InstanceObj, CURRENT};
+use crate::{with_local, InstState, InstanceObj, CURRENT};
 
 const VK_ERROR_INITIALIZATION_FAILED: i32 = -3;
 const VK_ERROR_OUT_OF_DATE: i32 = -1_000_001_004;
@@ -189,7 +189,7 @@ unsafe fn create_inner(st: &mut InstState, dev: u64, info: *const u8) -> Result<
 
 pub unsafe extern "C" fn create_swapchain(dev: u64, info: *const u8, _alloc: *const c_void, out: *mut u64) -> i32 {
     let (Some(inst), false, false) = (state(), info.is_null(), out.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
-    let mut st = lock(&inst.state);
+    let mut st = crate::fwd::lock_state(inst);
     match create_inner(&mut st, dev, info) {
         Ok(id) => {
             *out = id;
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn create_swapchain(dev: u64, info: *const u8, _alloc: *co
 
 pub unsafe extern "C" fn destroy_swapchain(dev: u64, sc: u64, _alloc: *const c_void) {
     let Some(inst) = state() else { return };
-    let mut st = lock(&inst.state);
+    let mut st = crate::fwd::lock_state(inst);
     let Some(mut sw) = st.swapchains.remove(&sc) else { return };
     if let Some(v) = sw.video.as_mut() {
         st.flush();
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn destroy_swapchain(dev: u64, sc: u64, _alloc: *const c_v
 
 pub unsafe extern "C" fn get_swapchain_images(_dev: u64, sc: u64, count: *mut u32, out: *mut u64) -> i32 {
     let (Some(inst), Some(count)) = (state(), count.as_mut()) else { return VK_ERROR_INITIALIZATION_FAILED };
-    let st = lock(&inst.state);
+    let st = crate::fwd::lock_state(inst);
     let Some(sw) = st.swapchains.get(&sc) else { return VK_ERROR_INITIALIZATION_FAILED };
     if out.is_null() {
         *count = sw.images.len() as u32;
@@ -259,7 +259,7 @@ unsafe fn acquire(st: &mut InstState, sc: u64, sem: u64, fence: u64, out: *mut u
 
 pub unsafe extern "C" fn acquire_next_image(_dev: u64, sc: u64, _timeout: u64, sem: u64, fence: u64, out: *mut u32) -> i32 {
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
-    let mut st = lock(&inst.state);
+    let mut st = crate::fwd::lock_state(inst);
     acquire(&mut st, sc, sem, fence, out)
 }
 
@@ -268,13 +268,13 @@ pub unsafe extern "C" fn acquire_next_image2(_dev: u64, info: *const u8, out: *m
     let (Some(sc), Some(sem), Some(fence)) = (rd::<u64>("VkAcquireNextImageInfoKHR", info, "swapchain"), rd::<u64>("VkAcquireNextImageInfoKHR", info, "semaphore"), rd::<u64>("VkAcquireNextImageInfoKHR", info, "fence")) else {
         return VK_ERROR_INITIALIZATION_FAILED;
     };
-    let mut st = lock(&inst.state);
+    let mut st = crate::fwd::lock_state(inst);
     acquire(&mut st, sc, sem, fence, out)
 }
 
 pub unsafe extern "C" fn queue_present(queue: u64, info: *const u8) -> i32 {
     let (Some(inst), false) = (state(), info.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
-    let mut st = lock(&inst.state);
+    let mut st = crate::fwd::lock_state(inst);
     let (Some(nwait), Some(waits), Some(nsc), Some(scs), Some(idxs), Some(results)) = (
         rd::<u32>("VkPresentInfoKHR", info, "waitSemaphoreCount"),
         rd::<*const u64>("VkPresentInfoKHR", info, "pWaitSemaphores"),
