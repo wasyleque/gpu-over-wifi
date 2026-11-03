@@ -4,9 +4,9 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 > **Status: early research project.** Things work in the lab, not yet in everyday use. Linux only for now (Windows client is planned).
 
-![FurMark (Vulkan) running on a laptop with a Ryzen 5 4500U, rendered on a remote RTX 3090 Ti: 33 FPS, 1280x720](docs/images/furmark-remote-rtx3090ti.png)
+![FurMark (Vulkan) running on a laptop with a Ryzen 5 4500U, rendered on a remote RTX 3090 Ti: 98 FPS on average, 1280x720](docs/images/furmark-remote-rtx3090ti.png)
 
-*FurMark (Vulkan) running on a Ryzen laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable, returned as H.264: 1280x720, about 31 FPS on average (window title shows the remote card). It is a GPU stress test, yet the remote GPU is mostly idle here, so the limit is our transport, not the card; that is what we are optimising.*
+*FurMark (Vulkan) running on a Ryzen laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable, returned as H.264: 1280x720, 98 FPS on average over 10 s (min 68, max 110; the window shows the remote card). It is a GPU stress test, yet the remote GPU is mostly idle here, so the limit is our transport, not the card; that is what we are optimising.*
 
 ## What is in here
 
