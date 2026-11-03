@@ -72,7 +72,17 @@ struct Sized {
     height_mbs: u32,
 }
 
+/// Czasy etapów dekodowania (ns, sumy) do diagnostyki: dekodowanie sprzętowe, kopiowanie z pamięci obrazu, konwersja do BGRA.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Timings {
+    pub frames: u64,
+    pub hw_decode_ns: u64,
+    pub copy_ns: u64,
+    pub convert_ns: u64,
+}
+
 pub struct VaDecoder {
+    pub timings: Timings,
     f: Fns,
     dpy: Dpy,
     _drm: std::fs::File,
@@ -143,7 +153,7 @@ impl VaDecoder {
             for profile in [VAProfileH264High, VAProfileH264Main] {
                 // SAFETY: atrybut i wskaźnik wyjściowy są poprawne.
                 if unsafe { (f.create_config)(dpy, profile, VAEntrypointVLD as i32, &mut attr, 1, &mut cfg) } == 0 {
-                    return Ok(VaDecoder { f, dpy, _drm: file, config: cfg, sized: None, sps: None, pps: None, refs: Vec::new(), next_surface: 0, poc: 0 });
+                    return Ok(VaDecoder { timings: Timings::default(), f, dpy, _drm: file, config: cfg, sized: None, sps: None, pps: None, refs: Vec::new(), next_surface: 0, poc: 0 });
                 }
             }
             last = format!("{}: brak dekodowania H.264 (VLD)", path.display());
@@ -301,6 +311,7 @@ impl VaDecoder {
             Ok(())
         };
         let mut data = nal.to_vec();
+        let t_hw = std::time::Instant::now();
         let res = (|| -> Result<(), String> {
             mk(self, VAPictureParameterBufferType as i32, std::mem::size_of_val(&pp), &mut pp as *mut _ as *mut c_void, &mut bufs)?;
             let mut iq = iq;
@@ -316,6 +327,7 @@ impl VaDecoder {
             }
             Ok(())
         })();
+        self.timings.hw_decode_ns += t_hw.elapsed().as_nanos() as u64;
         for b in bufs {
             // SAFETY: bufory utworzone powyżej.
             unsafe { (self.f.destroy_buffer)(self.dpy, b) };
@@ -332,7 +344,7 @@ impl VaDecoder {
         self.read_frame(target, &sps)
     }
 
-    fn read_frame(&self, surface: u32, sps: &Sps) -> Result<Frame, String> {
+    fn read_frame(&mut self, surface: u32, sps: &Sps) -> Result<Frame, String> {
         let mut img = VAImage::default();
         // SAFETY: powierzchnia jest zsynchronizowana; wskaźnik wyjściowy poprawny.
         self.ck("vaDeriveImage", unsafe { (self.f.derive_image)(self.dpy, surface, &mut img) })?;
@@ -341,13 +353,18 @@ impl VaDecoder {
         let st = unsafe { (self.f.map_buffer)(self.dpy, img.buf, &mut p) };
         let result = if st == 0 && !p.is_null() {
             // SAFETY: `data_size` bajtów jest dostępne do odblokowania bufora.
+            let t_copy = std::time::Instant::now();
             let mapped = unsafe { std::slice::from_raw_parts(p as *const u8, img.data_size as usize) };
             // Pamięć obrazu bywa niecache'owana: czytamy ją jednym sekwencyjnym kopiowaniem, nie bajt po bajcie.
             let data = mapped.to_vec();
+            self.timings.copy_ns += t_copy.elapsed().as_nanos() as u64;
+            let t_conv = std::time::Instant::now();
             let (cl, cr, ct, cb) = sps.crop;
             let (full_w, full_h) = (sps.width_mbs * 16, sps.height_mbs * 16);
             let (w, h) = (full_w.saturating_sub(cl + cr), full_h.saturating_sub(ct + cb));
             let r = nv12_to_bgra(&data, img.pitches[0] as usize, img.offsets[0] as usize, img.pitches[1] as usize, img.offsets[1] as usize, (cl as usize, ct as usize), (w as usize, h as usize));
+            self.timings.convert_ns += t_conv.elapsed().as_nanos() as u64;
+            self.timings.frames += 1;
             // SAFETY: bufor był zmapowany powyżej.
             unsafe { (self.f.unmap_buffer)(self.dpy, img.buf) };
             r.map(|bgra| Frame { width: w, height: h, bgra })

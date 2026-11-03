@@ -149,6 +149,11 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
             let _ = std::fs::write(path, ppm);
         }
     }
+    if let (Some(d), true) = (va.as_ref(), std::env::var("GPU_ICD_STATS").is_ok()) {
+        let t = d.timings;
+        let per = |v: u64| v as f64 / t.frames.max(1) as f64 / 1e6;
+        eprintln!("gpu-icd H.264 (na klatkę): dekodowanie sprzętowe {:.1} ms, kopia z pamięci obrazu {:.1} ms, konwersja do BGRA {:.1} ms ({} klatek)", per(t.hw_decode_ns), per(t.copy_ns), per(t.convert_ns), t.frames);
+    }
     if let Some(mut p) = presenter {
         with_local(|l| p.destroy(l));
     }
