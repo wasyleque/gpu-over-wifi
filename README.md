@@ -4,6 +4,10 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 > **Status: early research project.** Things work in the lab, not yet in everyday use. Linux only for now (Windows client is planned).
 
+![FurMark (Vulkan) running on a laptop with a Ryzen 5 4500U, rendered on a remote RTX 3090 Ti: 33 FPS, 1280x720](docs/images/furmark-remote-rtx3090ti.png)
+
+*FurMark (Vulkan) running on a Ryzen laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable, returned as H.264: 1280x720, about 31 FPS on average (window title shows the remote card). It is a GPU stress test, yet the remote GPU is mostly idle here, so the limit is our transport, not the card; that is what we are optimising.*
+
 ## What is in here
 
 - **GPU hub** (`hub-server`, `hub-client`, `hub-proto`) – a small server that watches the GPU, proxies AI requests (OpenAI-compatible API in front of Ollama) and decides who gets the GPU and when, so a big model and a game do not fight over VRAM. It can also run large models such as DeepSeek through [InferSSD](https://github.com/wici-ai/inferssd) (Apache-2.0) on a single consumer card by streaming weights from an NVMe drive.
@@ -14,7 +18,7 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 | Works | Not yet |
 |---|---|
-| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally | Real games (Proton/DXVK), page-diff memory sync, frame pacing |
+| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally | Smooth real games: a native Vulkan game (American Truck Simulator) renders correctly but stalls while loading; Proton/DXVK untested |
 | LZ4 and H.264 frame transport, selectable (`GPU_ICD_CODEC`) | Windows client driver, HEVC |
 | AI proxy with VRAM-aware scheduling, DeepSeek via InferSSD | Game-session reservations in the scheduler |
 
