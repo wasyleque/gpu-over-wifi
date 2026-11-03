@@ -201,33 +201,47 @@ impl InstState {
         self.stats.t_refresh_ns += t.elapsed().as_nanos() as u64;
     }
 
+    /// Odwzorowane pamięci, które po oczekiwaniu trzeba odświeżyć z serwera (mapowane i dozwolone do odczytu).
+    fn refresh_ids(&self) -> Vec<u64> {
+        self.mems.iter().filter(|(i, s)| s.mapped && self.mem_refresh.get(i).copied().unwrap_or(true)).map(|(i, _)| *i).collect()
+    }
+
+    /// Wpisuje odpowiedź `MemReadDelta` do lokalnej kopii pamięci `id`; zwraca `true`, gdy serwer ma jeszcze zmiany do wysłania.
+    fn apply_delta(&mut self, id: u64, d: &[u8]) -> bool {
+        let Some((more, segs)) = gpu_proto::pagediff::decode_segments(d) else { return false };
+        for (off, body) in segs {
+            self.stats.memr_bytes += body.len() as u64;
+            let (a, b) = (off as usize, off as usize + body.len());
+            // Kopiujemy do istniejącego bufora: aplikacja trzyma wskaźnik z `vkMapMemory`.
+            if let Some(s) = self.mems.get_mut(&id) {
+                if b <= s.data.len() {
+                    s.data[a..b].copy_from_slice(body);
+                    s.mark_synced(a, b);
+                }
+            }
+        }
+        more
+    }
+
+    /// Dociąga resztę zmian pamięci `id`, gdy pierwsza odpowiedź nie zmieściła się w limicie.
+    fn drain_delta(&mut self, id: u64) {
+        loop {
+            self.flush();
+            self.stats.roundtrips += 1;
+            let Ok(Response::Data(d)) = self.client.call(&Request::MemReadDelta { memory: id }) else { return };
+            if !self.apply_delta(id, &d) {
+                return;
+            }
+        }
+    }
+
     fn read_mapped_inner(&mut self) {
         if !std::mem::take(&mut self.gpu_dirty) {
             return;
         }
         self.stats.refreshes += 1;
-        let ids: Vec<u64> = self.mems.iter().filter(|(i, s)| s.mapped && self.mem_refresh.get(i).copied().unwrap_or(true)).map(|(i, _)| *i).collect();
-        for id in ids {
-            loop {
-                self.flush();
-                self.stats.roundtrips += 1;
-                let Ok(Response::Data(d)) = self.client.call(&Request::MemReadDelta { memory: id }) else { break };
-                let Some((more, segs)) = gpu_proto::pagediff::decode_segments(&d) else { break };
-                for (off, body) in segs {
-                    self.stats.memr_bytes += body.len() as u64;
-                    let (a, b) = (off as usize, off as usize + body.len());
-                    // Kopiujemy do istniejącego bufora: aplikacja trzyma wskaźnik z `vkMapMemory`.
-                    if let Some(s) = self.mems.get_mut(&id) {
-                        if b <= s.data.len() {
-                            s.data[a..b].copy_from_slice(body);
-                            s.mark_synced(a, b);
-                        }
-                    }
-                }
-                if !more {
-                    break;
-                }
-            }
+        for id in self.refresh_ids() {
+            self.drain_delta(id);
         }
     }
 }
@@ -583,9 +597,31 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     st.flush();
     st.stats.query_bytes += bytes.len() as u64;
     st.stats.roundtrips += 1;
-    let ok = st.client.send(&Request::Query { data: bytes }).is_ok() && st.client.send(&Request::Sync).is_ok();
+    // Po oczekiwaniu trzeba odświeżyć odwzorowane pamięci: żądania wysyłamy zaraz za `Sync`, w tym samym obiegu po sieci.
+    let pre_ids: Vec<u64> = if cmd.class == CmdClass::Sync && st.gpu_dirty { st.refresh_ids() } else { Vec::new() };
+    let mut ok = st.client.send(&Request::Query { data: bytes }).is_ok() && st.client.send(&Request::Sync).is_ok();
+    for id in &pre_ids {
+        ok = ok && st.client.send(&Request::MemReadDelta { memory: *id }).is_ok();
+    }
     let t_recv = std::time::Instant::now();
     let (q, sy) = if ok { (st.client.recv(), st.client.recv()) } else { (Err(gpu_renderd::client::ClientError::Closed), Err(gpu_renderd::client::ClientError::Closed)) };
+    // Odpowiedzi na odświeżenia przychodzą zawsze, więc czytamy je od razu (także przy późniejszym błędzie), żeby nie rozsynchronizować strumienia.
+    let t_refresh = std::time::Instant::now();
+    let mut refreshed = false;
+    if ok {
+        for id in &pre_ids {
+            if let Ok(Response::Data(d)) = st.client.recv() {
+                if st.apply_delta(*id, &d) {
+                    st.drain_delta(*id);
+                }
+                refreshed = true;
+            }
+        }
+    }
+    if refreshed {
+        st.stats.refreshes += 1;
+        st.stats.t_refresh_ns += t_refresh.elapsed().as_nanos() as u64;
+    }
     st.stats.t_syncrecv_ns += t_recv.elapsed().as_nanos() as u64;
     if let Ok(Response::Synced { error }) = sy {
         if error < 0 {
@@ -629,7 +665,12 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         }
     }
     if cmd.class == CmdClass::Sync && result == 0 {
-        st.read_mapped();
+        if refreshed {
+            // Pamięci zostały odświeżone w tym samym obiegu co oczekiwanie.
+            st.gpu_dirty = false;
+        } else {
+            st.read_mapped();
+        }
     }
     fail(result)
 }
