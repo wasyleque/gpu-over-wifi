@@ -392,10 +392,45 @@ pub unsafe extern "C" fn entry<const OP: u16>(a0: u64, a1: u64, a2: u64, a3: u64
     forward(OP, [a0, a1, a2, a3, a4, a5, s0, s1, s2, s3, s4, s5, s6, s7], [x0, x1, x2, x3, x4, x5, x6, x7])
 }
 
+/// Pomiar blokady instancji: łączny czas oczekiwania na nią, czas trzymania i liczba wejść (widoczne w statystykach).
+/// Pokazuje, czy wątki gry czekają jeden na drugiego (np. gdy `vkQueueSubmit` skanuje i wysyła pamięć pod blokadą).
+static LOCK_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOCK_HOLD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOCK_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Najdłuższe pojedyncze trzymanie blokady w ns (ogon opóźnień).
+static LOCK_HOLD_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct HoldTimer(std::time::Instant);
+
+impl Drop for HoldTimer {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let ns = self.0.elapsed().as_nanos() as u64;
+        LOCK_HOLD_NS.fetch_add(ns, Relaxed);
+        LOCK_HOLD_MAX_NS.fetch_max(ns, Relaxed);
+    }
+}
+
+/// Opis pomiaru blokady do statystyk.
+pub fn lock_report() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    format!(
+        "blokada instancji: oczekiwanie {:.0} ms, trzymanie {:.0} ms w {} wejściach, najdłuższe trzymanie {:.1} ms",
+        LOCK_WAIT_NS.load(Relaxed) as f64 / 1e6,
+        LOCK_HOLD_NS.load(Relaxed) as f64 / 1e6,
+        LOCK_ENTRIES.load(Relaxed),
+        LOCK_HOLD_MAX_NS.load(Relaxed) as f64 / 1e6
+    )
+}
+
 unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    let t_lock = std::time::Instant::now();
     let mut st = lock(&inst.state);
+    LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _hold = HoldTimer(std::time::Instant::now());
     let fail = |e: i32| -> u64 { e as u32 as u64 };
     if st.device_lost && cmd.ret == Ret::VkResult {
         return fail(VK_ERROR_DEVICE_LOST);
@@ -471,6 +506,7 @@ fn periodic_stats(stats: &Stats) {
     if last.is_none_or(|t| now.duration_since(t).as_secs() >= 5) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
+        eprintln!("[gpu-icd] {}", lock_report());
         if let Some(l) = crate::latency::report_and_reset() {
             eprintln!("[gpu-icd] {l}");
         }
