@@ -383,49 +383,64 @@ unsafe fn is_cached_type(st: &mut InstState, slots: &[u64], cmd: &gpu_proto::met
     props.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8 != 0).unwrap_or(true)
 }
 
-/// Rozpoznaje zapytania o wymagania pamięci: zwraca (obiekt, wskaźnik na wynik, czy wariant `2`, czy to obraz).
-unsafe fn memreq_target(name: &str, slots: &[u64]) -> Option<(u64, *mut u8, bool)> {
-    let two = name.ends_with("2");
-    let image = match name {
-        "vkGetImageMemoryRequirements" | "vkGetImageMemoryRequirements2" => true,
-        "vkGetBufferMemoryRequirements" | "vkGetBufferMemoryRequirements2" => false,
+const STYPE_MEMORY_DEDICATED_REQUIREMENTS: u32 = 1_000_127_000;
+
+/// Rozpoznaje zapytania o wymagania pamięci: (obiekt, wskaźnik na `VkMemoryRequirements`, wskaźnik na ewentualne
+/// `VkMemoryDedicatedRequirements` w odpowiedzi). `None`, gdy zapytanie ma inne rozszerzenia (nie cache'ujemy).
+unsafe fn memreq_target(name: &str, slots: &[u64]) -> Option<(u64, *mut u8, Option<*mut u8>)> {
+    let two = name.ends_with('2');
+    match name {
+        "vkGetImageMemoryRequirements" | "vkGetImageMemoryRequirements2" | "vkGetBufferMemoryRequirements" | "vkGetBufferMemoryRequirements2" => {}
         _ => return None,
-    };
-    let _ = image;
+    }
     if slots.len() < 3 || slots[2] == 0 {
         return None;
     }
-    if two {
-        // pInfo: sType @0, pNext @8 (musi być puste), obiekt @16; wynik: VkMemoryRequirements2 (pNext @8 puste, dane @16).
-        let (info, out) = (slots[1] as *const u8, slots[2] as *mut u8);
-        if info.is_null() || std::ptr::read_unaligned(info.add(8) as *const u64) != 0 || std::ptr::read_unaligned(out.add(8) as *const u64) != 0 {
+    if !two {
+        return Some((slots[1], slots[2] as *mut u8, None));
+    }
+    // pInfo: sType @0, pNext @8 (musi być puste), obiekt @16; wynik: VkMemoryRequirements2 (dane @16, pNext @8).
+    let (info, out) = (slots[1] as *const u8, slots[2] as *mut u8);
+    if info.is_null() || std::ptr::read_unaligned(info.add(8) as *const u64) != 0 {
+        return None;
+    }
+    let next = std::ptr::read_unaligned(out.add(8) as *const u64) as *mut u8;
+    let dedicated = if next.is_null() {
+        None
+    } else {
+        // Jedyny dozwolony element łańcucha odpowiedzi: VkMemoryDedicatedRequirements bez dalszego pNext.
+        if std::ptr::read_unaligned(next as *const u32) != STYPE_MEMORY_DEDICATED_REQUIREMENTS || std::ptr::read_unaligned(next.add(8) as *const u64) != 0 {
             return None;
         }
-        Some((std::ptr::read_unaligned(info.add(16) as *const u64), out.add(16), true))
-    } else {
-        Some((slots[1], slots[2] as *mut u8, false))
-    }
+        Some(next)
+    };
+    Some((std::ptr::read_unaligned(info.add(16) as *const u64), out.add(16), dedicated))
 }
 
 /// Odpowiedź z cache; `Some(0)` oznacza, że wynik został wpisany i polecenie jest załatwione.
 unsafe fn memreq_cached(st: &mut InstState, name: &str, slots: &[u64]) -> Option<u64> {
-    let (obj, out, _) = memreq_target(name, slots)?;
+    let (obj, out, dedicated) = memreq_target(name, slots)?;
     let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
-    let (size, align, bits) = st.memreq.lookup(dev, obj)?;
+    let (size, align, bits, ded) = st.memreq.lookup(dev, obj, dedicated.is_some())?;
     std::ptr::write_unaligned(out as *mut u64, size);
     std::ptr::write_unaligned(out.add(8) as *mut u64, align);
     std::ptr::write_unaligned(out.add(16) as *mut u32, bits);
+    if let (Some(node), Some((prefers, requires))) = (dedicated, ded) {
+        std::ptr::write_unaligned(node.add(16) as *mut u32, prefers);
+        std::ptr::write_unaligned(node.add(20) as *mut u32, requires);
+    }
     Some(0)
 }
 
 /// Po prawdziwej odpowiedzi serwera zapamiętuje wynik dla klucza tego obiektu.
 unsafe fn memreq_store(st: &mut InstState, name: &str, slots: &[u64]) {
-    let Some((obj, out, _)) = memreq_target(name, slots) else { return };
+    let Some((obj, out, dedicated)) = memreq_target(name, slots) else { return };
     let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
     let size = std::ptr::read_unaligned(out as *const u64);
     let align = std::ptr::read_unaligned(out.add(8) as *const u64);
     let bits = std::ptr::read_unaligned(out.add(16) as *const u32);
-    st.memreq.store(dev, obj, (size, align, bits));
+    let ded = dedicated.map(|n| (std::ptr::read_unaligned(n.add(16) as *const u32), std::ptr::read_unaligned(n.add(20) as *const u32)));
+    st.memreq.store(dev, obj, (size, align, bits, ded));
 }
 
 /// Rozwija `vkUpdateDescriptorSetWithTemplate(device, set, template, pData)` do `vkUpdateDescriptorSets` z jawnymi zapisami.
@@ -847,5 +862,41 @@ mod shadow_tests {
         let mut s = Shadow::new(PAGE * 8);
         s.data[PAGE * 2] = 1;
         assert_eq!(s.dirty_ranges(), vec![(PAGE * 2, PAGE * 3)]);
+    }
+}
+
+#[cfg(test)]
+mod memreq_target_tests {
+    use super::*;
+
+    #[test]
+    fn dedicated_requirements_chain_is_accepted_but_other_chains_and_info_pnext_are_not() {
+        let mut info = [0u64; 3]; // VkImageMemoryRequirementsInfo2: obiekt @16
+        info[2] = 77;
+        let mut node = [0u64; 3]; // VkMemoryDedicatedRequirements
+        node[0] = STYPE_MEMORY_DEDICATED_REQUIREMENTS as u64;
+        let mut out = [0u64; 5]; // VkMemoryRequirements2
+        out[1] = node.as_mut_ptr() as u64;
+        let slots = [1u64, info.as_ptr() as u64, out.as_mut_ptr() as u64];
+        unsafe {
+            let (obj, _, ded) = memreq_target("vkGetImageMemoryRequirements2", &slots).unwrap();
+            assert_eq!(obj, 77);
+            assert_eq!(ded, Some(node.as_mut_ptr() as *mut u8));
+            // Inny typ struktury w odpowiedzi => brak cache.
+            node[0] = 1_000_000_000;
+            assert!(memreq_target("vkGetImageMemoryRequirements2", &slots).is_none());
+            // Dalszy element w łańcuchu => brak cache.
+            node[0] = STYPE_MEMORY_DEDICATED_REQUIREMENTS as u64;
+            node[1] = 0xABC;
+            assert!(memreq_target("vkGetImageMemoryRequirements2", &slots).is_none());
+            node[1] = 0;
+            // pNext w pInfo => brak cache.
+            info[1] = 0x1234;
+            assert!(memreq_target("vkGetImageMemoryRequirements2", &slots).is_none());
+            // Wariant bez „2" i obcy command.
+            let s1 = [1u64, 55, out.as_mut_ptr() as u64];
+            assert_eq!(memreq_target("vkGetBufferMemoryRequirements", &s1).unwrap().0, 55);
+            assert!(memreq_target("vkCreateBuffer", &s1).is_none());
+        }
     }
 }

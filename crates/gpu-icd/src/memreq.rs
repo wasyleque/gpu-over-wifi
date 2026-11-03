@@ -4,8 +4,9 @@
 
 use std::collections::HashMap;
 
-/// Wynik zapytania: rozmiar, wyrównanie, maska typów pamięci (`VkMemoryRequirements`).
-pub type Requirements = (u64, u64, u32);
+/// Wynik zapytania: rozmiar, wyrównanie, maska typów pamięci (`VkMemoryRequirements`) oraz opcjonalnie flagi z
+/// `VkMemoryDedicatedRequirements` (`prefers`, `requires`), gdy aplikacja dołączyła tę strukturę do odpowiedzi.
+pub type Requirements = (u64, u64, u32, Option<(u32, u32)>);
 
 #[derive(Default)]
 pub struct MemReqCache {
@@ -65,9 +66,11 @@ impl MemReqCache {
         self.keys.remove(&id);
     }
 
-    pub fn lookup(&self, device: u64, id: u64) -> Option<Requirements> {
+    /// Wynik z cache; gdy aplikacja prosi też o `VkMemoryDedicatedRequirements` (`want_dedicated`), wpis musi je zawierać.
+    pub fn lookup(&self, device: u64, id: u64, want_dedicated: bool) -> Option<Requirements> {
         let k = self.keys.get(&id)?;
-        self.results.get(&(device, k.clone())).copied()
+        let r = self.results.get(&(device, k.clone())).copied()?;
+        (!want_dedicated || r.3.is_some()).then_some(r)
     }
 
     pub fn store(&mut self, device: u64, id: u64, r: Requirements) {
@@ -107,13 +110,16 @@ mod tests {
             c.object_created(2, MemReqCache::image_key(b.as_ptr()));
             c.object_created(3, MemReqCache::image_key(d.as_ptr()));
         }
-        assert_eq!(c.lookup(9, 1), None, "pierwsze zapytanie idzie do serwera");
-        c.store(9, 1, (4096, 256, 0x3));
-        assert_eq!(c.lookup(9, 2), Some((4096, 256, 0x3)), "identyczny obraz trafia w cache");
-        assert_eq!(c.lookup(9, 3), None, "inny rozmiar: osobny wynik");
-        assert_eq!(c.lookup(8, 2), None, "inne urządzenie: osobny wynik");
+        assert_eq!(c.lookup(9, 1, false), None, "pierwsze zapytanie idzie do serwera");
+        c.store(9, 1, (4096, 256, 0x3, None));
+        assert_eq!(c.lookup(9, 2, false), Some((4096, 256, 0x3, None)), "identyczny obraz trafia w cache");
+        assert_eq!(c.lookup(9, 3, false), None, "inny rozmiar: osobny wynik");
+        assert_eq!(c.lookup(8, 2, false), None, "inne urządzenie: osobny wynik");
+        assert_eq!(c.lookup(9, 2, true), None, "wpis bez flag dedykowanych nie obsłuży zapytania z VkMemoryDedicatedRequirements");
+        c.store(9, 2, (4096, 256, 0x3, Some((1, 0))));
+        assert_eq!(c.lookup(9, 1, true), Some((4096, 256, 0x3, Some((1, 0)))), "ten sam klucz, wpis rozszerzony o flagi");
         c.object_destroyed(2);
-        assert_eq!(c.lookup(9, 2), None);
+        assert_eq!(c.lookup(9, 2, false), None);
     }
 
     #[test]
@@ -137,7 +143,7 @@ mod tests {
             c.object_created(1, MemReqCache::image_key(i.as_ptr()));
             c.object_created(2, MemReqCache::buffer_key(b.as_ptr()));
         }
-        c.store(1, 1, (1, 1, 1));
-        assert_eq!(c.lookup(1, 2), None);
+        c.store(1, 1, (1, 1, 1, None));
+        assert_eq!(c.lookup(1, 2, false), None);
     }
 }
