@@ -36,6 +36,28 @@ const DISPATCHABLE: &[&str] = &["VkInstance", "VkPhysicalDevice", "VkDevice", "V
 pub struct DispObj {
     loader_data: usize,
     id: u64,
+    /// Dla bufora poleceń: zakodowane `vkCmd*` jeszcze niewysłane do wspólnej partii (szybka ścieżka, patrz `fast_record`). Bufor jest
+    /// PER BUFOR POLECEŃ, a nie per wątek: vkd3d-proton nagrywa jeden bufor na kilku wątkach, a polecenia z wątku A nie mogą wyprzedzić
+    /// `vkEndCommandBuffer` wywołanego na wątku B (serwer dostawał `vkCmd*` po zamknięciu bufora i sterownik NVIDIA kończył się segfaultem).
+    pending: std::sync::Mutex<Vec<u8>>,
+}
+
+impl DispObj {
+    pub(crate) fn new(id: u64) -> DispObj {
+        DispObj { loader_data: 0, id, pending: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    /// Dopisuje zakodowane polecenie; zwraca, czy bufor osiągnął próg opróżnienia.
+    fn push(&self, bytes: &[u8]) -> bool {
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        p.extend_from_slice(bytes);
+        p.len() >= LOCAL_FLUSH_BYTES
+    }
+
+    /// Wydaje zebrane polecenia (kolejność zachowana) i czyści bufor.
+    fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 /// Liczniki ruchu do pomiaru bazowego (M2): ile bajtów i obiegów kosztuje naiwne przekazywanie.
@@ -404,6 +426,9 @@ static LOCK_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// Najdłuższe pojedyncze trzymanie blokady w ns (ogon opóźnień).
 static LOCK_HOLD_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Liczba poleceń obsłużonych szybką ścieżką (bez blokady instancji).
+static FAST_COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct HoldTimer(std::time::Instant);
 
 impl Drop for HoldTimer {
@@ -419,62 +444,19 @@ impl Drop for HoldTimer {
 pub fn lock_report() -> String {
     use std::sync::atomic::Ordering::Relaxed;
     format!(
-        "blokada instancji: oczekiwanie {:.0} ms, trzymanie {:.0} ms w {} wejściach, najdłuższe trzymanie {:.1} ms",
+        "blokada instancji: oczekiwanie {:.0} ms, trzymanie {:.0} ms w {} wejściach, najdłuższe trzymanie {:.1} ms, szybka ścieżka {} poleceń",
         LOCK_WAIT_NS.load(Relaxed) as f64 / 1e6,
         LOCK_HOLD_NS.load(Relaxed) as f64 / 1e6,
         LOCK_ENTRIES.load(Relaxed),
-        LOCK_HOLD_MAX_NS.load(Relaxed) as f64 / 1e6
+        LOCK_HOLD_MAX_NS.load(Relaxed) as f64 / 1e6,
+        FAST_COMMANDS.load(Relaxed)
     )
 }
 
-/// Bufor poleceń zapisu do bufora poleceń (`vkCmd*`) zbierany przez wątek BEZ globalnej blokady instancji: ponad 99% wejść do sterownika
-/// to takie polecenia, a blokada była zajęta w ok. 74% czasu (skan pamięci, wysyłka, czekanie na serwer), więc wątek gry stał w kolejce.
-/// Zawartość trafia do wspólnej partii przy najbliższym wejściu tego wątku w stan instancji (`lock_state`), czyli najpóźniej przy
-/// `vkEndCommandBuffer`, a bufor poleceń może zostać zgłoszony do wykonania dopiero po nim, więc kolejność poleceń każdego bufora jest zachowana.
-#[derive(Default)]
-struct LocalBatch {
-    buf: Vec<u8>,
-    count: u64,
-    /// Pokolenie instancji, dla którego zebrano polecenia: bufor z innego pokolenia jest odrzucany (patrz `GENERATION`).
-    generation: u64,
-}
-
-/// Numer pokolenia instancji sterownika, zwiększany przy tworzeniu i niszczeniu instancji. Uchwyty są numerowane od początku dla każdej
-/// instancji, więc polecenia nagrane dla poprzedniej (np. urządzenia testowego vkd3d-proton) NIE mogą trafić do strumienia następnej:
-/// te same liczby oznaczałyby inne obiekty, a sterownik NVIDIA na serwerze kończył się wtedy zerowym wskaźnikiem.
-static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-pub(crate) fn bump_generation() {
-    GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-}
-
-impl LocalBatch {
-    /// Dopisuje zakodowane polecenie; bufor z innego pokolenia jest najpierw wyrzucany. Zwraca, czy bufor osiągnął próg opróżnienia.
-    fn push(&mut self, generation: u64, bytes: &[u8]) -> bool {
-        if self.generation != generation {
-            self.buf.clear();
-            self.count = 0;
-            self.generation = generation;
-        }
-        self.buf.extend_from_slice(bytes);
-        self.count += 1;
-        self.buf.len() >= LOCAL_FLUSH_BYTES
-    }
-
-    /// Zawartość do wspólnej partii: pusta, jeśli bufor pochodzi z innego pokolenia (wtedy jest odrzucany).
-    fn take(&mut self, generation: u64) -> (Vec<u8>, u64) {
-        let out = if self.generation == generation { (std::mem::take(&mut self.buf), self.count) } else { (Vec::new(), 0) };
-        self.buf.clear();
-        self.count = 0;
-        out
-    }
-}
-
-thread_local! {
-    static LOCAL: std::cell::RefCell<LocalBatch> = std::cell::RefCell::new(LocalBatch::default());
-}
-
-/// Po tylu bajtach wątek sam przenosi swój bufor do wspólnej partii (żeby nie rósł bez końca między `vkEndCommandBuffer`).
+/// Szybka ścieżka poleceń zapisu do bufora poleceń (`vkCmd*`): ponad 99% wejść do sterownika, a globalna blokada instancji była zajęta w ok. 74%
+/// czasu (skan pamięci, wysyłka, czekanie na serwer), więc wątek gry stał w kolejce. Polecenia są kodowane do bufora **danego bufora poleceń**
+/// (`DispObj::pending`) pod jego własnym mutexem, a do wspólnej partii trafiają przy `vkEndCommandBuffer` (i przy progu rozmiaru).
+/// Po tylu bajtach bufor poleceń jest przenoszony do wspólnej partii (żeby nie rósł bez końca między `vkEndCommandBuffer`).
 const LOCAL_FLUSH_BYTES: usize = 256 * 1024;
 
 /// Które polecenia mogą iść szybką ścieżką: `vkCmd*` bez wyniku i bez parametrów wyjściowych, klasy FireAndForget. Żadne z nich nie ma
@@ -488,6 +470,7 @@ fn fast_table() -> &'static [bool] {
                 c.class == CmdClass::FireAndForget
                     && c.name.starts_with("vkCmd")
                     && c.ret == Ret::Void
+                    && c.params().first().is_some_and(|p| p.type_name == "VkCommandBuffer" && p.elem == Elem::Handle)
                     && !c.params().iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1)
             })
             .collect()
@@ -531,34 +514,44 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
         return false; // błąd zgłosi zwykła ścieżka (z komunikatem w logu)
     }
     let bytes = e.finish();
-    let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
-    let full = LOCAL.with(|l| l.borrow_mut().push(generation, &bytes));
-    if full {
+    // Pierwszy parametr każdego `vkCmd*` to bufor poleceń: wskaźnik na nasz `DispObj`.
+    let cb = slots[0] as *const DispObj;
+    if cb.is_null() {
+        return false;
+    }
+    // SAFETY: uchwyt bufora poleceń to wskaźnik na obiekt ICD żyjący do `vkFreeCommandBuffers`/zniszczenia puli.
+    if (*cb).push(&bytes) {
+        let data = (*cb).take();
         if let Some(inst) = state() {
-            drop(lock_state(inst));
+            let mut st = lock_state(inst);
+            st.batch.extend_from_slice(&data);
+            st.stats.commands += 1;
+            if st.batch.len() > BATCH_FLUSH {
+                st.flush();
+            }
         }
     }
+    FAST_COMMANDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     true
 }
 
-/// Przenosi bufor poleceń tego wątku do wspólnej partii (pod blokadą stanu), żeby kolejność poleceń wątku względem jego następnych wywołań została zachowana.
-fn drain_local(st: &mut InstState) {
-    let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
-    let (buf, count) = LOCAL.with(|l| l.borrow_mut().take(generation));
-    if !buf.is_empty() {
-        st.batch.extend_from_slice(&buf);
-        st.stats.commands += count;
+/// Przenosi zebrane polecenia bufora poleceń `cb` do wspólnej partii (pod blokadą stanu), przed `vkEndCommandBuffer` i podobnymi.
+///
+/// # Safety
+/// `cb` musi być zerem albo wskaźnikiem na żywy `DispObj` bufora poleceń.
+unsafe fn drain_cb(st: &mut InstState, cb: u64) {
+    if cb == 0 {
+        return;
     }
-    if st.batch.len() > BATCH_FLUSH {
-        st.flush();
+    let data = (*(cb as *const DispObj)).take();
+    if !data.is_empty() {
+        st.batch.extend_from_slice(&data);
     }
 }
 
-/// Blokada stanu instancji z jednoczesnym przeniesieniem bufora poleceń tego wątku do wspólnej partii.
+/// Blokada stanu instancji.
 pub(crate) fn lock_state(inst: &InstanceObj) -> std::sync::MutexGuard<'_, InstState> {
-    let mut g = lock(&inst.state);
-    drain_local(&mut g);
-    g
+    lock(&inst.state)
 }
 
 unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
@@ -580,6 +573,9 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let params = cmd.params();
     let mut slots = vec![0u64; params.len()];
     fill_slots(params, &ints, &floats, &mut slots);
+    if matches!(cmd.name, "vkEndCommandBuffer" | "vkResetCommandBuffer" | "vkBeginCommandBuffer") {
+        drain_cb(&mut st, slots[0]);
+    }
     if cmd.name == "vkCreateGraphicsPipelines" && flags().trace {
         for i in 0..slots.get(2).copied().unwrap_or(0).min(8) as usize {
             let info = (slots[3] as *const u8).add(i * 144);
@@ -962,7 +958,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     // Obiekty dyspozycyjne: aplikacja dostaje wskaźnik na obiekt ICD, a w protokole obowiązuje jego identyfikator.
     for (slot, id) in disp_outs {
-        let obj = Box::into_raw(Box::new(DispObj { loader_data: 0, id }));
+        let obj = Box::into_raw(Box::new(DispObj::new(id)));
         std::ptr::write_unaligned(slot, obj as u64);
         if cmd.name == "vkGetDeviceQueue" {
             let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
@@ -1338,22 +1334,19 @@ mod memreq_target_tests {
     }
 
     #[test]
-    fn local_commands_from_an_older_instance_generation_are_discarded() {
-        let mut l = LocalBatch::default();
-        assert!(!l.push(1, &[1, 2, 3]));
-        assert!(!l.push(1, &[4, 5]));
-        // Ta sama generacja: zawartość i licznik zostają wydane, bufor jest pusty.
-        assert_eq!(l.take(1), (vec![1, 2, 3, 4, 5], 2));
-        assert_eq!(l.take(1), (Vec::new(), 0));
-        // Polecenia z pokolenia 1 nie mogą trafić do pokolenia 2.
-        l.push(1, &[9, 9, 9]);
-        assert_eq!(l.take(2), (Vec::new(), 0));
-        // Nowy push w nowym pokoleniu wyrzuca zaległości starego.
-        l.push(1, &[7]);
-        l.push(3, &[8]);
-        assert_eq!(l.take(3), (vec![8], 1));
-        // Próg opróżnienia.
-        assert!(l.push(3, &vec![0u8; LOCAL_FLUSH_BYTES]));
+    fn commands_of_one_command_buffer_keep_their_order_when_recorded_on_two_threads() {
+        // vkd3d-proton: wątek A nagrywa część bufora, wątek B resztę i zamyka go; polecenia A nie mogą wyprzedzić End z wątku B.
+        let cb = std::sync::Arc::new(DispObj::new(7));
+        let a = { let cb = cb.clone(); std::thread::spawn(move || { cb.push(&[1, 2]); cb.push(&[3]); }) };
+        a.join().unwrap();
+        let b = { let cb = cb.clone(); std::thread::spawn(move || { cb.push(&[4]); cb.take() }) };
+        assert_eq!(b.join().unwrap(), vec![1, 2, 3, 4], "polecenia z obu wątków w kolejności nagrywania");
+        assert!(cb.take().is_empty());
+        // Bufory różnych buforów poleceń są niezależne; próg opróżnienia.
+        let other = DispObj::new(8);
+        assert!(!other.push(&[9]));
+        assert!(other.push(&vec![0u8; LOCAL_FLUSH_BYTES]));
+        assert!(cb.take().is_empty());
     }
 
 }

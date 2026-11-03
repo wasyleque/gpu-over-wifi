@@ -354,7 +354,6 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             token: token.clone(),
         }),
     }));
-    fwd::bump_generation();
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
     {
         let mut st = crate::fwd::lock_state(&*obj);
@@ -385,9 +384,7 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
     }
     CURRENT.store(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
     let obj = Box::from_raw(inst);
-    // Najpierw wspólna partia dostaje to, co ten wątek nagrał dla niszczonej instancji, dopiero potem zaczyna się nowe pokolenie.
     let mut st = crate::fwd::lock_state(&obj);
-    fwd::bump_generation();
     st.flush();
     fwd::trace_flush();
     if std::env::var("GPU_ICD_STATS").is_ok() {
