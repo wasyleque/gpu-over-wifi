@@ -469,6 +469,8 @@ fn fast_table() -> &'static [bool] {
             .map(|c| {
                 c.class == CmdClass::FireAndForget
                     && c.name.starts_with("vkCmd")
+                    // Wykonanie buforów wtórnych zależy od ich zawartości na serwerze: zawsze zwykłą ścieżką (przegląd agy).
+                    && c.name != "vkCmdExecuteCommands"
                     && c.ret == Ret::Void
                     && c.params().first().is_some_and(|p| p.type_name == "VkCommandBuffer" && p.elem == Elem::Handle)
                     && !c.params().iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1)
@@ -573,8 +575,13 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let params = cmd.params();
     let mut slots = vec![0u64; params.len()];
     fill_slots(params, &ints, &floats, &mut slots);
-    if matches!(cmd.name, "vkEndCommandBuffer" | "vkResetCommandBuffer" | "vkBeginCommandBuffer") {
-        drain_cb(&mut st, slots[0]);
+    match cmd.name {
+        // Zamknięcie nagrywania: wszystko, co ten bufor zebrał, idzie do wspólnej partii PRZED `vkEndCommandBuffer`.
+        "vkEndCommandBuffer" => drain_cb(&mut st, slots[0]),
+        // Początek nowego nagrywania albo reset: zaległości z przerwanego nagrywania (np. po `vkResetCommandPool`) są śmieciami i
+        // nie mogą trafić do strumienia przed nowym `Begin` (serwer dostałby `vkCmd*` dla bufora, który nie nagrywa).
+        "vkBeginCommandBuffer" | "vkResetCommandBuffer" if slots[0] != 0 => drop((*(slots[0] as *const DispObj)).take()),
+        _ => {}
     }
     if cmd.name == "vkCreateGraphicsPipelines" && flags().trace {
         for i in 0..slots.get(2).copied().unwrap_or(0).min(8) as usize {
