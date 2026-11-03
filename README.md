@@ -8,6 +8,10 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 *FurMark (Vulkan) running on a Ryzen laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable, returned as H.264: 1280x720, 98 FPS on average over 10 s (min 68, max 110; the window shows the remote card). It is a GPU stress test, yet the remote GPU is mostly idle here, so the limit is our transport, not the card; that is what we are optimising.*
 
+![Cyberpunk 2077 (DirectX 12 through Proton) running on a Ryzen laptop, rendered on a remote RTX 3090 Ti](docs/images/cyberpunk-2077-remote-rtx3090ti.png)
+
+*Cyberpunk 2077, a DirectX 12 game running through Proton and vkd3d-proton on the Ryzen laptop, drawn by the RTX 3090 Ti in another machine (intro cutscene in a 1024x768 window). It renders correctly but slowly, about 4-5 FPS: the game asks the driver ~190 questions per frame and each one is a network round trip, so neither the GPU, the CPU nor the link is the limit; cutting round trips is the current work. Cyberpunk 2077 is a trademark of CD PROJEKT S.A.; the screenshot is shown only to demonstrate the driver.*
+
 ## What is in here
 
 - **GPU hub** (`hub-server`, `hub-client`, `hub-proto`) – a small server that watches the GPU, proxies AI requests (OpenAI-compatible API in front of Ollama) and decides who gets the GPU and when, so a big model and a game do not fight over VRAM. It can also run large models such as DeepSeek through [InferSSD](https://github.com/wici-ai/inferssd) (Apache-2.0) on a single consumer card by streaming weights from an NVMe drive.
@@ -18,7 +22,7 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 | Works | Not yet |
 |---|---|
-| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally | Smooth real games: a native Vulkan game (American Truck Simulator) renders correctly but stalls while loading; Proton/DXVK untested |
+| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally | Smooth heavy games: Cyberpunk 2077 (DirectX 12 via Proton) renders but at ~4-5 FPS, American Truck Simulator is held back by loading stalls; both are bound by network round trips |
 | LZ4 and H.264 frame transport, selectable (`GPU_ICD_CODEC`) | Windows client driver, HEVC |
 | AI proxy with VRAM-aware scheduling, DeepSeek via InferSSD | Game-session reservations in the scheduler |
 
@@ -66,6 +70,14 @@ Building blocks:
 | VA-API H.264 decode + read-back + NV12->BGRA on the HD 520, 1920x1080 / 640x360 | 36.6 ms / 4.3 ms (median) |
 | Host -> GPU copy of one 1080p frame (CUDA) | 0.41 ms (20 GB/s) |
 | Sessions seeing the NVIDIA card after the loader-unload fix (40 killed + 20 normal clients) | 60 / 60 (before: 10 / 50) |
+
+### Real applications (Ryzen 5 4500U laptop -> server A, 1 Gb/s cable, H.264, lab runs)
+
+| Application | API path | Result | What limits it |
+|---|---|---|---|
+| FurMark 2.11 (Vulkan, 1280x720) | native Vulkan | ~98 FPS, frame latency ~29 ms | first run was 11 FPS: server compared the whole mapped memory after every GPU wait (fixed: ranges + streaming loads) |
+| Hamster Hunter (Unity, IL2CPP) | native Vulkan, `-force-vulkan` | 21-34 FPS, frame latency ~20 ms | memory read-back from slow (write-combined) memory: 6.9 -> 1.2 ms per request after the fix |
+| Cyberpunk 2077 | DirectX 12 -> vkd3d-proton -> `VK_EXT_descriptor_buffer` | 4-5 FPS, frame latency ~23 ms | ~187 round trips per frame; 90% of descriptor cache misses are constant-buffer descriptors |
 
 ### AI hub (server A, DeepSeek V4.1 Flash via InferSSD, one NVMe, context 16384, thinking off)
 
