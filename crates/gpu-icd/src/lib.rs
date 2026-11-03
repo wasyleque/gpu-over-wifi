@@ -90,6 +90,9 @@ struct InstState {
     mem_refresh: HashMap<u64, bool>,
     /// Które zakresy odwzorowanej pamięci GPU może zapisać (decyduje, co odświeżać po oczekiwaniu).
     gpuw: gpuwrite::GpuWrites,
+    /// Wyniki `vkGetDescriptorEXT` według zakodowanego żądania (urządzenie, typ, uchwyty/adresy): deskryptor jest funkcją tych danych,
+    /// a gra pyta o te same widoki i bufory dziesiątki tysięcy razy, więc powtórzenia nie wymagają obiegu po sieci.
+    desc_cache: HashMap<Vec<u8>, Vec<u8>>,
     /// Pamięci, dla których plan odświeżania został już zapisany w logu (jednorazowo, przy `GPU_ICD_STATS=periodic`).
     plans_logged: std::collections::HashSet<u64>,
     /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
@@ -330,6 +333,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             memreq: Default::default(),
             mem_refresh: HashMap::new(),
             gpuw: Default::default(),
+            desc_cache: HashMap::new(),
             plans_logged: Default::default(),
             gpu_dirty: false,
             templates: HashMap::new(),

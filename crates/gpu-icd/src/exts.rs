@@ -17,9 +17,6 @@ const DENY: &[&str] = &[
     "performance_query", "acquire_xlib", "sci_sync", "ohos", "headless", "pipeline_binary", "cuda", "nvx_", "image_compression_control",
     "device_generated_commands", "shader_object", "opacity_micromap", "ray_tracing", "acceleration_structure", "ray_query",
     "deferred_host_operations", "graphics_pipeline_library", "frame_boundary", "low_latency", "anti_lag", "debug_report", "validation",
-    // `vkGetDescriptorEXT` bierze unię wskaźników (`VkDescriptorDataEXT`) wybieraną typem, której kodek poleceń nie umie przesłać, a
-    // deskryptory są surowymi bajtami zależnymi od sterownika; bez tego rozszerzenia vkd3d-proton używa zwykłych zestawów deskryptorów.
-    "descriptor_buffer",
     // Rozszerzenia z poleceniami, których kodek nie umie zakodować (unia ze wskaźnikiem): patrz test `no_advertised_extension_has_an_unencodable_command`.
     "descriptor_heap", "cooperative_vector", "shader_enqueue",
 ];
@@ -62,7 +59,7 @@ mod tests {
     #[test]
     fn swapchain_is_always_advertised_and_wsi_or_os_extensions_never() {
         assert!(is_advertisable("VK_KHR_swapchain"));
-        for e in ["VK_KHR_win32_surface", "VK_KHR_external_memory_fd", "VK_KHR_display", "VK_KHR_video_decode_h264", "VK_EXT_image_drm_format_modifier", "VK_KHR_present_wait", "VK_KHR_device_group", "VK_EXT_graphics_pipeline_library", "VK_EXT_descriptor_buffer"] {
+        for e in ["VK_KHR_win32_surface", "VK_KHR_external_memory_fd", "VK_KHR_display", "VK_KHR_video_decode_h264", "VK_EXT_image_drm_format_modifier", "VK_KHR_present_wait", "VK_KHR_device_group", "VK_EXT_graphics_pipeline_library"] {
             assert!(!is_advertisable(e), "{e}");
         }
         assert!(!is_advertisable("VK_NIE_ISTNIEJE"));

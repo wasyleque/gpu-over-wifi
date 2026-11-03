@@ -72,6 +72,66 @@ fn unsupported(meta: &StructMeta, m: &MemberMeta, why: &str) -> CodecError {
     CodecError::Unsupported(format!("{}.{}: {why}", meta.name, m.name))
 }
 
+/// Unia `VkDescriptorDataEXT` (argument `vkGetDescriptorEXT`): zawiera wskaźniki wybierane polem `type` struktury nadrzędnej
+/// (`VkDescriptorGetInfoEXT`), więc ogólna obsługa unii jej nie obejmuje i kodujemy ją osobno (patrz `enc_descriptor_data`).
+pub const DESCRIPTOR_DATA_UNION: &str = "VkDescriptorDataEXT";
+
+/// Co wskazuje (albo zawiera) unia dla danego `VkDescriptorType`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DescData {
+    Sampler,
+    ImageWithSampler,
+    ImageOnly,
+    Address,
+    AccelerationStructure,
+}
+
+fn desc_data_kind(ty: u32) -> Option<DescData> {
+    Some(match ty {
+        0 => DescData::Sampler,
+        1 => DescData::ImageWithSampler,
+        2 | 3 | 10 => DescData::ImageOnly,
+        4..=7 => DescData::Address,
+        1000150000 | 1000165000 => DescData::AccelerationStructure,
+        _ => return None,
+    })
+}
+
+/// Typ deskryptora z pola `type` struktury nadrzędnej (`at` wskazuje na unię, `m` jej członka w `meta`).
+unsafe fn descriptor_type_of_parent(meta: &StructMeta, m: &MemberMeta, at: *const u8) -> Result<u32, CodecError> {
+    let base = at.sub(m.offset as usize);
+    read_uint(meta, base, "type").map(|t| t as u32).ok_or_else(|| unsupported(meta, m, "brak pola type"))
+}
+
+unsafe fn enc_descriptor_data(meta: &StructMeta, m: &MemberMeta, at: *const u8, enc: &mut Encoder, ctx: &dyn Ctx, depth: usize) -> Result<(), CodecError> {
+    let ty = descriptor_type_of_parent(meta, m, at)?;
+    let kind = desc_data_kind(ty).ok_or_else(|| unsupported(meta, m, "typ deskryptora poza zakresem vkGetDescriptorEXT"))?;
+    if kind == DescData::AccelerationStructure {
+        enc.put_u64(std::ptr::read_unaligned(at as *const u64));
+        return Ok(());
+    }
+    let p = std::ptr::read_unaligned(at as *const *const u8);
+    if p.is_null() {
+        // Pusty wskaźnik jest dozwolony (np. deskryptor zerowy przy `nullDescriptor`): serwer odtworzy pusty wskaźnik.
+        enc.put_u32(0);
+        return Ok(());
+    }
+    enc.put_u32(1);
+    match kind {
+        DescData::Sampler => enc.put_u64(ctx.handle_to_wire("VkSampler", std::ptr::read_unaligned(p as *const u64))?),
+        // VkDescriptorImageInfo: sampler@0, imageView@8, imageLayout@16. Sampler bywa ignorowany (wartość dowolna): wtedy wysyłamy 0.
+        DescData::ImageWithSampler | DescData::ImageOnly => {
+            let sampler = if kind == DescData::ImageWithSampler { std::ptr::read_unaligned(p as *const u64) } else { 0 };
+            enc.put_u64(ctx.handle_to_wire("VkSampler", sampler)?);
+            enc.put_u64(ctx.handle_to_wire("VkImageView", std::ptr::read_unaligned(p.add(8) as *const u64))?);
+            enc.put_u32(std::ptr::read_unaligned(p.add(16) as *const u32));
+        }
+        DescData::Address => enc_struct(meta_of("VkDescriptorAddressInfoEXT")?, p, enc, ctx, depth + 1, false)?,
+        DescData::AccelerationStructure => {}
+    }
+    Ok(())
+}
+
 // ======================= koder =======================
 
 /// Koduje strukturę spod `ptr` (układ C x86_64 zgodny z `meta`).
@@ -115,6 +175,7 @@ unsafe fn enc_struct(meta: &StructMeta, ptr: *const u8, enc: &mut Encoder, ctx: 
 unsafe fn enc_value(meta: &StructMeta, m: &MemberMeta, at: *const u8, enc: &mut Encoder, ctx: &dyn Ctx, depth: usize) -> Result<(), CodecError> {
     let n = m.count as usize;
     match m.elem {
+        Elem::Union if m.type_name == DESCRIPTOR_DATA_UNION => enc_descriptor_data(meta, m, at, enc, ctx, depth)?,
         Elem::Scalar | Elem::Char | Elem::Union => {
             if m.elem == Elem::Union {
                 let u = meta_of(m.type_name)?;
@@ -400,6 +461,42 @@ unsafe fn put_ptr(dst: *mut u8, offset: u32, addr: *mut u8) {
     std::ptr::write_unaligned(dst.add(offset as usize) as *mut usize, addr as usize);
 }
 
+unsafe fn dec_descriptor_data(meta: &StructMeta, m: &MemberMeta, dec: &mut Decoder, at: *mut u8, arena: &mut Arena, ctx: &dyn Ctx, depth: usize) -> Result<(), CodecError> {
+    // Pole `type` jest dekodowane przed `data` (kolejność członków), więc leży już w strukturze nadrzędnej.
+    let ty = descriptor_type_of_parent(meta, m, at as *const u8)?;
+    let kind = desc_data_kind(ty).ok_or_else(|| unsupported(meta, m, "typ deskryptora poza zakresem vkGetDescriptorEXT"))?;
+    if kind == DescData::AccelerationStructure {
+        std::ptr::write_unaligned(at as *mut u64, dec.get_u64()?);
+        return Ok(());
+    }
+    if dec.get_u32()? == 0 {
+        std::ptr::write_unaligned(at as *mut usize, 0);
+        return Ok(());
+    }
+    match kind {
+        DescData::Sampler => {
+            let p = arena.alloc(8)?;
+            std::ptr::write_unaligned(p as *mut u64, ctx.wire_to_handle("VkSampler", dec.get_u64()?)?);
+            std::ptr::write_unaligned(at as *mut usize, p as usize);
+        }
+        DescData::ImageWithSampler | DescData::ImageOnly => {
+            let p = arena.alloc(24)?;
+            std::ptr::write_unaligned(p as *mut u64, ctx.wire_to_handle("VkSampler", dec.get_u64()?)?);
+            std::ptr::write_unaligned(p.add(8) as *mut u64, ctx.wire_to_handle("VkImageView", dec.get_u64()?)?);
+            std::ptr::write_unaligned(p.add(16) as *mut u32, dec.get_u32()?);
+            std::ptr::write_unaligned(at as *mut usize, p as usize);
+        }
+        DescData::Address => {
+            let sm = meta_of("VkDescriptorAddressInfoEXT")?;
+            let p = arena.alloc(sm.size as usize)?;
+            dec_struct(sm, dec, p, arena, ctx, depth + 1, false)?;
+            std::ptr::write_unaligned(at as *mut usize, p as usize);
+        }
+        DescData::AccelerationStructure => {}
+    }
+    Ok(())
+}
+
 unsafe fn dec_struct(meta: &StructMeta, dec: &mut Decoder, dst: *mut u8, arena: &mut Arena, ctx: &dyn Ctx, depth: usize, in_chain: bool) -> Result<(), CodecError> {
     if depth > MAX_DEPTH {
         return Err(CodecError::Limit("głębokość"));
@@ -434,6 +531,7 @@ unsafe fn dec_struct(meta: &StructMeta, dec: &mut Decoder, dst: *mut u8, arena: 
 unsafe fn dec_value(meta: &StructMeta, m: &MemberMeta, dec: &mut Decoder, at: *mut u8, arena: &mut Arena, ctx: &dyn Ctx, depth: usize) -> Result<(), CodecError> {
     let n = m.count as usize;
     match m.elem {
+        Elem::Union if m.type_name == DESCRIPTOR_DATA_UNION => dec_descriptor_data(meta, m, dec, at, arena, ctx, depth)?,
         Elem::Scalar | Elem::Char | Elem::Union => {
             let b = dec.get_bytes()?;
             if b.len() != m.elem_size as usize * n {

@@ -22,6 +22,9 @@ const VK_ERROR_MEMORY_MAP_FAILED: i32 = -5;
 const VK_ERROR_DEVICE_LOST: i32 = -4;
 /// Partia wychodzi, gdy przekroczy ten rozmiar (albo na punkcie synchronizacji).
 const BATCH_FLUSH: usize = 64 * 1024;
+/// Największy deskryptor, który zapamiętujemy (sterowniki zwracają kilkadziesiąt bajtów) i limit liczby wpisów cache.
+const DESC_CACHE_MAX_BYTES: u64 = 1024;
+const DESC_CACHE_MAX_ENTRIES: usize = 200_000;
 const MEM_CHUNK: usize = 4 * 1024 * 1024;
 /// Najmniejszy zapis, dla którego warto próbować LZ4 (mniejsze idą surowo: narzut przewyższa zysk).
 const LZ4_MIN_WRITE: usize = 4096;
@@ -47,6 +50,9 @@ pub struct Stats {
     pub refresh_whole: u64,
     pub refresh_ranged: u64,
     pub refresh_ranged_bytes: u64,
+    /// `vkGetDescriptorEXT`: odpowiedzi z cache / z serwera.
+    pub desc_hits: u64,
+    pub desc_misses: u64,
     pub memr_bytes: u64,
     pub query_bytes: u64,
     pub roundtrips: u64,
@@ -76,8 +82,8 @@ impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; deskryptory (cache/serwer) {}/{}; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.desc_hits, self.desc_misses, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -692,6 +698,18 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         return fail(VK_ERROR_INITIALIZATION_FAILED);
     }
     let bytes = e.finish();
+    // `vkGetDescriptorEXT` (VK_EXT_descriptor_buffer): bajty deskryptora to funkcja zakodowanego żądania, więc powtórzenia idą z cache.
+    let desc_key = (cmd.name == "vkGetDescriptorEXT" && slots.len() >= 4 && slots[3] != 0 && slots[2] <= DESC_CACHE_MAX_BYTES).then(|| bytes.clone());
+    if let Some(key) = &desc_key {
+        if let Some(out) = st.desc_cache.get(key) {
+            if out.len() as u64 == slots[2] {
+                std::ptr::copy_nonoverlapping(out.as_ptr(), slots[3] as *mut u8, out.len());
+                st.stats.desc_hits += 1;
+                return 0;
+            }
+        }
+        st.stats.desc_misses += 1;
+    }
     if cmd.name == "vkAllocateMemory" {
         if let Some(size) = gpu_vkcodec::codec::arg_uint(cmd, args, "pAllocateInfo->allocationSize") {
             let id = disp_outs.first().map(|x| x.1).unwrap_or(0);
@@ -828,6 +846,12 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     if result >= 0 {
         memreq_store(st, cmd.name, slots);
+        if let Some(key) = desc_key {
+            if st.desc_cache.len() >= DESC_CACHE_MAX_ENTRIES {
+                st.desc_cache.clear();
+            }
+            st.desc_cache.insert(key, std::slice::from_raw_parts(slots[3] as *const u8, slots[2] as usize).to_vec());
+        }
     }
     if let Some((pool, layouts)) = &alloc_ctx {
         if !speculated {

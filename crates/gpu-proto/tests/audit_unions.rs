@@ -17,9 +17,10 @@ fn list_supported_commands_that_the_codec_cannot_encode() {
 
 #[test]
 fn the_check_itself_detects_the_known_bad_and_accepts_the_known_good_commands() {
-    let bad = gpu_proto::meta::find_command("vkGetDescriptorEXT").unwrap().1;
-    assert!(unencodable_reason(bad).is_some_and(|r| r.contains("VkDescriptorDataEXT")));
-    for ok in ["vkCreateBuffer", "vkQueueSubmit", "vkCreateGraphicsPipelines", "vkUpdateDescriptorSets", "vkCmdPipelineBarrier2"] {
+    // Unia opisów deskryptorów ma własne kodowanie (patrz `gpu-vkcodec/tests/descriptor_data.rs`), więc `vkGetDescriptorEXT` jest kodowalne.
+    let bad = gpu_proto::meta::find_command("vkBuildMicromapsEXT").unwrap().1;
+    assert!(unencodable_reason(bad).is_some_and(|r| r.contains("VkDeviceOrHostAddressConstKHR")));
+    for ok in ["vkGetDescriptorEXT", "vkCmdBindDescriptorBuffersEXT", "vkCreateBuffer", "vkQueueSubmit", "vkCreateGraphicsPipelines", "vkUpdateDescriptorSets", "vkCmdPipelineBarrier2"] {
         assert_eq!(unencodable_reason(gpu_proto::meta::find_command(ok).unwrap().1), None, "{ok}");
     }
 }
