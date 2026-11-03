@@ -88,11 +88,14 @@ pub struct Flags {
     pub debug: bool,
     pub trace: bool,
     pub periodic: bool,
+    /// Doświadczalnie: nie odświeżaj z serwera pamięci, które nie są HOST_CACHED (`GPU_ICD_NO_REFRESH_UNCACHED=1`).
+    pub no_refresh_uncached: bool,
 }
 
 pub fn flags() -> &'static Flags {
     static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
     F.get_or_init(|| Flags {
+        no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
         // Cykliczne liczniki co 5 s: `GPU_ICD_STATS=periodic` albo (jak dotąd) razem z `GPU_ICD_DEBUG`.
@@ -688,7 +691,8 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let mem_id = std::ptr::read_unaligned(slots[3] as *const u64);
             let _ = id;
             st.mem_sizes.insert(mem_id, size);
-            let refresh = size <= REFRESH_ALWAYS_BELOW || is_cached_type(st, slots, cmd, args);
+            let cached = is_cached_type(st, slots, cmd, args);
+            let refresh = if flags().no_refresh_uncached { cached } else { size <= REFRESH_ALWAYS_BELOW || cached };
             st.mem_refresh.insert(mem_id, refresh);
         }
     }

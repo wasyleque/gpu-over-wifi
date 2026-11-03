@@ -32,6 +32,8 @@ mod latency;
 mod video;
 mod sbuild;
 mod wsi;
+mod lazy;
+mod shadow;
 #[rustfmt::skip]
 mod icd_table;
 
