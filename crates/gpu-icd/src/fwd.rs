@@ -56,14 +56,20 @@ pub struct Stats {
     pub t_refresh_ns: u64,
     pub refreshes: u64,
     pub t_syncrecv_ns: u64,
+    /// Diagnostyka zapisów pamięci (tylko przy `GPU_ICD_DEBUG`): strony 4 KiB nowe i powtórzone w sesji oraz wynik próbnej kompresji LZ4.
+    pub pages_new: u64,
+    pub pages_dup: u64,
+    pub lz4_in: u64,
+    pub lz4_out: u64,
+    pub lz4_samples: u64,
 }
 
 impl Stats {
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
-            "gpu-icd statystyki: odświeżenia pamięci {} ({:.0} ms), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.refreshes, self.t_refresh_ns as f64 / 1e6, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; odświeżenia pamięci {} ({:.0} ms), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B, odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
+            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -147,12 +153,37 @@ impl InstState {
 
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
         self.flush();
+        if std::env::var("GPU_ICD_DEBUG").is_ok() {
+            self.survey_write(data);
+        }
         self.stats.memw_bytes += data.len() as u64;
         for (i, chunk) in data.chunks(MEM_CHUNK.min(MAX_BATCH)).enumerate() {
             let req = Request::MemWrite { memory, offset: offset + (i * MEM_CHUNK) as u64, data: chunk.to_vec() };
             if self.client.send(&req).is_err() {
                 self.lose();
             }
+        }
+    }
+
+    /// Diagnostyka (tylko przy `GPU_ICD_DEBUG`): ile stron 4 KiB wysyłanych w tej sesji już wcześniej widzieliśmy (potencjał cache
+    /// zawartości po stronie serwera) i jak dobrze kompresuje się próbka danych (potencjał LZ4).
+    fn survey_write(&mut self, data: &[u8]) {
+        for page in data.chunks(4096) {
+            let h = gpu_proto::pagediff::page_hash(page);
+            if self.seen_pages.len() < 8_000_000 {
+                if self.seen_pages.insert(h) {
+                    self.stats.pages_new += 1;
+                } else {
+                    self.stats.pages_dup += 1;
+                }
+            }
+        }
+        // Próbka: co 16. zapis do 256 KiB.
+        self.stats.lz4_samples += 1;
+        if self.stats.lz4_samples % 16 == 1 {
+            let sample = &data[..data.len().min(256 * 1024)];
+            self.stats.lz4_in += sample.len() as u64;
+            self.stats.lz4_out += gpu_proto::video::compress_lz4(sample).len() as u64;
         }
     }
 
