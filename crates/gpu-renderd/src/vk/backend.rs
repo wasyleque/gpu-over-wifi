@@ -227,6 +227,11 @@ impl VulkanBackend {
     }
 }
 
+/// Wersja API instancji serwera: zażądana przez klienta albo wersja loadera, jeśli jest wyższa (patrz `create_instance`).
+fn effective_api_version(requested: u32, loader: u32) -> u32 {
+    requested.max(loader)
+}
+
 impl GpuBackend for VulkanBackend {
     fn instance_version(&mut self) -> Result<u32, i32> {
         let _g = GLOBAL_CALLS.lock().map_err(|_| VK_ERROR_INITIALIZATION_FAILED)?;
@@ -254,7 +259,10 @@ impl GpuBackend for VulkanBackend {
 
         let mut app = Words::zeroed(48);
         write_u32(app.bytes_mut(), 0, ST_APPLICATION_INFO);
-        write_u32(app.bytes_mut(), 44, api_version);
+        // Funkcje core nowsze niż wersja instancji nie trafiają do tablicy dyspozytora loadera (wywołanie = skok pod adres 0), a ICD
+        // ogłasza aplikacjom 1.3: instancja serwera dostaje więc wersję loadera, jeśli jest wyższa niż zażądana.
+        let loader_version = self.instance_version().unwrap_or(0);
+        write_u32(app.bytes_mut(), 44, effective_api_version(api_version, loader_version));
         let mut info = Words::zeroed(64);
         write_u32(info.bytes_mut(), 0, ST_INSTANCE_CREATE_INFO);
         write_u64(info.bytes_mut(), 24, app.ptr() as usize as u64);
@@ -532,4 +540,11 @@ mod tests {
         assert!(matches!(&r, Response::Data(d) if d.len() == 840), "{r:?}");
         s.cleanup();
     }
+    #[test]
+    fn server_instance_gets_at_least_the_loader_version() {
+        assert_eq!(effective_api_version(0x0040_1000, 0x0040_4170), 0x0040_4170, "klient prosi o 1.1, loader umie 1.4");
+        assert_eq!(effective_api_version(0x0040_3000, 0x0040_2000), 0x0040_3000, "zażądana wyższa zostaje");
+        assert_eq!(effective_api_version(0x0040_1000, 0), 0x0040_1000, "bez wersji loadera zostaje zażądana");
+    }
+
 }
