@@ -56,7 +56,12 @@ impl Ctx for Recording<'_> {
     }
     fn wire_to_handle(&self, ty: &str, wire: u64) -> Result<u64, CodecError> {
         self.seen.borrow_mut().push(wire);
-        self.reg.wire_to_handle(ty, wire)
+        let r = self.reg.wire_to_handle(ty, wire);
+        if r.is_err() {
+            // Typ nieznanego uchwytu pozwala odróżnić zestaw deskryptorów od potoku, obrazu itd.
+            eprintln!("replay: nieznany uchwyt {wire} typu {ty}");
+        }
+        r
     }
 }
 
