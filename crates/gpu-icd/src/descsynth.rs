@@ -12,6 +12,13 @@
 //! odpowiedziach serwera zgodnych z wzorem, potem co `AUDIT_EVERY`-te wywołanie idzie normalnie do serwera i jest porównywane,
 //! a pierwsza niezgodność wyłącza mechanizm na stałe (wszystkie deskryptory wracają do zapytań).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Gotowość wzoru i licznik wywołań dla audytu, dostępne BEZ blokady instancji (wywołań `vkGetDescriptorEXT` są miliony): ustawiane przy
+/// zmianie stanu w `observe`, czytane w `try_lockfree`. Stan jest jeden na proces (jak sterownik NVIDIA, od którego zależy wzór).
+static READY: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+static CALLS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
 pub const UNIFORM_BUFFER: u32 = 6;
 pub const STORAGE_BUFFER: u32 = 7;
 /// Tyle kolejnych zgodnych (i nietrywialnych) odpowiedzi serwera potrzeba, żeby zacząć liczyć lokalnie.
@@ -101,6 +108,18 @@ impl Synth {
         }
     }
 
+    /// Jak `try_local`, ale bez blokady i bez `&mut self`: korzysta tylko ze statycznych flag (patrz `READY`).
+    pub fn try_lockfree(ty: u32, size: usize, address: u64, range: u64) -> Option<Vec<u8>> {
+        let i = slot(ty)?;
+        if size_of(ty) != Some(size) || !READY[i].load(Ordering::Acquire) {
+            return None;
+        }
+        if CALLS[i].fetch_add(1, Ordering::Relaxed) % AUDIT_EVERY == AUDIT_EVERY - 1 {
+            return None; // co AUDIT_EVERY-te wywołanie idzie do serwera i jest porównywane (`observe`)
+        }
+        encode(ty, address, range)
+    }
+
     /// Porównuje prawdziwą odpowiedź serwera ze wzorem (uczenie i kontrola); wywoływane po każdym zapytaniu o taki deskryptor.
     pub fn observe(&mut self, ty: u32, address: u64, range: u64, actual: &[u8]) -> Event {
         let Some(i) = slot(ty) else { return Event::None };
@@ -113,6 +132,7 @@ impl Synth {
             Mode::Learning(n) => {
                 if expected != actual {
                     self.mode[i] = Mode::Disabled;
+                    READY[i].store(false, Ordering::Release);
                     return Event::Disabled;
                 }
                 // Wejścia zerowe zgadzają się trywialnie (same zera): nie liczą się do nauki.
@@ -121,6 +141,7 @@ impl Synth {
                 }
                 if n + 1 >= LEARN_NEEDED {
                     self.mode[i] = Mode::Verified(0);
+                    READY[i].store(true, Ordering::Release);
                     Event::Verified
                 } else {
                     self.mode[i] = Mode::Learning(n + 1);
@@ -130,6 +151,7 @@ impl Synth {
             Mode::Verified(_) => {
                 if expected != actual {
                     self.mode[i] = Mode::Disabled;
+                    READY[i].store(false, Ordering::Release);
                     Event::Disabled
                 } else {
                     Event::None
@@ -160,6 +182,9 @@ pub unsafe fn input_of(info: *const u8) -> Option<(u32, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Testy współdzielą statyczny stan gotowości (`READY`), więc nie mogą biec równolegle.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
@@ -198,6 +223,7 @@ mod tests {
 
     #[test]
     fn local_answers_start_only_after_enough_matching_server_answers_and_audit_periodically() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = Synth::default();
         assert!(s.try_local(UNIFORM_BUFFER, 8, 0x1000, 256).is_none(), "na początku pytamy serwer");
         // Trywialne wejścia (zera) nie liczą się do nauki.
@@ -230,6 +256,7 @@ mod tests {
 
     #[test]
     fn a_single_disagreement_disables_the_mechanism_permanently() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = Synth::default();
         for i in 0..LEARN_NEEDED {
             let a = 0x1000 + i as u64 * 0x100;
@@ -266,4 +293,33 @@ mod tests {
         assert_eq!(unsafe { input_of(info.as_ptr() as *const u8) }, None, "pusty wskaźnik");
         assert_eq!(unsafe { input_of(std::ptr::null()) }, None);
     }
+    #[test]
+    fn lockfree_answers_follow_the_published_readiness_and_audit_every_nth_call() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        READY[1].store(false, Ordering::SeqCst);
+        CALLS[1].store(0, Ordering::SeqCst);
+        assert!(Synth::try_lockfree(STORAGE_BUFFER, 16, 0x1000, 64).is_none(), "przed potwierdzeniem pytamy serwer");
+        let mut s = Synth::default();
+        for i in 0..LEARN_NEEDED {
+            let a = 0x1000 + i as u64 * 0x100;
+            s.observe(STORAGE_BUFFER, a, 64, &encode(STORAGE_BUFFER, a, 64).unwrap());
+        }
+        assert!(READY[1].load(Ordering::SeqCst));
+        let (mut local, mut asked) = (0, 0);
+        for i in 0..AUDIT_EVERY * 2 {
+            match Synth::try_lockfree(STORAGE_BUFFER, 16, 0x1000 + i * 16, 64) {
+                Some(d) => {
+                    assert_eq!(d, encode(STORAGE_BUFFER, 0x1000 + i * 16, 64).unwrap());
+                    local += 1;
+                }
+                None => asked += 1,
+            }
+        }
+        assert_eq!((local, asked), (AUDIT_EVERY * 2 - 2, 2));
+        assert!(Synth::try_lockfree(STORAGE_BUFFER, 8, 0x1000, 64).is_none(), "zły rozmiar");
+        // Niezgodność wyłącza także ścieżkę bez blokady.
+        assert_eq!(s.observe(STORAGE_BUFFER, 0x9000, 64, &[1; 16]), Event::Disabled);
+        assert!(Synth::try_lockfree(STORAGE_BUFFER, 16, 0x9000, 64).is_none());
+    }
+
 }

@@ -93,9 +93,6 @@ struct InstState {
     mem_cached: HashMap<u64, bool>,
     /// Które zakresy odwzorowanej pamięci GPU może zapisać (decyduje, co odświeżać po oczekiwaniu).
     gpuw: gpuwrite::GpuWrites,
-    /// Wyniki `vkGetDescriptorEXT` według zakodowanego żądania (urządzenie, typ, uchwyty/adresy): deskryptor jest funkcją tych danych,
-    /// a gra pyta o te same widoki i bufory dziesiątki tysięcy razy, więc powtórzenia nie wymagają obiegu po sieci.
-    desc_cache: HashMap<Vec<u8>, Vec<u8>>,
     /// Lokalne wyliczanie deskryptorów buforów (uczy się i weryfikuje na odpowiedziach serwera; patrz `descsynth`).
     synth: descsynth::Synth,
     /// Pamięci, dla których plan odświeżania został już zapisany w logu (jednorazowo, przy `GPU_ICD_STATS=periodic`).
@@ -339,7 +336,6 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             mem_refresh: HashMap::new(),
             mem_cached: HashMap::new(),
             gpuw: Default::default(),
-            desc_cache: HashMap::new(),
             synth: Default::default(),
             plans_logged: Default::default(),
             gpu_dirty: false,
@@ -354,6 +350,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             token: token.clone(),
         }),
     }));
+    fwd::desc_cache_clear();
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
     {
         let mut st = crate::fwd::lock_state(&*obj);
@@ -383,6 +380,7 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
         return;
     }
     CURRENT.store(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
+    fwd::desc_cache_clear();
     let obj = Box::from_raw(inst);
     let mut st = crate::fwd::lock_state(&obj);
     st.flush();

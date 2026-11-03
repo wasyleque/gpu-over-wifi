@@ -418,6 +418,80 @@ pub unsafe extern "C" fn entry<const OP: u16>(a0: u64, a1: u64, a2: u64, a3: u64
     forward(OP, [a0, a1, a2, a3, a4, a5, s0, s1, s2, s3, s4, s5, s6, s7], [x0, x1, x2, x3, x4, x5, x6, x7])
 }
 
+/// Cache wyników `vkGetDescriptorEXT` (klucz = zakodowane żądanie): jeden na proces i NIEZALEŻNY od blokady instancji, bo trafień są miliony
+/// i każde brało globalną blokadę tylko po to, żeby zajrzeć do mapy. Czyszczony przy tworzeniu i niszczeniu instancji (uchwyty w kluczach
+/// są numerowane od początku dla każdej instancji).
+static DESC_CACHE: std::sync::RwLock<Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>> = std::sync::RwLock::new(None);
+static DESC_LOCKFREE_SYNTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DESC_LOCKFREE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn desc_cache_clear() {
+    *DESC_CACHE.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Kopiuje zapamiętany deskryptor pod `out`, jeśli jest w cache i ma dokładnie `size` bajtów.
+///
+/// # Safety
+/// `out` musi być zapisywalne na `size` bajtów.
+unsafe fn desc_cache_hit(key: &[u8], out: u64, size: u64) -> bool {
+    let g = DESC_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    match g.as_ref().and_then(|m| m.get(key)) {
+        Some(v) if v.len() as u64 == size => {
+            std::ptr::copy_nonoverlapping(v.as_ptr(), out as *mut u8, v.len());
+            true
+        }
+        _ => false,
+    }
+}
+
+fn desc_cache_store(key: Vec<u8>, value: Vec<u8>) {
+    let mut g = DESC_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    if m.len() >= DESC_CACHE_MAX_ENTRIES {
+        m.clear();
+    }
+    m.insert(key, value);
+}
+
+/// Odpowiedź na `vkGetDescriptorEXT` BEZ blokady instancji: wzór bufora (sprawdzony, `descsynth`) albo trafienie w cache. `None` = zwykła ścieżka.
+///
+/// # Safety
+/// Argumenty muszą pochodzić z wywołania aplikacji (device, pDescriptorInfo, dataSize, pDescriptor).
+unsafe fn descriptor_lockfree(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 14], floats: &[f64; 8]) -> bool {
+    let (info, size, out) = (ints[1], ints[2], ints[3]);
+    if out == 0 || size > DESC_CACHE_MAX_BYTES || state().is_none() {
+        return false;
+    }
+    if let Some((ty, address, range)) = crate::descsynth::input_of(info as *const u8) {
+        if let Some(d) = crate::descsynth::Synth::try_lockfree(ty, size as usize, address, range) {
+            std::ptr::copy_nonoverlapping(d.as_ptr(), out as *mut u8, d.len());
+            DESC_LOCKFREE_SYNTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+    }
+    let params = cmd.params();
+    let mut slots = [0u64; 8];
+    if params.len() > slots.len() {
+        return false;
+    }
+    fill_slots(params, ints, floats, &mut slots);
+    let mut e = Encoder::new();
+    if encode_command(op, slots.as_ptr() as *const u8, &mut e, &IcdCtx).is_err() {
+        return false;
+    }
+    if desc_cache_hit(&e.finish(), out, size) {
+        DESC_LOCKFREE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+/// Numer polecenia `vkGetDescriptorEXT` (ustalany raz).
+fn descriptor_op() -> u16 {
+    static OP: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *OP.get_or_init(|| gpu_proto::meta::find_command("vkGetDescriptorEXT").map_or(u16::MAX, |(op, _)| op))
+}
+
 /// Pomiar blokady instancji: łączny czas oczekiwania na nią, czas trzymania i liczba wejść (widoczne w statystykach).
 /// Pokazuje, czy wątki gry czekają jeden na drugiego (np. gdy `vkQueueSubmit` skanuje i wysyła pamięć pod blokadą).
 static LOCK_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -444,12 +518,14 @@ impl Drop for HoldTimer {
 pub fn lock_report() -> String {
     use std::sync::atomic::Ordering::Relaxed;
     format!(
-        "blokada instancji: oczekiwanie {:.0} ms, trzymanie {:.0} ms w {} wejściach, najdłuższe trzymanie {:.1} ms, szybka ścieżka {} poleceń",
+        "blokada instancji: oczekiwanie {:.0} ms, trzymanie {:.0} ms w {} wejściach, najdłuższe trzymanie {:.1} ms, szybka ścieżka {} poleceń, deskryptory bez blokady: lokalnie {}, z cache {}",
         LOCK_WAIT_NS.load(Relaxed) as f64 / 1e6,
         LOCK_HOLD_NS.load(Relaxed) as f64 / 1e6,
         LOCK_ENTRIES.load(Relaxed),
         LOCK_HOLD_MAX_NS.load(Relaxed) as f64 / 1e6,
-        FAST_COMMANDS.load(Relaxed)
+        FAST_COMMANDS.load(Relaxed),
+        DESC_LOCKFREE_SYNTH.load(Relaxed),
+        DESC_LOCKFREE_HITS.load(Relaxed)
     )
 }
 
@@ -558,6 +634,9 @@ pub(crate) fn lock_state(inst: &InstanceObj) -> std::sync::MutexGuard<'_, InstSt
 
 unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    if op == descriptor_op() && descriptor_lockfree(op, cmd, &ints, &floats) {
+        return 0;
+    }
     if flags().fastpath && fast_table().get(op as usize).copied().unwrap_or(false) && !flags().trace && fast_record(op, cmd, &ints, &floats) {
         return 0;
     }
@@ -901,12 +980,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     // `vkGetDescriptorEXT` (VK_EXT_descriptor_buffer): bajty deskryptora to funkcja zakodowanego żądania, więc powtórzenia idą z cache.
     let desc_key = (cmd.name == "vkGetDescriptorEXT" && slots.len() >= 4 && slots[3] != 0 && slots[2] <= DESC_CACHE_MAX_BYTES).then(|| bytes.clone());
     if let Some(key) = &desc_key {
-        if let Some(out) = st.desc_cache.get(key) {
-            if out.len() as u64 == slots[2] {
-                std::ptr::copy_nonoverlapping(out.as_ptr(), slots[3] as *mut u8, out.len());
-                st.stats.desc_hits += 1;
-                return 0;
-            }
+        if desc_cache_hit(key, slots[3], slots[2]) {
+            st.stats.desc_hits += 1;
+            return 0;
         }
         st.stats.desc_misses += 1;
         // VkDescriptorGetInfoEXT: `type` pod offsetem 16.
@@ -1072,10 +1148,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             }
         }
         if let Some(key) = desc_key {
-            if st.desc_cache.len() >= DESC_CACHE_MAX_ENTRIES {
-                st.desc_cache.clear();
-            }
-            st.desc_cache.insert(key, std::slice::from_raw_parts(slots[3] as *const u8, slots[2] as usize).to_vec());
+            desc_cache_store(key, std::slice::from_raw_parts(slots[3] as *const u8, slots[2] as usize).to_vec());
         }
     }
     if let Some((pool, layouts)) = &alloc_ctx {
