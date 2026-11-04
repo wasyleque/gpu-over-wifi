@@ -223,6 +223,11 @@ const TRACK_FROM: usize = 1024 * 1024;
 
 impl Shadow {
     pub fn new(len: usize) -> Shadow {
+        // Preferowana jest wspólna arena (jedno wywołanie skanu dla wszystkich pamięci, także małych); przy jej braku osobny bufor z własnym
+        // śledzeniem (duże pamięci) albo pełnym skanem skrótów (małe).
+        if let Some(data) = crate::memtrack::PageAlignedBuf::new_in_arena(len) {
+            return Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: None, lazy: None };
+        }
         let data = crate::memtrack::PageAlignedBuf::new(len);
         let tracker = if len >= TRACK_FROM && std::env::var("GPU_ICD_NO_MEMTRACK").is_err() { crate::memtrack::Tracker::new(data.as_ptr(), data.capacity()) } else { None };
         Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None }
@@ -252,6 +257,11 @@ impl Shadow {
 
     /// Jak `dirty_ranges`, ale zwraca też, czy użyto jądrowego śledzenia (`true`) i ile bajtów zahaszowano w pełnym skanie (0 przy śledzeniu).
     pub fn dirty_ranges_timed(&mut self) -> (Vec<(usize, usize)>, bool, usize) {
+        if let (Some(off), Some(a)) = (self.data.arena_offset(), crate::memtrack::arena()) {
+            if let Some(cand) = a.take_dirty_range(off, self.data.capacity()) {
+                return (self.pages.changed_within(&self.data, &cand), true, 0);
+            }
+        }
         if let Some(t) = &self.tracker {
             match t.take_dirty(0, self.data.capacity()) {
                 Some(cand) => return (self.pages.changed_within(&self.data, &cand), true, 0),
@@ -279,6 +289,29 @@ impl Shadow {
             p += 1;
         }
         self.mark_synced(a, end);
+    }
+
+    /// Zmienione zakresy: ze zbiorczego skanu areny (jeśli pamięć w niej leży i skan się udał), w przeciwnym razie skan pojedynczy.
+    pub fn changed_from_bulk_or_scan(&mut self, bulk: Option<&[(usize, usize)]>) -> (Vec<(usize, usize)>, bool, usize) {
+        if let Some(b) = bulk {
+            if let Some(r) = self.changed_from_bulk(b) {
+                return (r, true, 0);
+            }
+        }
+        self.dirty_ranges_timed()
+    }
+
+    /// Zmienione zakresy tej pamięci na podstawie zbiorczego skanu areny (`bulk`: posortowane zakresy `[od, do)` w offsetach areny); `None`,
+    /// gdy pamięć nie leży w arenie. Strony zapisane bez zmiany treści odsiewa porównanie skrótów, jak przy skanie pojedynczym.
+    pub fn changed_from_bulk(&mut self, bulk: &[(usize, usize)]) -> Option<Vec<(usize, usize)>> {
+        let off = self.data.arena_offset()?;
+        let end = off + self.data.capacity();
+        let first = bulk.partition_point(|r| r.1 <= off);
+        let cand: Vec<(usize, usize)> = bulk[first..].iter().take_while(|r| r.0 < end).map(|r| (r.0.max(off) - off, r.1.min(end) - off)).collect();
+        if cand.is_empty() {
+            return Some(Vec::new());
+        }
+        Some(self.pages.changed_within(&self.data, &cand))
     }
 
     pub fn mark_synced(&mut self, from: usize, to: usize) {
@@ -408,13 +441,21 @@ impl InstState {
     fn write_mapped(&mut self) {
         let ids: Vec<u64> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, _)| *i).collect();
         self.stats.mapped_count_max = self.stats.mapped_count_max.max(ids.len() as u64);
+        // Zapisy aplikacji do wszystkich pamięci w arenie dostajemy jednym skanem; pamięci bez zapisów w ogóle nie są dotykane.
+        let t_bulk = std::time::Instant::now();
+        let bulk: Option<Vec<(usize, usize)>> = if ids.iter().any(|i| self.mems.get(i).is_some_and(|s| s.data.arena_offset().is_some())) { crate::memtrack::arena().and_then(|a| a.take_dirty_all()) } else { None };
+        if bulk.is_some() {
+            let ns = t_bulk.elapsed().as_nanos() as u64;
+            self.stats.t_scan_ns += ns;
+            self.stats.scan_tracked_n += 1;
+            self.stats.scan_tracked_ns += ns;
+        }
         for id in ids {
             let t0 = std::time::Instant::now();
-            let Some(((ranges, tracked, hashed), len)) = self.mems.get_mut(&id).map(|s| (s.dirty_ranges_timed(), s.data.len())) else { continue };
+            let Some(((ranges, tracked, hashed), len)) = self.mems.get_mut(&id).map(|s| (s.changed_from_bulk_or_scan(bulk.as_deref()), s.data.len())) else { continue };
             let ns = t0.elapsed().as_nanos() as u64;
             self.stats.t_scan_ns += ns;
             if tracked {
-                self.stats.scan_tracked_n += 1;
                 self.stats.scan_tracked_ns += ns;
             } else {
                 self.stats.scan_hashed_n += 1;
@@ -422,6 +463,9 @@ impl InstState {
                 self.stats.scan_hashed_bytes += hashed as u64;
             }
             self.stats.scan_bytes += len as u64;
+            if ranges.is_empty() {
+                continue;
+            }
             let Some(p) = self.mems.get(&id).map(|s| s.data.as_ptr()) else { continue };
             let t1 = std::time::Instant::now();
             for (a, b) in ranges {
