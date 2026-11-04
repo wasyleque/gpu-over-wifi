@@ -885,6 +885,50 @@ unsafe fn memreq_cached(st: &mut InstState, name: &str, slots: &[u64]) -> Option
     Some(0)
 }
 
+/// `vkGetDeviceImageMemoryRequirements[KHR](device, pInfo, pMemoryRequirements)`: (klucz parametrów, wynik `VkMemoryRequirements`, opcjonalne
+/// `VkMemoryDedicatedRequirements`). `None`, gdy zapytanie nie jest tym poleceniem albo ma nieznane rozszerzenia.
+unsafe fn devreq_target(name: &str, slots: &[u64]) -> Option<(Vec<u8>, *mut u8, Option<*mut u8>)> {
+    if !matches!(name, "vkGetDeviceImageMemoryRequirements" | "vkGetDeviceImageMemoryRequirementsKHR") || slots.len() < 3 || slots[1] == 0 || slots[2] == 0 {
+        return None;
+    }
+    let key = crate::memreq::MemReqCache::device_image_key(slots[1] as *const u8)?;
+    let out = slots[2] as *mut u8;
+    let next = std::ptr::read_unaligned(out.add(8) as *const u64) as *mut u8;
+    let dedicated = if next.is_null() {
+        None
+    } else {
+        if std::ptr::read_unaligned(next as *const u32) != STYPE_MEMORY_DEDICATED_REQUIREMENTS || std::ptr::read_unaligned(next.add(8) as *const u64) != 0 {
+            return None;
+        }
+        Some(next)
+    };
+    Some((key, out.add(16), dedicated))
+}
+
+unsafe fn devreq_cached(st: &mut InstState, name: &str, slots: &[u64]) -> Option<u64> {
+    let (key, out, dedicated) = devreq_target(name, slots)?;
+    let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
+    let (size, align, bits, ded) = st.memreq.lookup_key(dev, &key, dedicated.is_some())?;
+    std::ptr::write_unaligned(out as *mut u64, size);
+    std::ptr::write_unaligned(out.add(8) as *mut u64, align);
+    std::ptr::write_unaligned(out.add(16) as *mut u32, bits);
+    if let (Some(node), Some((prefers, requires))) = (dedicated, ded) {
+        std::ptr::write_unaligned(node.add(16) as *mut u32, prefers);
+        std::ptr::write_unaligned(node.add(20) as *mut u32, requires);
+    }
+    Some(0)
+}
+
+unsafe fn devreq_store(st: &mut InstState, name: &str, slots: &[u64]) {
+    let Some((key, out, dedicated)) = devreq_target(name, slots) else { return };
+    let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
+    let size = std::ptr::read_unaligned(out as *const u64);
+    let align = std::ptr::read_unaligned(out.add(8) as *const u64);
+    let bits = std::ptr::read_unaligned(out.add(16) as *const u32);
+    let ded = dedicated.map(|n| (std::ptr::read_unaligned(n.add(16) as *const u32), std::ptr::read_unaligned(n.add(20) as *const u32)));
+    st.memreq.store_key(dev, key, (size, align, bits, ded));
+}
+
 /// Po prawdziwej odpowiedzi serwera zapamiętuje wynik dla klucza tego obiektu.
 unsafe fn memreq_store(st: &mut InstState, name: &str, slots: &[u64]) {
     let Some((obj, out, dedicated)) = memreq_target(name, slots) else { return };
@@ -952,6 +996,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     // Wymagania pamięci: identyczne obrazy i bufory dostają odpowiedź z cache, bez obiegu po sieci.
     if let Some(done) = memreq_cached(st, cmd.name, slots) {
+        return done;
+    }
+    if let Some(done) = devreq_cached(st, cmd.name, slots) {
         return done;
     }
     // Deskryptory buforów (UNIFORM/STORAGE) liczone lokalnie, gdy wzór został sprawdzony na odpowiedziach serwera (patrz `descsynth`).
@@ -1176,6 +1223,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     if result >= 0 {
         memreq_store(st, cmd.name, slots);
+        devreq_store(st, cmd.name, slots);
         if cmd.name == "vkGetDescriptorEXT" && slots.len() >= 4 && slots[3] != 0 && slots[2] <= DESC_CACHE_MAX_BYTES {
             if let Some((ty, address, range)) = crate::descsynth::input_of(slots[1] as *const u8) {
                 let actual = std::slice::from_raw_parts(slots[3] as *const u8, slots[2] as usize);
