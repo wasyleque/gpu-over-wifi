@@ -161,3 +161,12 @@ Zrobione (wszystko domyślnie włączone; wyłączniki: `GPU_ICD_NO_FASTPATH`, `
 - Log: ranking obiegów wg poleceń, powód odświeżania pamięci (bufory i flagi użycia), liczniki odczytu leniwego.
 
 Następne (po kolejnym przebiegu Cyberpunka): odczytać z logu `obiegi wg poleceń` i `odczyt leniwy`; jeśli `vkWaitSemaphores` nadal dominuje, wypychanie wartości semaforów z serwera (wątek obserwujący + kanał na połączeniu wideo) i lokalne odpowiedzi; precyzyjne śledzenie zapisów GPU z poleceń; Zink/Heaven (crash w `driCreateContextAttribs`, skrypt `hv.sh` w jobie).
+
+## 2026-11-04 (wieczór): ATS ~70 FPS na zdalnej RTX, przyczyny crashy
+
+- **Crash ATS po ok. milionie zestawów**: rejestr uchwytów serwera ma limit `MAX_HANDLES = 1<<20` wpisów, a zestawy deskryptorów nie były zdejmowane z rejestru przy `vkResetDescriptorPool`/`vkDestroyDescriptorPool`; rejestracja zwracała `Handle(..)`, partia się przerywała, gra się kończyła. Naprawa: `Replayer::pool_sets` + `unregister_after`; test `crates/gpu-renderd/tests/descriptor_pool_registry.rs` (prawdziwy Vulkan, 300 rund).
+- Poprzednie hipotezy (spekulacja alokacji, kolejność poleceń) były fałszywym tropem; błąd "44 odmowy z rzędu" to 44 odmowy PRZEPLATANE udanymi alokacjami (serwer loguje tylko porażki). Normalny cykl ATS: alokuje do odmowy `OUT_OF_POOL_MEMORY`, resetuje pulę (co ok. 5700 alokacji, pula 16384 zestawów); księgowość klienta zgadza się z serwerem.
+- **Koszt klatki w ATS to były obiegi alokacji zestawów**: 1,82 mln `vkAllocateDescriptorSets` na przebieg po 125 µs (ok. 18 ms z klatki 22 ms). Spekulacja wraca w bezpiecznej wersji (`DESC_SPEC_MARGIN` 64 zestawy/deskryptory, co 64. alokacja synchronicznie jako audyt; odmowa serwera tam, gdzie przewidzieliśmy sukces, wyłącza spekulację na stałe; `GPU_ICD_NO_DESC_SPEC=1` wyłącza). Wynik: obiegi alokacji 1,82 mln -> 11 tys., **ATS 68-72 FPS** (mediana 68, stabilnie 70) zamiast 3-45.
+- Serwer: ranking czasu poleceń (`gpu-renderd polecenia wg czasu`), komunikaty o błędzie dekodowania nazywają polecenie. Serwer wykonuje 2 mln poleceń rysowania w ok. 40 s, czyli jest prawie bezczynny; wąskim gardłem były obiegi klienta, nie sieć ani serwer.
+- Wyścig w `lazymap` (handler odwzorowywał stronę po unieważnieniu) naprawiony: oznaczanie świeżości, bity `present` i `UFFDIO_CONTINUE` pod blokadą stanu regionu.
+- Ryzen: po przebiegu 20:31 maszyna zrestartowała się (przyczyny nie ustalono; użytkownik planował rozbudowę RAM do 16 GB).
