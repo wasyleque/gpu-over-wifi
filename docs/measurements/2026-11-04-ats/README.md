@@ -4,8 +4,6 @@ Native Linux build of American Truck Simulator (`-rdevice vk`, Vulkan) running o
 for the game), rendered on the RTX 3090 Ti of the server through the remote Vulkan driver (`gpu-icd` -> `gpu-renderd`, 1 Gb/s link,
 H.264 video back to the laptop).
 
-![ATS on the remote RTX](ats-remote-rtx3090ti.png)
-
 ## Result
 
 | | Before | After |
