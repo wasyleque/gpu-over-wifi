@@ -333,7 +333,11 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             batch: Vec::new(),
             next_id: 1 << 20,
             mem_sizes: HashMap::new(),
-            desc: Default::default(),
+            desc: {
+                let mut d = descpool::DescriptorAccounts::default();
+                d.set_margin(fwd::DESC_SPEC_MARGIN);
+                d
+            },
             seen_pages: Default::default(),
             memreq: Default::default(),
             mem_refresh: HashMap::new(),

@@ -160,9 +160,10 @@ pub struct Flags {
     pub eager_scan: bool,
     /// Odczyt leniwy pamięci HOST_CACHED (domyślnie włączony; `GPU_ICD_NO_LAZY=1` wyłącza).
     pub lazy: bool,
-    /// Spekulatywne odpowiedzi `vkAllocateDescriptorSets` z księgowości puli po stronie klienta (`GPU_ICD_DESC_SPEC=1`). Domyślnie wyłączone:
-    /// ATS dostawał od serwera `VK_ERROR_OUT_OF_POOL_MEMORY` po tym, jak klient obiecał aplikacji sukces (nieznane uchwyty zestawów, gra kończyła się),
-    /// a zysk jest znikomy (ok. 4,4 tys. alokacji na przebieg po 0,3 ms).
+    /// Spekulatywne odpowiedzi `vkAllocateDescriptorSets` z księgowości puli po stronie klienta (domyślnie włączone; `GPU_ICD_NO_DESC_SPEC=1`
+    /// wyłącza). ATS robi ich 1,8 mln na przebieg po 125 µs obiegu (ok. 18 ms z klatki 22 ms), więc to największy koszt. Bezpieczeństwo: zapas w puli
+    /// (`DESC_SPEC_MARGIN`) i audyt: co `DESC_SPEC_AUDIT_EVERY`-ta alokacja idzie synchronicznie; odmowa serwera tam, gdzie przewidzieliśmy
+    /// sukces, wyłącza spekulację na stałe.
     pub desc_spec: bool,
     /// Szybka ścieżka poleceń `vkCmd*` bez blokady instancji (domyślnie włączona; `GPU_ICD_NO_FASTPATH=1` wyłącza). Dawny crash sterownika
     /// NVIDIA na serwerze miał przyczynę w buforach per wątek zamiast per bufor poleceń; od naprawy pełne sesje Cyberpunka przechodzą.
@@ -175,7 +176,7 @@ pub fn flags() -> &'static Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
-        desc_spec: std::env::var_os("GPU_ICD_DESC_SPEC").is_some(),
+        desc_spec: std::env::var_os("GPU_ICD_NO_DESC_SPEC").is_none(),
         fastpath: std::env::var_os("GPU_ICD_NO_FASTPATH").is_none(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
@@ -195,6 +196,12 @@ pub struct Shadow {
     /// Odczyt leniwy (`lazymap`): po oczekiwaniu na GPU strony są tylko unieważniane, a pobierane przy dotknięciu przez aplikację.
     lazy: Option<std::sync::Arc<crate::lazymap::LazyRegion>>,
 }
+
+/// Zapas puli (zestawy i deskryptory każdego typu), poniżej którego alokacje zestawów idą synchronicznie, oraz częstotliwość audytu.
+pub const DESC_SPEC_MARGIN: u32 = 64;
+const DESC_SPEC_AUDIT_EVERY: u64 = 64;
+static DESC_SPEC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DESC_SPEC_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Zakres rozmiarów pamięci z odczytem leniwym: mniejsze są tanie do odświeżenia, większe zajęłyby za dużo pamięci na kopię.
 const LAZY_MIN: usize = 64 * 1024;
@@ -1076,6 +1083,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
 
     // Księgowość deskryptorów: układy i pule zapamiętujemy, a alokację zestawów odpowiadamy od razu tylko wtedy, gdy pula na pewno starczy.
     let mut speculated = false;
+    let mut audited = false;
     let mut alloc_ctx: Option<(u64, Vec<u64>)> = None;
     match cmd.name {
         "vkResetDescriptorPool" => st.desc.pool_reset(slots[1]),
@@ -1088,7 +1096,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let n = std::ptr::read_unaligned(info.add(24) as *const u32).min(4096) as usize;
             let lp = std::ptr::read_unaligned(info.add(32) as *const u64) as *const u64;
             let layouts: Vec<u64> = if lp.is_null() { Vec::new() } else { (0..n).map(|i| std::ptr::read_unaligned(lp.add(i))).collect() };
-            speculated = flags().desc_spec && st.desc.try_allocate(pool, &layouts, pnext);
+            let predicted = flags().desc_spec && !DESC_SPEC_BROKEN.load(std::sync::atomic::Ordering::Relaxed) && st.desc.would_fit(pool, &layouts, pnext);
+            audited = predicted && DESC_SPEC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(DESC_SPEC_AUDIT_EVERY);
+            speculated = predicted && !audited && st.desc.try_allocate(pool, &layouts, pnext);
             alloc_ctx = Some((pool, layouts));
         }
         _ => {}
@@ -1351,6 +1361,10 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
                 }
             } else {
                 REFUSED_RUN.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            if audited && result < 0 {
+                DESC_SPEC_BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("[gpu-icd] audyt alokacji zestawów: serwer odmówił ({result}), choć księgowość przewidziała sukces; spekulacja WYŁĄCZONA. {}", st.desc.explain(*pool, layouts));
             }
             st.desc.after_sync(*pool, layouts, result >= 0);
         }

@@ -31,9 +31,44 @@ struct Pool {
 pub struct DescriptorAccounts {
     layouts: HashMap<u64, Layout>,
     pools: HashMap<u64, Pool>,
+    /// Zapas (zestawów i deskryptorów każdego typu), poniżej którego nie spekulujemy: tuż przy wyczerpaniu puli odpowiada serwer, więc
+    /// ewentualna różnica w liczeniu (granularność sterownika) nie może zostać obiecana grze. 0 w testach jednostkowych.
+    margin: u32,
 }
 
 impl DescriptorAccounts {
+    pub fn set_margin(&mut self, margin: u32) {
+        self.margin = margin;
+    }
+
+    /// Czy alokacja zmieściłaby się z zapasem (bez odejmowania zasobów): do audytu spekulacji.
+    pub fn would_fit(&self, pool: u64, layouts: &[u64], has_pnext: bool) -> bool {
+        self.fit_need(pool, layouts, has_pnext).is_some()
+    }
+
+    fn fit_need(&self, pool: u64, layouts: &[u64], has_pnext: bool) -> Option<HashMap<u32, u32>> {
+        if has_pnext || layouts.is_empty() {
+            return None;
+        }
+        let p = self.pools.get(&pool)?;
+        if p.special || p.sets_left < (layouts.len() as u32).saturating_add(self.margin) {
+            return None;
+        }
+        let mut need: HashMap<u32, u32> = HashMap::new();
+        for l in layouts {
+            let layout = self.layouts.get(l)?;
+            if layout.special {
+                return None;
+            }
+            for (t, c) in &layout.counts {
+                *need.entry(*t).or_insert(0) += *c;
+            }
+        }
+        if need.iter().any(|(t, c)| p.left.get(t).copied().unwrap_or(0) < c.saturating_add(self.margin)) {
+            return None;
+        }
+        Some(need)
+    }
     /// Zapamiętuje układ po `vkCreateDescriptorSetLayout` (`VkDescriptorSetLayoutCreateInfo`: pNext @8, bindingCount @20, pBindings @24).
     ///
     /// # Safety
@@ -108,26 +143,8 @@ impl DescriptorAccounts {
     /// Czy alokacja `layouts` z puli `pool` na pewno się zmieści? Jeśli tak, odejmuje zasoby i zwraca `true` (można odpowiedzieć od razu).
     /// `has_pnext`: `VkDescriptorSetAllocateInfo` ma łańcuch pNext (np. zmienna liczba deskryptorów).
     pub fn try_allocate(&mut self, pool: u64, layouts: &[u64], has_pnext: bool) -> bool {
-        if has_pnext || layouts.is_empty() {
-            return false;
-        }
+        let Some(need) = self.fit_need(pool, layouts, has_pnext) else { return false };
         let Some(p) = self.pools.get_mut(&pool) else { return false };
-        if p.special || p.sets_left < layouts.len() as u32 {
-            return false;
-        }
-        let mut need: HashMap<u32, u32> = HashMap::new();
-        for l in layouts {
-            let Some(layout) = self.layouts.get(l) else { return false };
-            if layout.special {
-                return false;
-            }
-            for (t, c) in &layout.counts {
-                *need.entry(*t).or_insert(0) += *c;
-            }
-        }
-        if need.iter().any(|(t, c)| p.left.get(t).copied().unwrap_or(0) < *c) {
-            return false;
-        }
         p.sets_left -= layouts.len() as u32;
         for (t, c) in need {
             if let Some(v) = p.left.get_mut(&t) {
@@ -277,4 +294,21 @@ mod tests {
         a.pool_destroyed(7);
         assert!(!a.try_allocate(7, &[10], false));
     }
+    #[test]
+    fn margin_keeps_speculation_away_from_the_exhaustion_boundary_and_would_fit_does_not_consume() {
+        // 10 zestawów, 100 deskryptorów każdego typu; układ potrzebuje (1: 2, 6: 1) na zestaw.
+        let mut a = setup(0, 10, &[(1, 100), (6, 100)]);
+        a.set_margin(4);
+        assert!(a.would_fit(7, &[10], false));
+        assert!(a.would_fit(7, &[10], false), "przewidywanie nie odejmuje zasobów");
+        // Zapas 4 zestawów: alokacje po 1 zestawie przechodzą, dopóki zostaje >= 1 + 4 = 5 zestawów.
+        let mut n = 0;
+        while a.try_allocate(7, &[10], false) {
+            n += 1;
+            assert!(n <= 10);
+        }
+        assert_eq!(n, 6, "10 zestawów minus zapas 4 = 6 spekulatywnych alokacji; ostatnie 4 idą do serwera");
+        assert!(!a.would_fit(7, &[10], false));
+    }
+
 }
