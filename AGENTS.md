@@ -170,3 +170,11 @@ Następne (po kolejnym przebiegu Cyberpunka): odczytać z logu `obiegi wg polece
 - Serwer: ranking czasu poleceń (`gpu-renderd polecenia wg czasu`), komunikaty o błędzie dekodowania nazywają polecenie. Serwer wykonuje 2 mln poleceń rysowania w ok. 40 s, czyli jest prawie bezczynny; wąskim gardłem były obiegi klienta, nie sieć ani serwer.
 - Wyścig w `lazymap` (handler odwzorowywał stronę po unieważnieniu) naprawiony: oznaczanie świeżości, bity `present` i `UFFDIO_CONTINUE` pod blokadą stanu regionu.
 - Ryzen: po przebiegu 20:31 maszyna zrestartowała się (przyczyny nie ustalono; użytkownik planował rozbudowę RAM do 16 GB).
+
+## 2026-11-04 (noc): blokada instancji zwalniana na czas oczekiwania na serwer
+
+Cyberpunk: 252 s oczekiwania na blokadę instancji wobec 102 s jej trzymania na 3 minuty gry; wątki stały w jednej kolejce, bo wątek czekający na odpowiedź (fence, semafor, zapytanie) trzymał blokadę przez cały obieg.
+- `link.rs`: `Link` = zapis przez `Client` (pod blokadą instancji) + odczyt odpowiedzi przez `Shared` (bez niej). Każde żądanie z odpowiedzią (`expects_reply`: nie `Cmds`/`MemWrite*`/`PresentFrame`) dostaje bilet przy wysłaniu (kolejność w strumieniu = kolejność biletów), odpowiedzi czyta się w kolejności biletów (`recv_at`, Condvar); zerwanie połączenia budzi wszystkich oczekujących błędem. Serwer nadal wykonuje sekwencyjnie.
+- `fwd.rs`: `exec_with` rozdzielone na `exec_begin` (pod blokadą: przygotowanie i wysyłka, zwraca `Step::Done` albo `Step::Pending`) i `exec_finish` (pod blokadą: obróbka odpowiedzi); `forward()` zwalnia blokadę między nimi (`Pending::receive`). `exec_with` (wołające już trzymają blokadę: swapchain itp.) skleja obie fazy.
+- Stan zmieniony przez inne wątki w trakcie oczekiwania: `submit_gen` (licznik `vkQueueSubmit`): oczekujący wątek kasuje `gpu_dirty` tylko jeśli nikt nie zgłosił pracy; unieważnienia leniwych pamięci są zachowawcze.
+- FurMark: 92-100 -> 104 FPS, trzymanie blokady 4300 ms -> 196 ms na 28 s. Do zmierzenia: ATS i Cyberpunk.
