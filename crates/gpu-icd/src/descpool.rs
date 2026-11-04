@@ -20,6 +20,9 @@ struct Pool {
     left: HashMap<u32, u32>,
     /// Flaga zwalniania pojedynczych zestawów, rozszerzenia w pNext albo wcześniejsza odmowa: nie spekulujemy.
     special: bool,
+    /// Diagnostyka: ile razy aplikacja zresetowała pulę i ile alokacji (wywołań) zrobiła od ostatniego resetu.
+    resets: u64,
+    allocs_since_reset: u64,
 }
 
 #[derive(Default)]
@@ -82,7 +85,7 @@ impl DescriptorAccounts {
         // Bezpieczna jest tylko pula bez flag poza UPDATE_AFTER_BIND (0x2): FREE_DESCRIPTOR_SET dopuszcza fragmentację.
         let special = pnext != 0 || flags & !0x2 != 0 || sizes.iter().any(|(t, _)| *t >= 1_000_000_000);
         let left = sizes.iter().copied().collect();
-        self.pools.insert(id, Pool { max_sets, sizes, sets_left: max_sets, left, special });
+        self.pools.insert(id, Pool { max_sets, sizes, sets_left: max_sets, left, special, resets: 0, allocs_since_reset: 0 });
     }
 
     pub fn pool_destroyed(&mut self, id: u64) {
@@ -94,6 +97,8 @@ impl DescriptorAccounts {
         if let Some(p) = self.pools.get_mut(&id) {
             p.sets_left = p.max_sets;
             p.left = p.sizes.iter().copied().collect();
+            p.resets += 1;
+            p.allocs_since_reset = 0;
         }
     }
 
@@ -150,13 +155,16 @@ impl DescriptorAccounts {
         }
         let mut left: Vec<(u32, u32)> = p.left.iter().map(|(t, c)| (*t, *c)).collect();
         left.sort_unstable();
-        format!("pula {pool:#x}: maxSets {}, zostało wg klienta {} zestawów, deskryptory (typ,zostało) {:?}, pojemność {:?}, alokacja {} zestawów potrzebuje (typ,liczba) {:?}, pula specjalna: {}", p.max_sets, p.sets_left, left, p.sizes, layouts.len(), need, p.special)
+        format!("pula {pool:#x}: maxSets {}, zostało wg klienta {} zestawów, deskryptory (typ,zostało) {:?}, pojemność {:?}, alokacja {} zestawów potrzebuje (typ,liczba) {:?}, pula specjalna: {}, resety puli: {}, alokacji od ostatniego resetu: {}", p.max_sets, p.sets_left, left, p.sizes, layouts.len(), need, p.special, p.resets, p.allocs_since_reset)
     }
 
     /// Po synchronicznej alokacji: serwer powiedział prawdę. Jeśli się udała i umiemy ją policzyć, odejmujemy zasoby jak przy spekulacji.
     /// Jeśli się nie udała ALBO się udała, ale nie umiemy jej policzyć (nieznany układ, pNext), serwer zużył albo wyczerpał pulę poza
     /// naszą księgowością, więc do resetu puli nie spekulujemy na niej już wcale.
     pub fn after_sync(&mut self, pool: u64, layouts: &[u64], ok: bool) {
+        if let Some(p) = self.pools.get_mut(&pool) {
+            p.allocs_since_reset += 1;
+        }
         let counted = ok && self.try_allocate(pool, layouts, false);
         if !counted {
             if let Some(p) = self.pools.get_mut(&pool) {
