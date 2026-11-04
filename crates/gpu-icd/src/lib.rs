@@ -35,6 +35,7 @@ mod sbuild;
 mod wsi;
 mod lazy;
 mod lazymap;
+mod link;
 mod shadow;
 #[rustfmt::skip]
 mod icd_table;
@@ -73,7 +74,7 @@ struct InstanceObj {
 }
 
 struct InstState {
-    client: Client,
+    client: link::Link,
     remote: u64,
     pdevs: Vec<*mut PdevObj>,
     cache: HashMap<(u64, u8, u32, u32), Vec<u8>>,
@@ -102,6 +103,9 @@ struct InstState {
     gpu_dirty: bool,
     /// Był `vkQueueSubmit` od ostatniego skanu odwzorowanej pamięci: skan (zapisy na serwer) następuje tuż przed wysłaniem partii, patrz `settle_memory`.
     scan_pending: bool,
+    /// Licznik zgłoszeń `vkQueueSubmit`: wątek czekający bez blokady (patrz `fwd::Pending`) kasuje stan `gpu_dirty` tylko wtedy, gdy nikt inny
+    /// nie zgłosił pracy w międzyczasie.
+    submit_gen: u64,
     mems: HashMap<u64, fwd::Shadow>,
     /// Kolejki już wydane aplikacji: (urządzenie, rodzina, indeks) -> obiekt.
     queues: HashMap<(u64, u32, u32), usize>,
@@ -326,7 +330,10 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
         loader_data: 0,
         remote,
         state: Mutex::new(InstState {
-            client,
+            client: match link::Link::from_client(client) {
+                Ok(l) => l,
+                Err(_) => return VK_ERROR_INITIALIZATION_FAILED,
+            },
             remote,
             pdevs: Vec::new(),
             cache: HashMap::new(),
@@ -347,6 +354,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             plans_logged: Default::default(),
             gpu_dirty: false,
             scan_pending: false,
+            submit_gen: 0,
             templates: HashMap::new(),
             mems: HashMap::new(),
             queues: HashMap::new(),

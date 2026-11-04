@@ -763,7 +763,7 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let mut st = lock_state(inst);
     LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let _hold = HoldTimer(std::time::Instant::now());
+    let mut hold = HoldTimer(std::time::Instant::now());
     let fail = |e: i32| -> u64 { e as u32 as u64 };
     if st.device_lost && cmd.ret == Ret::VkResult {
         return fail(VK_ERROR_DEVICE_LOST);
@@ -790,7 +790,23 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         }
     }
     let t0 = std::time::Instant::now();
-    let r = exec(&mut st, op, &mut slots);
+    let r = match exec_begin(&mut st, op, &mut slots, false) {
+        Step::Done(v) => v,
+        Step::Pending(p) => {
+            // Czekamy na odpowiedź serwera BEZ blokady instancji: pozostałe wątki gry nagrywają, zgłaszają i pytają w tym czasie.
+            // Wykonanie u serwera i tak jest sekwencyjne, a odpowiedzi odbieramy w kolejności biletów (patrz `link`).
+            drop(hold);
+            drop(st);
+            let resp = p.receive();
+            let t_lock = std::time::Instant::now();
+            st = lock_state(inst);
+            LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            hold = HoldTimer(std::time::Instant::now());
+            exec_finish(&mut st, p, resp)
+        }
+    };
+    let _ = &hold;
     trace(cmd.name, r, t0.elapsed().as_micros());
     periodic_stats(&st.stats);
     r
@@ -1075,8 +1091,8 @@ pub(crate) unsafe fn exec(st: &mut InstState, op: u16, slots: &mut [u64]) -> u64
 ///
 /// # Safety
 /// Jak `exec`.
-pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], force_async: bool) -> u64 {
-    let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], force_async: bool) -> Step {
+    let Some(cmd) = COMMANDS.get(op as usize) else { return Step::Done(VK_ERROR_INITIALIZATION_FAILED as u32 as u64) };
     let params = cmd.params();
     let fail = |e: i32| -> u64 { e as u32 as u64 };
     let args = slots.as_ptr() as *const u8;
@@ -1105,10 +1121,10 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     // Wymagania pamięci: identyczne obrazy i bufory dostają odpowiedź z cache, bez obiegu po sieci.
     if let Some(done) = memreq_cached(st, cmd.name, slots) {
-        return done;
+        return Step::Done(done);
     }
     if let Some(done) = devreq_cached(st, cmd.name, slots) {
-        return done;
+        return Step::Done(done);
     }
     // Deskryptory buforów (UNIFORM/STORAGE) liczone lokalnie, gdy wzór został sprawdzony na odpowiedziach serwera (patrz `descsynth`).
     if cmd.name == "vkGetDescriptorEXT" && slots.len() >= 4 && slots[3] != 0 {
@@ -1116,25 +1132,25 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             if let Some(d) = st.synth.try_local(ty, slots[2] as usize, address, range) {
                 std::ptr::copy_nonoverlapping(d.as_ptr(), slots[3] as *mut u8, d.len());
                 st.stats.desc_synth += 1;
-                return 0;
+                return Step::Done(0);
             }
         }
     }
     // Aktualizacja deskryptorów szablonem: dane zawierają uchwyty, więc rozwijamy ją do zwykłego vkUpdateDescriptorSets.
     if cmd.name == "vkUpdateDescriptorSetWithTemplate" {
-        return update_with_template(st, slots);
+        return Step::Done(update_with_template(st, slots));
     }
     // Kolejka wydana już wcześniej (to samo urządzenie, rodzina, indeks) wraca bez wysyłania.
     if cmd.name == "vkGetDeviceQueue" {
         let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
         if let Some(q) = st.queues.get(&(dev, slots[1] as u32, slots[2] as u32)) {
             std::ptr::write_unaligned(slots[3] as *mut usize, *q);
-            return 0;
+            return Step::Done(0);
         }
     }
     // Uchwyty wyjściowe nadaje klient: wpisujemy identyfikatory w pamięć aplikacji przed zakodowaniem.
     let mut disp_outs: Vec<(*mut u64, u64)> = Vec::new();
-    let Ok(outs) = out_handles(cmd, args) else { return fail(VK_ERROR_INITIALIZATION_FAILED) };
+    let Ok(outs) = out_handles(cmd, args) else { return Step::Done(fail(VK_ERROR_INITIALIZATION_FAILED)) };
     for (kind, ptr, n) in outs {
         for i in 0..n {
             let id = st.alloc_id();
@@ -1153,6 +1169,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             st.scan_pending = true;
         }
         st.gpu_dirty = true;
+        st.submit_gen += 1;
     }
     let mut e = Encoder::new();
     if let Err(err) = encode_command(op, args, &mut e, &IcdCtx) {
@@ -1163,7 +1180,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             seen.push(cmd.name);
             eprintln!("gpu-icd: nie umiem zakodować {}: {err:?}", cmd.name);
         }
-        return fail(VK_ERROR_INITIALIZATION_FAILED);
+        return Step::Done(fail(VK_ERROR_INITIALIZATION_FAILED));
     }
     let bytes = e.finish();
     // `vkGetDescriptorEXT` (VK_EXT_descriptor_buffer): bajty deskryptora to funkcja zakodowanego żądania, więc powtórzenia idą z cache.
@@ -1171,7 +1188,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     if let Some(key) = &desc_key {
         if desc_cache_hit(key, slots[3], slots[2]) {
             st.stats.desc_hits += 1;
-            return 0;
+            return Step::Done(0);
         }
         st.stats.desc_misses += 1;
         // VkDescriptorGetInfoEXT: `type` pod offsetem 16.
@@ -1265,7 +1282,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         if st.batch.len() > BATCH_FLUSH {
             st.flush();
         }
-        return 0;
+        return Step::Done(0);
     }
     // Droga synchroniczna: partia, potem polecenie, potem `Sync` (błąd asynchroniczny); jeden obieg po sieci.
     if st.scan_pending {
@@ -1289,36 +1306,119 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         let req = st.delta_request(*id);
         reqs.push(req);
     }
-    let ok = st.client.send_many(&reqs).is_ok();
-    let t_recv = std::time::Instant::now();
-    let (q, sy) = if ok { (st.client.recv(), st.client.recv()) } else { (Err(gpu_renderd::client::ClientError::Closed), Err(gpu_renderd::client::ClientError::Closed)) };
-    // Odpowiedzi na odświeżenia przychodzą zawsze, więc czytamy je od razu (także przy późniejszym błędzie), żeby nie rozsynchronizować strumienia.
+    let ticket = st.client.send_many(&reqs).ok();
+    Step::Pending(Pending {
+        op,
+        slots_ptr: slots.as_mut_ptr(),
+        slots_len: slots.len(),
+        pre_ids,
+        alloc_ctx,
+        speculated,
+        audited,
+        desc_key,
+        base: ticket.unwrap_or(0),
+        sent_ok: ticket.is_some(),
+        t_recv: std::time::Instant::now(),
+        submit_gen: st.submit_gen,
+        shared: st.client.shared(),
+    })
+}
+
+
+/// Stan wątku, który wysłał żądanie z odpowiedzią i czeka na nią BEZ blokady instancji (patrz `link`).
+pub(crate) struct Pending {
+    op: u16,
+    slots_ptr: *mut u64,
+    slots_len: usize,
+    pre_ids: Vec<u64>,
+    alloc_ctx: Option<(u64, Vec<u64>)>,
+    speculated: bool,
+    audited: bool,
+    desc_key: Option<Vec<u8>>,
+    base: u64,
+    sent_ok: bool,
+    t_recv: std::time::Instant,
+    submit_gen: u64,
+    shared: std::sync::Arc<crate::link::Shared>,
+}
+
+/// Wynik pierwszej fazy wykonania polecenia: gotowa wartość albo oczekiwanie na odpowiedź serwera.
+pub(crate) enum Step {
+    Done(u64),
+    Pending(Pending),
+}
+
+/// Odpowiedzi na żądania z `Pending`: zapytanie, `Sync` i odświeżenia pamięci (po jednej na każde).
+pub(crate) struct Responses {
+    q: Result<Response, gpu_renderd::client::ClientError>,
+    sy: Result<Response, gpu_renderd::client::ClientError>,
+    deltas: Vec<Option<Vec<u8>>>,
+}
+
+impl Pending {
+    /// Odbiera odpowiedzi w kolejności biletów; nie wymaga blokady instancji (to cały sens: inne wątki gry pracują w tym czasie).
+    pub(crate) fn receive(&self) -> Responses {
+        if !self.sent_ok {
+            let closed = || Err(gpu_renderd::client::ClientError::Closed);
+            return Responses { q: closed(), sy: closed(), deltas: vec![None; self.pre_ids.len()] };
+        }
+        let q = self.shared.recv_at(self.base);
+        let sy = self.shared.recv_at(self.base + 1);
+        // Odpowiedzi na odświeżenia przychodzą zawsze, więc czytamy je od razu (także przy późniejszym błędzie), żeby nie rozsynchronizować strumienia.
+        let deltas = (0..self.pre_ids.len()).map(|i| if let Ok(Response::Data(d)) = self.shared.recv_at(self.base + 2 + i as u64) { Some(d) } else { None }).collect();
+        Responses { q, sy, deltas }
+    }
+}
+
+/// Wykonuje polecenie w całości pod blokadą instancji (wołający już ją ma): pierwsza faza, odbiór odpowiedzi, druga faza.
+///
+/// # Safety
+/// Jak `exec`.
+pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], force_async: bool) -> u64 {
+    match exec_begin(st, op, slots, force_async) {
+        Step::Done(v) => v,
+        Step::Pending(p) => {
+            let r = p.receive();
+            exec_finish(st, p, r)
+        }
+    }
+}
+
+/// Druga faza polecenia synchronicznego: obróbka odpowiedzi serwera pod blokadą instancji.
+///
+/// # Safety
+/// `p` pochodzi z `exec_begin` tego samego wywołania, a bufor `slots` (argumenty aplikacji) nadal żyje.
+pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -> u64 {
+    let Some(cmd) = COMMANDS.get(p.op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    let slots: &mut [u64] = std::slice::from_raw_parts_mut(p.slots_ptr, p.slots_len);
+    let args = slots.as_ptr() as *const u8;
+    let fail = |e: i32| -> u64 { e as u32 as u64 };
+    let (speculated, audited, desc_key, alloc_ctx) = (p.speculated, p.audited, p.desc_key.clone(), p.alloc_ctx.clone());
+    // Odpowiedzi na odświeżenia przyszły razem z resztą (czytane bez blokady), więc tu tylko je wpisujemy.
     let t_refresh = std::time::Instant::now();
     let mut refreshed = false;
-    if ok {
-        for id in &pre_ids {
-            if let Ok(Response::Data(d)) = st.client.recv() {
-                if st.apply_delta(*id, &d) {
-                    st.drain_delta(*id);
-                }
-                refreshed = true;
+    for (id, d) in p.pre_ids.iter().zip(r.deltas) {
+        if let Some(d) = d {
+            if st.apply_delta(*id, &d) {
+                st.drain_delta(*id);
             }
+            refreshed = true;
         }
     }
     if refreshed {
         st.stats.refreshes += 1;
         st.stats.t_refresh_ns += t_refresh.elapsed().as_nanos() as u64;
     }
-    st.stats.t_syncrecv_ns += t_recv.elapsed().as_nanos() as u64;
+    st.stats.t_syncrecv_ns += p.t_recv.elapsed().as_nanos() as u64;
     let e = st.stats.rt_by_cmd.entry(cmd.name).or_insert((0, 0));
     e.0 += 1;
-    e.1 += t_recv.elapsed().as_nanos() as u64;
-    if let Ok(Response::Synced { error }) = sy {
+    e.1 += p.t_recv.elapsed().as_nanos() as u64;
+    if let Ok(Response::Synced { error }) = r.sy {
         if error < 0 {
             st.lose();
         }
     }
-    let Ok(Response::Data(d)) = q else {
+    let Ok(Response::Data(d)) = r.q else {
         st.lose();
         return fail(VK_ERROR_DEVICE_LOST);
     };
@@ -1390,8 +1490,11 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             st.lazy_invalidate();
         }
         if refreshed {
-            // Pamięci zostały odświeżone w tym samym obiegu co oczekiwanie.
-            st.gpu_dirty = false;
+            // Pamięci zostały odświeżone w tym samym obiegu co oczekiwanie. Jeśli w międzyczasie (gdy czekaliśmy bez blokady) inny wątek
+            // zgłosił pracę, jego zapisy GPU nie były objęte tym odświeżeniem, więc stan "brudny" zostaje.
+            if st.submit_gen == p.submit_gen {
+                st.gpu_dirty = false;
+            }
         } else {
             st.read_mapped();
         }
