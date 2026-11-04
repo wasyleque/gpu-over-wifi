@@ -86,6 +86,9 @@ pub struct Stats {
     /// Chybienia cache deskryptorów według `VkDescriptorType` (0..=10; ostatnia pozycja: inne).
     pub desc_miss_by_type: [u64; 12],
     pub lazy_memories: u64,
+    /// Pamięć -> (rozmiar, flagi właściwości) oraz wysyłki zapisów według pamięci: (liczba, bajty surowo, bajty na łączu). Do logu.
+    pub mem_flags: std::collections::HashMap<u64, (u64, u32)>,
+    pub send_by_mem: std::collections::HashMap<u64, (u64, u64, u64)>,
     pub lazy_invalidations: u64,
     /// Obiegi po sieci według polecenia: (liczba, łączny czas oczekiwania w ns). Do rankingu, co jeszcze blokuje klatki.
     pub rt_by_cmd: std::collections::HashMap<&'static str, (u64, u64)>,
@@ -115,6 +118,20 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// Ranking pamięci według bajtów wysłanych na serwer: `id (rozmiar MB, flagi) wysyłek, surowo MB, łącze MB`.
+    fn top_uploads(&self) -> String {
+        let mut v: Vec<_> = self.send_by_mem.iter().collect();
+        v.sort_by_key(|(_, (_, raw, _))| std::cmp::Reverse(*raw));
+        v.iter()
+            .take(6)
+            .map(|(id, (n, raw, wire))| {
+                let (size, fl) = self.mem_flags.get(id).copied().unwrap_or((0, 0));
+                format!("{:#x} ({} MB, flagi {:#x}) {}x {} MB surowo / {} MB łącze", id, size >> 20, fl, n, raw >> 20, wire >> 20)
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
     /// Ranking poleceń według łącznego czasu obiegów: `nazwa liczba ms (średnio µs)`.
     fn top_roundtrips(&self) -> String {
         let mut v: Vec<_> = self.rt_by_cmd.iter().collect();
@@ -284,6 +301,10 @@ impl InstState {
             self.survey_write(data);
         }
         self.stats.memw_bytes += data.len() as u64;
+        let wire_before = self.stats.memw_wire_bytes;
+        let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
+        acct.0 += 1;
+        acct.1 += data.len() as u64;
         for (i, chunk) in data.chunks(MEM_CHUNK.min(MAX_BATCH)).enumerate() {
             let at = offset + (i * MEM_CHUNK) as u64;
             // Strony małe albo źle kompresowalne (np. tekstury BCn) idą surowo: LZ4 wysyłamy tylko, gdy oszczędza co najmniej 10%.
@@ -301,6 +322,10 @@ impl InstState {
             if self.client.send(&req).is_err() {
                 self.lose();
             }
+        }
+        let wire = self.stats.memw_wire_bytes - wire_before;
+        if let Some(a) = self.stats.send_by_mem.get_mut(&memory) {
+            a.2 += wire;
         }
     }
 
@@ -795,6 +820,7 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] odczyt leniwy: pamięci {}, unieważnienia {}, błędy stron {} (z pobraniem {}, {} KB), przekroczenia czasu {}", stats.lazy_memories, stats.lazy_invalidations, crate::lazymap::FAULTS.load(Relaxed), crate::lazymap::FAULTS_FETCHED.load(Relaxed), crate::lazymap::FETCHED_BYTES.load(Relaxed) / 1024, crate::lazymap::FETCH_TIMEOUTS.load(Relaxed));
@@ -892,8 +918,14 @@ unsafe fn memory_is_cached(st: &mut InstState, slots: &[u64], cmd: &gpu_proto::m
     let pdev = st.device_pdev.get(&dev).copied()?;
     let props = st.query_props(pdev)?;
     let at = 20 + idx as usize * 8;
-    props.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8 != 0)
+    props.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).map(|f| {
+        LAST_MEMORY_FLAGS.store(f, std::sync::atomic::Ordering::Relaxed);
+        f & 0x8 != 0
+    })
 }
+
+/// Flagi właściwości typu pamięci ostatnio alokowanej (do księgowania w `mem_flags`; zapis i odczyt pod blokadą instancji).
+static LAST_MEMORY_FLAGS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 const STYPE_MEMORY_DEDICATED_REQUIREMENTS: u32 = 1_000_127_000;
 
@@ -1137,6 +1169,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let known = memory_is_cached(st, slots, cmd, args);
             let cached = known.unwrap_or(true);
             st.mem_cached.insert(mem_id, known.unwrap_or(false));
+            st.stats.mem_flags.insert(mem_id, (size, LAST_MEMORY_FLAGS.load(std::sync::atomic::Ordering::Relaxed)));
             let refresh = if flags().no_refresh_uncached { cached } else { size <= REFRESH_ALWAYS_BELOW || cached };
             st.mem_refresh.insert(mem_id, refresh);
         }
