@@ -283,6 +283,7 @@ fn serve_fault(hub: &Hub, addr: usize) {
         let map = hub.regions.read().unwrap_or_else(|e| e.into_inner());
         map.range(..=page_addr).next_back().filter(|(base, r)| page_addr < **base + r.len).map(|(_, r)| r.clone())
     };
+    let mut continue_fault_page = true;
     if let Some(r) = region {
         let off = page_addr - r.app;
         // Do 3 prób: unieważnienie w trakcie pobierania unieważnia jego wynik (dane mogły się zdezaktualizować).
@@ -311,30 +312,42 @@ fn serve_fault(hub: &Hub, addr: usize) {
                 FETCHED_BYTES.fetch_add((b - a) as u64, Ordering::Relaxed);
             }
             FAULTS_FETCHED.fetch_add(1, Ordering::Relaxed);
-            let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
             if !ok {
                 break;
             }
+            // Oznaczenie świeżości, bity `present` i odwzorowanie stron dzieją się pod blokadą stanu, więc `invalidate` (też pod nią) nie
+            // wcisnie się między nie: inaczej odwzorowanie stałoby się po zrzucie i aplikacja widziałaby nieaktualne dane bez błędu strony.
+            let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.epoch == epoch {
                 for &(a, b) in &plan {
                     st.stale.mark_fresh(a, b);
-                    // Odwzoruj od razu całe pobrane zakresy (bez osobnego błędu strony na każdą): `present` służy do późniejszego zrzutu.
                     for p in a / PAGE..b.div_ceil(PAGE) {
                         st.present[p / 64] |= 1 << (p % 64);
                     }
                     let mut c = UffdioContinue { start: (r.app + a) as u64, len: (b - a) as u64, mode: 0, mapped: 0 };
                     // SAFETY: zakres leży w zarejestrowanym odwzorowaniu regionu; błędy (np. strona już odwzorowana) są nieszkodliwe.
                     unsafe { ioctl(hub.uffd.as_raw_fd(), UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) };
+                    if (a..b).contains(&off) {
+                        continue_fault_page = false;
+                    }
                 }
                 break;
             }
         }
-        let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
-        let p = off / PAGE;
-        st.present[p / 64] |= 1 << (p % 64);
+        if continue_fault_page {
+            // Strona świeża albo pobranie się nie udało: odwzoruj samą stronę błędu (pod blokadą, z tego samego powodu co wyżej).
+            let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
+            let p = off / PAGE;
+            st.present[p / 64] |= 1 << (p % 64);
+            let mut c = UffdioContinue { start: page_addr as u64, len: PAGE as u64, mode: 0, mapped: 0 };
+            // SAFETY: `c` żyje przez czas wywołania; strona leży w zarejestrowanym zakresie.
+            unsafe { ioctl(hub.uffd.as_raw_fd(), UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) };
+        }
+        return;
     }
+    // Błąd w nieznanym regionie (już wyrejestrowany): zwolnij wątek, odwzorowując stronę.
     let mut c = UffdioContinue { start: page_addr as u64, len: PAGE as u64, mode: 0, mapped: 0 };
-    // SAFETY: `c` żyje przez czas wywołania; strona leży w zarejestrowanym zakresie.
+    // SAFETY: jak wyżej.
     unsafe { ioctl(hub.uffd.as_raw_fd(), UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) };
 }
 
