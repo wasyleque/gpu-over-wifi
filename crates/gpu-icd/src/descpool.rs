@@ -129,6 +129,30 @@ impl DescriptorAccounts {
         true
     }
 
+    /// Opis stanu naszej księgowości dla odmowy serwera (do logu): ile zestawów i deskryptorów każdego typu zostało wg nas w puli, ile
+    /// potrzebowała alokacja oraz ile wynosi pojemność puli. Rozbieżność z faktyczną odmową = sterownik liczy inaczej niż API albo gra
+    /// nie zrobiła resetu puli, którego oczekuje.
+    pub fn explain(&self, pool: u64, layouts: &[u64]) -> String {
+        let Some(p) = self.pools.get(&pool) else { return format!("pula {pool:#x} nieznana") };
+        let mut need: Vec<(u32, u32)> = Vec::new();
+        for l in layouts {
+            match self.layouts.get(l) {
+                Some(lay) => {
+                    for (t, c) in &lay.counts {
+                        match need.iter_mut().find(|(x, _)| x == t) {
+                            Some(e) => e.1 += *c,
+                            None => need.push((*t, *c)),
+                        }
+                    }
+                }
+                None => return format!("pula {pool:#x}: nieznany układ {l:#x}"),
+            }
+        }
+        let mut left: Vec<(u32, u32)> = p.left.iter().map(|(t, c)| (*t, *c)).collect();
+        left.sort_unstable();
+        format!("pula {pool:#x}: maxSets {}, zostało wg klienta {} zestawów, deskryptory (typ,zostało) {:?}, pojemność {:?}, alokacja {} zestawów potrzebuje (typ,liczba) {:?}, pula specjalna: {}", p.max_sets, p.sets_left, left, p.sizes, layouts.len(), need, p.special)
+    }
+
     /// Po synchronicznej alokacji: serwer powiedział prawdę. Jeśli się udała i umiemy ją policzyć, odejmujemy zasoby jak przy spekulacji.
     /// Jeśli się nie udała ALBO się udała, ale nie umiemy jej policzyć (nieznany układ, pNext), serwer zużył albo wyczerpał pulę poza
     /// naszą księgowością, więc do resetu puli nie spekulujemy na niej już wcale.
