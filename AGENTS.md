@@ -145,3 +145,19 @@ Cel użytkownika: 30-60 FPS w Cyberpunku. Remoting Vulkan ma sufit przez synchro
 - Xvfb + Proton: Proton uruchamia się, ale `proton run` czeka na klienta Steam (most `steam.exe`), a `runinprefix` kończy się `Assertion failed: !status, steamclient_main.c:375` (lsteamclient potrzebuje działającego Steama). Potrzebny zalogowany klient Steam na serwerze (logowanie + Steam Guard robi użytkownik).
 - Skrypt startowy: `~/srv-cp.sh` na serwerze (kopia w jobie). FPS przez `VK_LAYER_MESA_overlay` (`output_file`, `fps_sampling_period=1000`).
 - Pułapka: `ssh host 'pkill -f wzorzec'` zabija własną sesję, bo wzorzec jest w jej wierszu poleceń; używać `[P]attern`.
+
+## 2026-11-04: remoting dalej głównym trybem; odczyt leniwy, odroczony skan, szybka ścieżka domyślnie
+
+Decyzja użytkownika: bez streamingu i bez "oszukiwania" (odpowiedzi lokalne tylko dla funkcji czystych, weryfikowanych próbkowo). Tryb "gra na serwerze" porzucony (wymaga zalogowanego Steama na serwerze; pliki gry zostały).
+
+Pomiar Cyberpunka (15 036 klatek): 58 obiegów/klatkę, `vkWaitSemaphores` 30/klatkę po 1,4 ms (głównie kolejka do blokady instancji i odświeżenie 3 pamięci HOST_CACHED po ok. 9,5 MB po każdym oczekiwaniu), skan pamięci 11 GB/klatkę (213 skanów/klatkę, bo skan przy każdym `vkQueueSubmit`).
+
+Zrobione (wszystko domyślnie włączone; wyłączniki: `GPU_ICD_NO_FASTPATH`, `GPU_ICD_NO_LAZY`, `GPU_ICD_EAGER_SCAN`):
+- Szybka ścieżka `vkCmd*` bez blokady: bufor poleceń PER BUFOR POLECEŃ (`DispObj::pending`), nie per wątek (vkd3d-proton nagrywa jeden bufor na kilku wątkach; polecenia po `vkEndCommandBuffer` wywracały sterownik NVIDIA). Opróżnianie przy End; Begin/Reset wyrzucają zaległości; `vkCmdExecuteCommands` poza szybką ścieżką (przegląd agy).
+- `vkGetDescriptorEXT` bez blokady (statyczna gotowość wzoru + cache RwLock na proces); audyt co N-te wywołanie.
+- Skan odwzorowanej pamięci odroczony do wysłania partii (`scan_pending`, `settle_memory`): zapisy pamięci idą PRZED partią z `vkQueueSubmit`.
+- Cache wymagań pamięci: klucz uwzględnia pNext (lista formatów, external, stencil usage), listę rodzin kolejek; `vkGetDeviceImageMemoryRequirements`.
+- **Odczyt leniwy** (`lazymap.rs`): pamięci HOST_CACHED 64 KiB-256 MiB mają podwójne odwzorowanie memfd; po oczekiwaniu strony tylko unieważniane i zrzucane z widoku aplikacji (`madvise`), błąd strony MINOR obsługuje wątek `gpu-icd-lazy` (pobranie okna z serwera, `UFFDIO_CONTINUE`); okno rośnie przy odczycie sekwencyjnym (16 -> 4096 stron). `fetch` bierze blokadę instancji z `try_lock` i limitem 3 s (zakleszczenie, gdy wątek aplikacji sam ją trzyma: strona oddana bez pobrania, licznik `FETCH_TIMEOUTS`). Ograniczenie: `UFFD_USER_MODE_ONLY`, więc syscall jądra na takiej pamięci dostanie EFAULT. Test `gpu-smoke` (`GPU_SMOKE_CACHED=1 GPU_SMOKE_BUF=16777216 GPU_SMOKE_READ=4096`, 20 powtórzeń ze zmiennym wzorcem GPU): 244 ms -> 2,75 ms, dane poprawne.
+- Log: ranking obiegów wg poleceń, powód odświeżania pamięci (bufory i flagi użycia), liczniki odczytu leniwego.
+
+Następne (po kolejnym przebiegu Cyberpunka): odczytać z logu `obiegi wg poleceń` i `odczyt leniwy`; jeśli `vkWaitSemaphores` nadal dominuje, wypychanie wartości semaforów z serwera (wątek obserwujący + kanał na połączeniu wideo) i lokalne odpowiedzi; precyzyjne śledzenie zapisów GPU z poleceń; Zink/Heaven (crash w `driCreateContextAttribs`, skrypt `hv.sh` w jobie).
