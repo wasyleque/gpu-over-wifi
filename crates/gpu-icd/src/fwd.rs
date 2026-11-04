@@ -85,6 +85,8 @@ pub struct Stats {
     pub desc_misses: u64,
     /// Chybienia cache deskryptorów według `VkDescriptorType` (0..=10; ostatnia pozycja: inne).
     pub desc_miss_by_type: [u64; 12],
+    pub lazy_memories: u64,
+    pub lazy_invalidations: u64,
     /// Obiegi po sieci według polecenia: (liczba, łączny czas oczekiwania w ns). Do rankingu, co jeszcze blokuje klatki.
     pub rt_by_cmd: std::collections::HashMap<&'static str, (u64, u64)>,
     pub memr_bytes: u64,
@@ -139,8 +141,10 @@ pub struct Flags {
     pub no_refresh_uncached: bool,
     /// Skan odwzorowanej pamięci przy każdym `vkQueueSubmit` (dawne zachowanie) zamiast odroczonego do wysłania partii.
     pub eager_scan: bool,
-    /// Szybka ścieżka poleceń `vkCmd*` bez blokady (`GPU_ICD_FASTPATH=1`): doświadczalna, domyślnie wyłączona (jedno uruchomienie Cyberpunka
-    /// wywróciło po niej sterownik NVIDIA na serwerze, przyczyna w badaniu).
+    /// Odczyt leniwy pamięci HOST_CACHED (domyślnie włączony; `GPU_ICD_NO_LAZY=1` wyłącza).
+    pub lazy: bool,
+    /// Szybka ścieżka poleceń `vkCmd*` bez blokady instancji (domyślnie włączona; `GPU_ICD_NO_FASTPATH=1` wyłącza). Dawny crash sterownika
+    /// NVIDIA na serwerze miał przyczynę w buforach per wątek zamiast per bufor poleceń; od naprawy pełne sesje Cyberpunka przechodzą.
     pub fastpath: bool,
 }
 
@@ -149,7 +153,8 @@ pub fn flags() -> &'static Flags {
     F.get_or_init(|| Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
-        fastpath: std::env::var_os("GPU_ICD_FASTPATH").is_some(),
+        lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
+        fastpath: std::env::var_os("GPU_ICD_NO_FASTPATH").is_none(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
         // Cykliczne liczniki co 5 s: `GPU_ICD_STATS=periodic` albo (jak dotąd) razem z `GPU_ICD_DEBUG`.
@@ -165,7 +170,13 @@ pub struct Shadow {
     pages: gpu_proto::pagediff::PageTracker,
     /// Jądrowe śledzenie zapisów aplikacji (duże pamięci): zamiast skrótów całej pamięci sprawdzamy tylko zapisane strony.
     tracker: Option<crate::memtrack::Tracker>,
+    /// Odczyt leniwy (`lazymap`): po oczekiwaniu na GPU strony są tylko unieważniane, a pobierane przy dotknięciu przez aplikację.
+    lazy: Option<std::sync::Arc<crate::lazymap::LazyRegion>>,
 }
+
+/// Zakres rozmiarów pamięci z odczytem leniwym: mniejsze są tanie do odświeżenia, większe zajęłyby za dużo pamięci na kopię.
+const LAZY_MIN: usize = 64 * 1024;
+const LAZY_MAX: usize = 256 * 1024 * 1024;
 
 /// Od tego rozmiaru pamięć ma jądrowe śledzenie zapisów (mniejsze są tanie do przeskanowania w całości).
 const TRACK_FROM: usize = 1024 * 1024;
@@ -174,7 +185,23 @@ impl Shadow {
     pub fn new(len: usize) -> Shadow {
         let data = crate::memtrack::PageAlignedBuf::new(len);
         let tracker = if len >= TRACK_FROM && std::env::var("GPU_ICD_NO_MEMTRACK").is_err() { crate::memtrack::Tracker::new(data.as_ptr(), data.capacity()) } else { None };
-        Shadow { data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker }
+        Shadow { data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None }
+    }
+
+    /// Pamięć z odczytem leniwym (podwójne odwzorowanie `memfd` zarejestrowane w `userfaultfd`); `None`, gdy jądro tego nie obsługuje.
+    pub fn new_lazy(len: usize, memory: u64) -> Option<Shadow> {
+        let data = crate::memtrack::PageAlignedBuf::new_shared(len)?;
+        let region = crate::lazymap::LazyRegion::register(memory, data.app_ptr(), data.as_ptr(), data.capacity())?;
+        let Some(tracker) = crate::memtrack::Tracker::attached(data.app_ptr(), data.capacity()) else {
+            region.unregister();
+            return None;
+        };
+        Some(Shadow { data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: Some(tracker), lazy: Some(region) })
+    }
+
+    /// Wskaźnik dla aplikacji (`vkMapMemory`): widok objęty obsługą błędów stron albo zwykły bufor.
+    pub fn app_ptr(&self) -> *mut u8 {
+        self.data.app_ptr()
     }
 
     /// Zakresy zmienione przez aplikację od ostatniego wysłania. Z jądrowym śledzeniem sprawdzamy tylko zapisane strony
@@ -197,6 +224,14 @@ impl Shadow {
 
     pub fn mark_synced(&mut self, from: usize, to: usize) {
         self.pages.mark_synced(&self.data, from, to);
+    }
+}
+
+impl Drop for Shadow {
+    fn drop(&mut self) {
+        if let Some(r) = &self.lazy {
+            r.unregister();
+        }
     }
 }
 
@@ -357,11 +392,30 @@ impl InstState {
         self.stats.t_refresh_ns += t.elapsed().as_nanos() as u64;
     }
 
+    /// Po zakończonym oczekiwaniu: pamięci z odczytem leniwym tylko unieważniamy (dane przyjdą przy dotknięciu przez aplikację).
+    fn lazy_invalidate(&mut self) {
+        let mut n = 0;
+        for (id, s) in self.mems.iter() {
+            let Some(r) = &s.lazy else { continue };
+            if !s.mapped {
+                continue;
+            }
+            let ranges = match self.gpuw.plan(*id) {
+                crate::gpuwrite::Plan::Skip => continue,
+                crate::gpuwrite::Plan::Whole => vec![(0, r.len() as u64)],
+                crate::gpuwrite::Plan::Ranges(v) => v,
+            };
+            r.invalidate(&ranges);
+            n += 1;
+        }
+        self.stats.lazy_invalidations += n;
+    }
+
     /// Odwzorowane pamięci, które po oczekiwaniu trzeba odświeżyć z serwera (mapowane i dozwolone do odczytu).
     fn refresh_ids(&self) -> Vec<u64> {
         self.mems
             .iter()
-            .filter(|(i, s)| s.mapped && self.mem_refresh.get(i).copied().unwrap_or(true) && self.gpuw.plan(**i) != crate::gpuwrite::Plan::Skip)
+            .filter(|(i, s)| s.mapped && s.lazy.is_none() && self.mem_refresh.get(i).copied().unwrap_or(true) && self.gpuw.plan(**i) != crate::gpuwrite::Plan::Skip)
             .map(|(i, _)| *i)
             .collect()
     }
@@ -388,6 +442,7 @@ impl InstState {
         let plan = self.gpuw.plan(id);
         let size = self.mem_sizes.get(&id).copied().unwrap_or(0);
         if flags().periodic && self.plans_logged.insert(id) {
+            eprintln!("[gpu-icd] powód odświeżania pamięci {id:#x}: {}", self.gpuw.describe(id));
             match &plan {
                 crate::gpuwrite::Plan::Ranges(r) => eprintln!("[gpu-icd] odświeżanie pamięci {id:#x} ({} MB): {} zakresów, razem {} KB", size >> 20, r.len(), r.iter().map(|x| x.1).sum::<u64>() >> 10),
                 p => eprintln!("[gpu-icd] odświeżanie pamięci {id:#x} ({} MB): {p:?}", size >> 20),
@@ -740,6 +795,10 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        if stats.lazy_memories > 0 {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!("[gpu-icd] odczyt leniwy: pamięci {}, unieważnienia {}, błędy stron {} (z pobraniem {}, {} KB), przekroczenia czasu {}", stats.lazy_memories, stats.lazy_invalidations, crate::lazymap::FAULTS.load(Relaxed), crate::lazymap::FAULTS_FETCHED.load(Relaxed), crate::lazymap::FETCHED_BYTES.load(Relaxed) / 1024, crate::lazymap::FETCH_TIMEOUTS.load(Relaxed));
+        }
         eprintln!("[gpu-icd] {}", lock_report());
         if let Some(l) = crate::latency::report_and_reset() {
             eprintln!("[gpu-icd] {l}");
@@ -1260,6 +1319,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         }
     }
     if cmd.class == CmdClass::Sync && result == 0 {
+        if st.gpu_dirty {
+            st.lazy_invalidate();
+        }
         if refreshed {
             // Pamięci zostały odświeżone w tym samym obiegu co oczekiwanie.
             st.gpu_dirty = false;
@@ -1268,6 +1330,38 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         }
     }
     fail(result)
+}
+
+/// Pobranie zakresu leniwej pamięci z serwera dla wątku obsługi błędów stron (`lazymap`). Blokada instancji z limitem czasu: gdy wątek
+/// aplikacji sam ją trzyma (przekazał nam wskaźnik do odwzorowanej pamięci), oddajemy stronę bez pobrania zamiast zakleszczyć grę.
+fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
+    let Some(inst) = state() else { return false };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut st = loop {
+        match inst.state.try_lock() {
+            Ok(g) => break g,
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    crate::lazymap::FETCH_TIMEOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+        }
+    };
+    let Some(d) = st.read_mem(r.memory, off as u64, len) else { return false };
+    r.fill(off, &d);
+    if let Some(s) = st.mems.get_mut(&r.memory) {
+        s.mark_synced(off, off + len);
+    }
+    true
+}
+
+pub(crate) fn install_lazy() {
+    if flags().lazy {
+        crate::lazymap::set_fetch(lazy_fetch);
+    }
 }
 
 // ---------- pamięć odwzorowana (lokalnie; synchronizacja z serwerem w punktach) ----------
@@ -1279,9 +1373,25 @@ pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64,
     if offset > total || (size != u64::MAX && offset.saturating_add(size) > total) || out.is_null() {
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
-    let sh = st.mems.entry(mem).or_insert_with(|| Shadow::new(total as usize));
+    if !st.mems.contains_key(&mem) {
+        let eligible = flags().lazy && st.mem_cached.get(&mem).copied().unwrap_or(false) && st.mem_refresh.get(&mem).copied().unwrap_or(false) && (LAZY_MIN..=LAZY_MAX).contains(&(total as usize));
+        let lazy = if eligible { Shadow::new_lazy(total as usize, mem) } else { None };
+        if lazy.is_some() {
+            st.stats.lazy_memories += 1;
+            if flags().periodic || flags().debug {
+                eprintln!("[gpu-icd] odczyt leniwy włączony dla pamięci {mem:#x} ({} KB)", total / 1024);
+            }
+        }
+        let sh = lazy.unwrap_or_else(|| Shadow::new(total as usize));
+        st.mems.insert(mem, sh);
+    }
+    let Some(sh) = st.mems.get_mut(&mem) else { return VK_ERROR_MEMORY_MAP_FAILED };
     sh.mapped = true;
-    *out = sh.data.as_mut_ptr().add(offset as usize);
+    if let Some(r) = &sh.lazy {
+        // Po ponownym odwzorowaniu zawartość mogła się zmienić po stronie GPU.
+        r.invalidate(&[(0, r.len() as u64)]);
+    }
+    *out = sh.app_ptr().add(offset as usize);
     0
 }
 
@@ -1337,6 +1447,9 @@ pub unsafe extern "C" fn invalidate_ranges(_dev: u64, count: u32, r: *const u8) 
             if let Some(s) = st.mems.get_mut(&mem) {
                 s.data[off as usize..end as usize].copy_from_slice(&d);
                 s.mark_synced(off as usize, end as usize);
+                if let Some(r) = &s.lazy {
+                    r.mark_fresh(off as usize, end as usize);
+                }
             }
         }
         map.insert(mem, ());
@@ -1514,6 +1627,24 @@ mod memreq_target_tests {
         assert!(!other.push(&[9]));
         assert!(other.push(&vec![0u8; LOCAL_FLUSH_BYTES]));
         assert!(cb.take().is_empty());
+    }
+
+    #[test]
+    fn lazy_shadow_tracks_writes_made_through_the_app_view() {
+        const PAGE: usize = 4096;
+        let Some(mut s) = Shadow::new_lazy(PAGE * 64, 77) else {
+            eprintln!("POMINIĘTO: brak userfaultfd MINOR dla shmem");
+            return;
+        };
+        assert!(s.dirty_ranges().is_empty());
+        // SAFETY: zapisy w granicach widoku aplikacji.
+        unsafe {
+            *s.app_ptr().add(PAGE * 3 + 5) = 9;
+            *s.app_ptr().add(PAGE * 10) = 1;
+        }
+        assert_eq!(s.dirty_ranges(), vec![(PAGE * 3, PAGE * 4), (PAGE * 10, PAGE * 11)]);
+        assert_eq!(s.data[PAGE * 3 + 5], 9, "widok własny widzi zapis aplikacji");
+        assert!(s.dirty_ranges().is_empty(), "po odczycie stan jest czysty");
     }
 
 }

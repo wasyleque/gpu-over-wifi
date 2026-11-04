@@ -29,6 +29,8 @@ struct MemUse {
     /// Przypisano coś, czego zakresu nie umiemy określić (obraz, nieznany bufor).
     whole: bool,
     ranges: Vec<(u64, u64)>,
+    /// Diagnostyka (do logu): pierwsze bufory przypisane do pamięci jako (przesunięcie, rozmiar, flagi użycia).
+    sample: Vec<(u64, u64, u32)>,
 }
 
 /// Bufory (rozmiar, użycie) i to, co przypisano do poszczególnych pamięci.
@@ -53,6 +55,11 @@ impl GpuWrites {
 
     pub fn bind_buffer(&mut self, memory: u64, buffer: u64, offset: u64) {
         let e = self.mems.entry(memory).or_default();
+        if let Some(&(size, usage)) = self.bufs.get(&buffer) {
+            if e.sample.len() < 6 {
+                e.sample.push((offset, size, usage));
+            }
+        }
         match self.bufs.get(&buffer) {
             Some(&(_, usage)) if usage_is_read_only(usage) => {}
             Some(&(size, _)) if size > 0 => e.ranges.push((offset, size)),
@@ -62,6 +69,14 @@ impl GpuWrites {
 
     pub fn bind_image(&mut self, memory: u64) {
         self.mems.entry(memory).or_default().whole = true;
+    }
+
+    /// Krótki opis do logu: z czego wynika plan odświeżania pamięci (bufory i ich flagi użycia).
+    pub fn describe(&self, memory: u64) -> String {
+        match self.mems.get(&memory) {
+            None => "brak powiązań".into(),
+            Some(e) => format!("obrazy:{} bufory(offset,rozmiar,użycie): {:x?}", e.whole, e.sample),
+        }
     }
 
     pub fn plan(&self, memory: u64) -> Plan {

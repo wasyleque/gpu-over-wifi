@@ -34,6 +34,7 @@ mod video;
 mod sbuild;
 mod wsi;
 mod lazy;
+mod lazymap;
 mod shadow;
 #[rustfmt::skip]
 mod icd_table;
@@ -354,6 +355,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
         }),
     }));
     fwd::desc_cache_clear();
+    fwd::install_lazy();
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
     {
         let mut st = crate::fwd::lock_state(&*obj);

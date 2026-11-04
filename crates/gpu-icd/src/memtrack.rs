@@ -79,7 +79,7 @@ struct PageRegion {
 
 /// Obszar pamięci (wyrównany do strony) z jądrowym śledzeniem zapisów.
 pub struct Tracker {
-    _uffd: OwnedFd,
+    _uffd: Option<OwnedFd>,
     pagemap: File,
     base: usize,
     len: usize,
@@ -112,12 +112,24 @@ impl Tracker {
                 return None;
             }
             let pagemap = File::open("/proc/self/pagemap").ok()?;
-            let t = Tracker { _uffd: uffd, pagemap, base, len };
+            let t = Tracker { _uffd: Some(uffd), pagemap, base, len };
             // Tuż po włączeniu ochrony wszystkie strony liczą się jako "zapisane": jeden pełny odczyt zeruje stan (i sprawdza,
             // że jądro obsługuje PAGEMAP_SCAN już tutaj, a nie przy pierwszym użyciu).
             t.take_dirty(0, len)?;
             Some(t)
         }
+    }
+
+    /// Śledzenie obszaru zarejestrowanego już przez inny userfaultfd z ochroną zapisu (odczyt leniwy): potrzebny tylko `pagemap`.
+    pub fn attached(base: *mut u8, len: usize) -> Option<Tracker> {
+        let base = base as usize;
+        if !base.is_multiple_of(PAGE) || len == 0 || !len.is_multiple_of(PAGE) {
+            return None;
+        }
+        let pagemap = File::open("/proc/self/pagemap").ok()?;
+        let t = Tracker { _uffd: None, pagemap, base, len };
+        t.take_dirty(0, len)?;
+        Some(t)
     }
 
     /// Zakresy bajtów `[od, do)` względem początku obszaru zapisane od ostatniego wywołania dla tego zakresu; jednocześnie
@@ -170,6 +182,8 @@ pub struct PageAlignedBuf {
     ptr: *mut u8,
     len: usize,
     cap: usize,
+    /// Podwójne odwzorowanie `memfd` (odczyt leniwy): `ptr` to widok własny, widok aplikacji zwraca `app_ptr`.
+    shared: Option<crate::shadow::DoubleMap>,
 }
 
 // SAFETY: bufor jest własnością jednej struktury; dostęp współbieżny kontroluje właściciel.
@@ -182,8 +196,27 @@ impl PageAlignedBuf {
         // SAFETY: anonimowe odwzorowanie bez adresu docelowego.
         let ptr = unsafe { mmap(std::ptr::null_mut(), cap, 3, 0x22, -1, 0) };
         assert!(ptr as isize != -1, "brak pamięci na kopię odwzorowanej pamięci");
-        PageAlignedBuf { ptr, len, cap }
+        PageAlignedBuf { ptr, len, cap, shared: None }
     }
+
+    /// Bufor na pamięci współdzielonej z dwoma widokami (patrz `lazymap`); strony są od razu w pamięci podręcznej stron, bo odczyt
+    /// leniwy opiera się na błędach MINOR, które jądro zgłasza tylko dla stron już obecnych.
+    pub fn new_shared(len: usize) -> Option<PageAlignedBuf> {
+        let dm = crate::shadow::DoubleMap::new(len.max(1)).ok()?;
+        let cap = dm.len();
+        let ptr = dm.own_ptr();
+        for p in 0..cap / PAGE {
+            // SAFETY: zapis zera w granicach widoku własnego (strona nowego `memfd` ma już wartość zero).
+            unsafe { std::ptr::write_volatile(ptr.add(p * PAGE), 0) };
+        }
+        Some(PageAlignedBuf { ptr, len, cap, shared: Some(dm) })
+    }
+
+    /// Widok przekazywany aplikacji (dla zwykłego bufora ten sam co `as_ptr`).
+    pub fn app_ptr(&self) -> *mut u8 {
+        self.shared.as_ref().map_or(self.ptr, |d| d.app_ptr())
+    }
+
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr
     }
@@ -212,6 +245,9 @@ impl std::ops::DerefMut for PageAlignedBuf {
 
 impl Drop for PageAlignedBuf {
     fn drop(&mut self) {
+        if self.shared.is_some() {
+            return; // `DoubleMap` zwalnia oba widoki
+        }
         // SAFETY: zwalniamy odwzorowanie utworzone w `new` z tym samym rozmiarem.
         unsafe { munmap(self.ptr, self.cap) };
     }

@@ -62,7 +62,10 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
 
-const SIZE: u64 = 4096;
+/// Rozmiar bufora testu powtórzeń (GPU_SMOKE_BUF, bajty; domyślnie 4096). Od 64 KiB pamięć HOST_CACHED może mieć odczyt leniwy.
+fn buf_size() -> u64 {
+    std::env::var("GPU_SMOKE_BUF").ok().and_then(|v| v.parse().ok()).unwrap_or(4096)
+}
 
 /// Tryb `enum`: wyliczanie urządzeń tak jak robi `vkcube` (najpierw NULL, potem bufor), z rozszerzeniami z `GPU_SMOKE_EXTS`.
 fn enum_mode() {
@@ -360,7 +363,7 @@ fn main() {
     let mut queue: u64 = 0;
     call("vkGetDeviceQueue", &[dev, family, 0, &mut queue as *mut u64 as u64]);
     let mut bci = S::new("VkBufferCreateInfo");
-    bci.u64("size", SIZE).u32("usage", 0x2);
+    bci.u64("size", buf_size()).u32("usage", 0x2);
     let mut buf: u64 = 0;
     let r = call("vkCreateBuffer", &[dev, bci.p(), 0, &mut buf as *mut u64 as u64]);
     if r != 0 {
@@ -373,7 +376,8 @@ fn main() {
     if bits == 0xDEAD_BEEF || bits == 0 {
         die(&format!("zapytanie o wymagania nie zwróciło wyniku (bits={bits:#x})"));
     }
-    let mt = (0..types.len()).find(|&i| bits & (1 << i) != 0 && types[i] & 0x6 == 0x6).unwrap_or_else(|| die("brak pamięci widocznej dla hosta")) as u32;
+    let cached_buf = std::env::var_os("GPU_SMOKE_CACHED").is_some();
+    let mt = (0..types.len()).find(|&i| bits & (1 << i) != 0 && types[i] & 0x6 == 0x6 && (!cached_buf || types[i] & 0x8 != 0)).unwrap_or_else(|| die("brak pamięci widocznej dla hosta")) as u32;
     let mut ai = S::new("VkMemoryAllocateInfo");
     ai.u64("allocationSize", rsize).u32("memoryTypeIndex", mt);
     let mut memory: u64 = 0;
@@ -411,8 +415,9 @@ fn main() {
     for rep in 0..reps {
         let pattern = 0xCAFE_0000u32 + rep as u32;
         let t = Instant::now();
-        // SAFETY: odwzorowanie ma `rsize` bajtów (>= SIZE).
-        unsafe { std::ptr::write_bytes(ptr, 0, SIZE as usize) };
+        // SAFETY: odwzorowanie ma `rsize` bajtów (>= buf_size()).
+        let zero_len = std::env::var("GPU_SMOKE_READ").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(buf_size() as usize).min(buf_size() as usize);
+        unsafe { std::ptr::write_bytes(ptr, 0, zero_len) };
         call("vkBeginCommandBuffer", &[cb, cbi.p()]);
         call("vkCmdFillBuffer", &[cb, buf, 0, u64::MAX, pattern as u64]);
         call("vkEndCommandBuffer", &[cb]);
@@ -426,7 +431,9 @@ fn main() {
         }
         call("vkResetFences", &[dev, 1, &fence as *const u64 as u64]);
         call("vkResetCommandBuffer", &[cb, 0]);
-        let data = unsafe { std::slice::from_raw_parts(ptr, SIZE as usize) };
+        // GPU_SMOKE_READ=<bajty>: aplikacja czyta tylko początek bufora (typowy odczyt wyniku; tu odczyt leniwy najwięcej zyskuje).
+        let read_len = std::env::var("GPU_SMOKE_READ").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(buf_size() as usize).min(buf_size() as usize);
+        let data = unsafe { std::slice::from_raw_parts(ptr, read_len) };
         if !data.chunks(4).all(|w| u32::from_le_bytes(w.try_into().unwrap()) == pattern) {
             die(&format!("powtórzenie {rep}: bufor nie zawiera wzorca {pattern:#x} (pierwsze słowo {:#x})", u32_at(data, 0)));
         }
@@ -437,7 +444,9 @@ fn main() {
 
     // ---------- obraz: clear + copy do bufora (bariery z 10 parametrami, unia VkClearColorValue) ----------
     {
-        let (w, h) = (64u32, 64u32);
+        // GPU_SMOKE_SIZE=<bok>: większy obraz (np. 512 = 1 MiB bufora odczytu), GPU_SMOKE_CACHED=1: odczyt do pamięci HOST_CACHED (test odczytu leniwego).
+        let side: u32 = std::env::var("GPU_SMOKE_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+        let (w, h) = (side, side);
         let mut ici = S::new("VkImageCreateInfo");
         ici.u32("imageType", 1).u32("format", 37).u32o("extent", 0, w).u32o("extent", 4, h).u32o("extent", 8, 1);
         ici.u32("mipLevels", 1).u32("arrayLayers", 1).u32("samples", 1).u32("usage", 0x3);
@@ -467,7 +476,9 @@ fn main() {
         let mut oreq = S::new("VkMemoryRequirements");
         call("vkGetBufferMemoryRequirements", &[dev, obuf, oreq.p()]);
         let (osz, obits) = (u64::from_le_bytes(oreq.bytes()[0..8].try_into().unwrap()), u32_at(oreq.bytes(), 16));
-        let omt = (0..types.len()).find(|&i| obits & (1 << i) != 0 && types[i] & 0x6 == 0x6).unwrap_or_else(|| die("brak pamięci hosta dla odczytu")) as u32;
+        let want_cached = std::env::var_os("GPU_SMOKE_CACHED").is_some();
+        let omt = (0..types.len()).find(|&i| obits & (1 << i) != 0 && types[i] & 0x6 == 0x6 && (!want_cached || types[i] & 0x8 != 0)).unwrap_or_else(|| die("brak pamięci hosta dla odczytu")) as u32;
+        println!("pamięć odczytu: typ {omt}, flagi {:#x}, {} KB", types[omt as usize], osz / 1024);
         let mut oai = S::new("VkMemoryAllocateInfo");
         oai.u64("allocationSize", osz).u32("memoryTypeIndex", omt);
         let mut omem: u64 = 0;
