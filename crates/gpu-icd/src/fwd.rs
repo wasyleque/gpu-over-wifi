@@ -167,6 +167,8 @@ pub struct Flags {
     pub desc_spec: bool,
     /// Wyłączniki do szukania przyczyn zawieszeń: `GPU_ICD_LOCKED_WAIT=1` (czekanie na odpowiedź z blokadą instancji, jak dawniej).
     pub locked_wait: bool,
+    /// Odcinkowe oczekiwania na semafory i fence'e (`GPU_ICD_SLICE_WAIT=1`): doświadczalne, domyślnie wyłączone do czasu testu w grze.
+    pub slice_wait: bool,
     /// Szybka ścieżka poleceń `vkCmd*` bez blokady instancji (domyślnie włączona; `GPU_ICD_NO_FASTPATH=1` wyłącza). Dawny crash sterownika
     /// NVIDIA na serwerze miał przyczynę w buforach per wątek zamiast per bufor poleceń; od naprawy pełne sesje Cyberpunka przechodzą.
     pub fastpath: bool,
@@ -180,6 +182,7 @@ pub fn flags() -> &'static Flags {
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
         desc_spec: std::env::var_os("GPU_ICD_NO_DESC_SPEC").is_none(),
         locked_wait: std::env::var_os("GPU_ICD_LOCKED_WAIT").is_some(),
+        slice_wait: std::env::var_os("GPU_ICD_SLICE_WAIT").is_some(),
         fastpath: std::env::var_os("GPU_ICD_NO_FASTPATH").is_none(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
@@ -842,28 +845,58 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         }
     }
     let t0 = std::time::Instant::now();
-    let r = match exec_begin(&mut st, op, &mut slots, false) {
-        Step::Done(v) => v,
-        Step::Pending(p) if flags().locked_wait => {
-            let resp = p.receive();
-            exec_finish(&mut st, p, resp)
+    // Blokujące oczekiwania (`vkWaitSemaphores`, `vkWaitForFences`) wysyłamy do serwera w krótkich odcinkach (1 -> 4 ms) i powtarzamy do upływu
+    // limitu aplikacji. Serwer wykonuje żądania po kolei, więc długie oczekiwanie blokowałoby przetwarzanie kolejnych żądań, w tym zgłoszenia pracy,
+    // na którą to oczekiwanie czeka (vkd3d czeka na wartość semafora, którą inny wątek zgłosi dopiero potem): zablokowany strumień, gra stoi do
+    // upływu limitu (do 16 s z blokadą w ręku), a silnik gry kończy się własnym watchdogiem po 120 s.
+    let wait_idx = if flags().slice_wait && matches!(cmd.name, "vkWaitSemaphores" | "vkWaitSemaphoresKHR" | "vkWaitForFences") { params.iter().position(|p| p.name == "timeout") } else { None };
+    let wait_total = wait_idx.map(|i| slots[i]);
+    let wait_start = std::time::Instant::now();
+    let mut slice_ns: u64 = 1_000_000;
+    let r = loop {
+        if let (Some(i), Some(total)) = (wait_idx, wait_total) {
+            let elapsed = wait_start.elapsed().as_nanos() as u64;
+            let remaining = if total == u64::MAX { u64::MAX } else { total.saturating_sub(elapsed) };
+            slots[i] = if total == 0 { 0 } else { remaining.min(slice_ns) };
         }
-        Step::Pending(p) => {
-            // Czekamy na odpowiedź serwera BEZ blokady instancji: pozostałe wątki gry nagrywają, zgłaszają i pytają w tym czasie.
-            // Wykonanie u serwera i tak jest sekwencyjne, a odpowiedzi odbieramy w kolejności biletów (patrz `link`).
-            drop(hold);
-            drop(st);
-            crate::watchdog::phase(crate::watchdog::WAIT_REPLY, p.base);
-            let resp = p.receive();
-            crate::watchdog::phase(crate::watchdog::WAIT_LOCK_FINISH, p.base);
-            let t_lock = std::time::Instant::now();
-            st = lock_state(inst);
-            crate::watchdog::phase(crate::watchdog::HOLD_LOCK, p.base);
-            LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-            LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            hold = HoldTimer(std::time::Instant::now());
-            exec_finish(&mut st, p, resp)
+        let r = match exec_begin(&mut st, op, &mut slots, false) {
+            Step::Done(v) => v,
+            Step::Pending(p) if flags().locked_wait => {
+                let resp = p.receive();
+                exec_finish(&mut st, p, resp)
+            }
+            Step::Pending(p) => {
+                // Czekamy na odpowiedź serwera BEZ blokady instancji: pozostałe wątki gry nagrywają, zgłaszają i pytają w tym czasie.
+                // Wykonanie u serwera i tak jest sekwencyjne, a odpowiedzi odbieramy w kolejności biletów (patrz `link`).
+                drop(hold);
+                drop(st);
+                crate::watchdog::phase(crate::watchdog::WAIT_REPLY, p.base);
+                let resp = p.receive();
+                crate::watchdog::phase(crate::watchdog::WAIT_LOCK_FINISH, p.base);
+                let t_lock = std::time::Instant::now();
+                st = lock_state(inst);
+                crate::watchdog::phase(crate::watchdog::HOLD_LOCK, p.base);
+                LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                hold = HoldTimer(std::time::Instant::now());
+                exec_finish(&mut st, p, resp)
+            }
+        };
+        // Odcinek upłynął bez spełnienia warunku (VK_TIMEOUT = 2), a limit aplikacji jeszcze nie: odpuszczamy blokadę na chwilę i pytamy ponownie.
+        let timed_out = r as u32 as i32 == 2;
+        let more = match (wait_idx, wait_total) {
+            (Some(_), Some(total)) => total != 0 && (total == u64::MAX || (wait_start.elapsed().as_nanos() as u64) < total),
+            _ => false,
+        };
+        if !(timed_out && more) {
+            break r;
         }
+        drop(hold);
+        drop(st);
+        std::thread::sleep(std::time::Duration::from_micros(50));
+        st = lock_state(inst);
+        hold = HoldTimer(std::time::Instant::now());
+        slice_ns = (slice_ns * 2).min(4_000_000);
     };
     let _ = &hold;
     trace(cmd.name, r, t0.elapsed().as_micros());
