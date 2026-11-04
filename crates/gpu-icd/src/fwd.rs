@@ -1341,9 +1341,10 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     if let Some((pool, layouts)) = &alloc_ctx {
         if !speculated {
             if result < 0 {
+                // Normalny cykl aplikacji: jedna odmowa, potem reset puli. Opisujemy dopiero odmowy powtórzone bez resetu (tu gra się wywala).
                 static EXPLAINED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                if EXPLAINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-                    eprintln!("[gpu-icd] odmowa alokacji zestawów ({result}): {}", st.desc.explain(*pool, layouts));
+                if st.desc.refused_streak(*pool) >= 1 && EXPLAINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 24 {
+                    eprintln!("[gpu-icd] POWTÓRNA odmowa alokacji zestawów ({result}): {}", st.desc.explain(*pool, layouts));
                 }
             }
             st.desc.after_sync(*pool, layouts, result >= 0);

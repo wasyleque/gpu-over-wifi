@@ -23,6 +23,8 @@ struct Pool {
     /// Diagnostyka: ile razy aplikacja zresetowała pulę i ile alokacji (wywołań) zrobiła od ostatniego resetu.
     resets: u64,
     allocs_since_reset: u64,
+    /// Odmowy serwera od ostatniego resetu: normalny cykl aplikacji to jedna odmowa, potem reset; kolejne oznaczają, że reset nie pomógł.
+    refused_since_reset: u64,
 }
 
 #[derive(Default)]
@@ -85,7 +87,7 @@ impl DescriptorAccounts {
         // Bezpieczna jest tylko pula bez flag poza UPDATE_AFTER_BIND (0x2): FREE_DESCRIPTOR_SET dopuszcza fragmentację.
         let special = pnext != 0 || flags & !0x2 != 0 || sizes.iter().any(|(t, _)| *t >= 1_000_000_000);
         let left = sizes.iter().copied().collect();
-        self.pools.insert(id, Pool { max_sets, sizes, sets_left: max_sets, left, special, resets: 0, allocs_since_reset: 0 });
+        self.pools.insert(id, Pool { max_sets, sizes, sets_left: max_sets, left, special, resets: 0, allocs_since_reset: 0, refused_since_reset: 0 });
     }
 
     pub fn pool_destroyed(&mut self, id: u64) {
@@ -99,6 +101,7 @@ impl DescriptorAccounts {
             p.left = p.sizes.iter().copied().collect();
             p.resets += 1;
             p.allocs_since_reset = 0;
+            p.refused_since_reset = 0;
         }
     }
 
@@ -134,6 +137,11 @@ impl DescriptorAccounts {
         true
     }
 
+    /// Ile odmów serwera z rzędu (bez resetu między nimi) dostała ta pula.
+    pub fn refused_streak(&self, pool: u64) -> u64 {
+        self.pools.get(&pool).map_or(0, |p| p.refused_since_reset)
+    }
+
     /// Opis stanu naszej księgowości dla odmowy serwera (do logu): ile zestawów i deskryptorów każdego typu zostało wg nas w puli, ile
     /// potrzebowała alokacja oraz ile wynosi pojemność puli. Rozbieżność z faktyczną odmową = sterownik liczy inaczej niż API albo gra
     /// nie zrobiła resetu puli, którego oczekuje.
@@ -164,6 +172,9 @@ impl DescriptorAccounts {
     pub fn after_sync(&mut self, pool: u64, layouts: &[u64], ok: bool) {
         if let Some(p) = self.pools.get_mut(&pool) {
             p.allocs_since_reset += 1;
+            if !ok {
+                p.refused_since_reset += 1;
+            }
         }
         let counted = ok && self.try_allocate(pool, layouts, false);
         if !counted {
