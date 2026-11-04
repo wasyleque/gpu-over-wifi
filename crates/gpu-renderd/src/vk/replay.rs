@@ -65,6 +65,11 @@ impl Ctx for Recording<'_> {
     }
 }
 
+/// Nazwa polecenia z pierwszych dwóch bajtów (kod operacji) fragmentu strumienia: do komunikatów o błędach dekodowania.
+fn peek_name(data: &[u8]) -> &'static str {
+    data.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]])).and_then(|op| gpu_proto::meta::COMMANDS.get(op as usize)).map_or("?", |c| c.name)
+}
+
 /// Czas wykonania poleceń na serwerze według nazwy (liczba, ns) i czas samego dekodowania: do rankingu w logu statystyk.
 #[derive(Default)]
 struct CmdTimes {
@@ -217,11 +222,12 @@ impl Replayer {
         let result = loop {
             let t0 = std::time::Instant::now();
             let rec = Recording { reg: &self.registry, seen: RefCell::new(Vec::new()) };
+            let at = batch.len() - dec.remaining();
             let dc = match decode_command(&mut dec, &rec) {
                 Ok(Some(dc)) => dc,
                 Ok(None) => break Ok(()),
                 Err(e) => {
-                    eprintln!("replay: błąd dekodowania polecenia następnego po {}", self.last_name);
+                    eprintln!("replay: błąd dekodowania polecenia {} (następnego po {}): {e:?}", peek_name(&batch[at..]), self.last_name);
                     break Err(code(e));
                 }
             };
@@ -245,7 +251,14 @@ impl Replayer {
     pub fn query(&mut self, data: &[u8]) -> Result<Vec<u8>, i32> {
         let mut dec = Decoder::new(data);
         let rec = Recording { reg: &self.registry, seen: RefCell::new(Vec::new()) };
-        let dc = decode_command(&mut dec, &rec).map_err(code)?.ok_or(ERR_UNKNOWN)?;
+        let dc = match decode_command(&mut dec, &rec) {
+            Ok(Some(dc)) => dc,
+            Ok(None) => return Err(ERR_UNKNOWN),
+            Err(e) => {
+                eprintln!("replay: błąd dekodowania zapytania {} (poprzednie polecenie {}): {e:?}", peek_name(data), self.last_name);
+                return Err(code(e));
+            }
+        };
         let seen = rec.seen.into_inner();
         if dec.remaining() != 0 {
             return Err(ERR_UNKNOWN);
