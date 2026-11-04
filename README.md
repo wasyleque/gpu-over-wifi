@@ -77,6 +77,7 @@ Building blocks:
 |---|---|---|---|
 | FurMark 2.11 (Vulkan, 1280x720) | native Vulkan | ~98 FPS, frame latency ~29 ms | first run was 11 FPS: server compared the whole mapped memory after every GPU wait (fixed: ranges + streaming loads) |
 | Hamster Hunter (Unity, IL2CPP) | native Vulkan, `-force-vulkan` | 21-34 FPS, frame latency ~20 ms | memory read-back from slow (write-combined) memory: 6.9 -> 1.2 ms per request after the fix |
+| American Truck Simulator (native Linux, `-rdevice vk`) | native Vulkan | **68-72 FPS** (was 3-45) | 1.8 M descriptor-set allocations per run were synchronous round trips (125 us each, ~18 ms of a 22 ms frame): now answered locally from pool bookkeeping with a safety margin and a periodic synchronous audit; a server handle-registry limit (2^20) that killed the game after ~1 M sets is fixed |
 | Cyberpunk 2077 | DirectX 12 -> vkd3d-proton -> `VK_EXT_descriptor_buffer` | 4-5 FPS, frame latency ~23 ms | ~187 round trips per frame; 90% of descriptor cache misses are constant-buffer descriptors |
 
 ### AI hub (server A, DeepSeek V4.1 Flash via InferSSD, one NVMe, context 16384, thinking off)
