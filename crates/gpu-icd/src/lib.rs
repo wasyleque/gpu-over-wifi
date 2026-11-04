@@ -99,6 +99,8 @@ struct InstState {
     plans_logged: std::collections::HashSet<u64>,
     /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
     gpu_dirty: bool,
+    /// Był `vkQueueSubmit` od ostatniego skanu odwzorowanej pamięci: skan (zapisy na serwer) następuje tuż przed wysłaniem partii, patrz `settle_memory`.
+    scan_pending: bool,
     mems: HashMap<u64, fwd::Shadow>,
     /// Kolejki już wydane aplikacji: (urządzenie, rodzina, indeks) -> obiekt.
     queues: HashMap<(u64, u32, u32), usize>,
@@ -339,6 +341,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             synth: Default::default(),
             plans_logged: Default::default(),
             gpu_dirty: false,
+            scan_pending: false,
             templates: HashMap::new(),
             mems: HashMap::new(),
             queues: HashMap::new(),

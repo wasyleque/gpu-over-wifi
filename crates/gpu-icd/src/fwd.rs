@@ -85,6 +85,8 @@ pub struct Stats {
     pub desc_misses: u64,
     /// Chybienia cache deskryptorów według `VkDescriptorType` (0..=10; ostatnia pozycja: inne).
     pub desc_miss_by_type: [u64; 12],
+    /// Obiegi po sieci według polecenia: (liczba, łączny czas oczekiwania w ns). Do rankingu, co jeszcze blokuje klatki.
+    pub rt_by_cmd: std::collections::HashMap<&'static str, (u64, u64)>,
     pub memr_bytes: u64,
     pub query_bytes: u64,
     pub roundtrips: u64,
@@ -111,6 +113,13 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// Ranking poleceń według łącznego czasu obiegów: `nazwa liczba ms (średnio µs)`.
+    fn top_roundtrips(&self) -> String {
+        let mut v: Vec<_> = self.rt_by_cmd.iter().collect();
+        v.sort_by_key(|(_, (_, ns))| std::cmp::Reverse(*ns));
+        v.iter().take(14).map(|(n, (c, ns))| format!("{} {}x {:.0}ms ({:.0}µs)", n.trim_start_matches("vk"), c, *ns as f64 / 1e6, *ns as f64 / 1e3 / (*c).max(1) as f64)).collect::<Vec<_>>().join("; ")
+    }
+
     pub fn report(&self) -> String {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
@@ -128,6 +137,8 @@ pub struct Flags {
     pub periodic: bool,
     /// Doświadczalnie: nie odświeżaj z serwera pamięci, które nie są HOST_CACHED (`GPU_ICD_NO_REFRESH_UNCACHED=1`).
     pub no_refresh_uncached: bool,
+    /// Skan odwzorowanej pamięci przy każdym `vkQueueSubmit` (dawne zachowanie) zamiast odroczonego do wysłania partii.
+    pub eager_scan: bool,
     /// Szybka ścieżka poleceń `vkCmd*` bez blokady (`GPU_ICD_FASTPATH=1`): doświadczalna, domyślnie wyłączona (jedno uruchomienie Cyberpunka
     /// wywróciło po niej sterownik NVIDIA na serwerze, przyczyna w badaniu).
     pub fastpath: bool,
@@ -137,6 +148,7 @@ pub fn flags() -> &'static Flags {
     static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
     F.get_or_init(|| Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
+        eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         fastpath: std::env::var_os("GPU_ICD_FASTPATH").is_some(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
@@ -217,6 +229,9 @@ impl InstState {
 
     /// Wysyła zgromadzoną partię poleceń (bez czekania na odpowiedź).
     pub(crate) fn flush(&mut self) {
+        if self.scan_pending {
+            self.settle_memory();
+        }
         if self.batch.is_empty() {
             return;
         }
@@ -274,6 +289,17 @@ impl InstState {
             self.stats.lz4_in += sample.len() as u64;
             self.stats.lz4_out += gpu_proto::video::compress_lz4(sample).len() as u64;
         }
+    }
+
+    /// Odroczone skanowanie odwzorowanej pamięci (patrz `scan_pending`): zapisy pamięci idą na serwer PRZED partią poleceń, która zawiera
+    /// zgłoszenia (`vkQueueSubmit`), więc serwer wykonuje je na aktualnej zawartości. Partia jest odkładana na czas skanu, bo `send_mem`
+    /// wysyła zaległe polecenia przed każdym zapisem pamięci.
+    pub(crate) fn settle_memory(&mut self) {
+        self.scan_pending = false;
+        let held = std::mem::take(&mut self.batch);
+        self.write_mapped();
+        let mut tail = std::mem::replace(&mut self.batch, held);
+        self.batch.append(&mut tail);
     }
 
     /// Przed `vkQueueSubmit`: serwer musi zobaczyć wszystko, co aplikacja wpisała w odwzorowaną pamięć.
@@ -713,6 +739,7 @@ fn periodic_stats(stats: &Stats) {
     if last.is_none_or(|t| now.duration_since(t).as_secs() >= 5) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
+        eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         eprintln!("[gpu-icd] {}", lock_report());
         if let Some(l) = crate::latency::report_and_reset() {
             eprintln!("[gpu-icd] {l}");
@@ -962,7 +989,13 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         }
     }
     if cmd.name.starts_with("vkQueueSubmit") {
-        st.write_mapped();
+        // vkd3d-proton zgłasza ok. 8 razy na klatkę, a skan 25 pamięci kosztuje ok. 70 µs każda. Aplikacja nie może legalnie zmienić pamięci
+        // czytanej przez zgłoszoną pracę przed oczekiwaniem (a to jest punkt synchronizacji), więc skan odkładamy do wysłania partii.
+        if flags().eager_scan {
+            st.write_mapped();
+        } else {
+            st.scan_pending = true;
+        }
         st.gpu_dirty = true;
     }
     let mut e = Encoder::new();
@@ -1078,6 +1111,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         return 0;
     }
     // Droga synchroniczna: partia, potem polecenie, potem `Sync` (błąd asynchroniczny); jeden obieg po sieci.
+    if st.scan_pending {
+        st.settle_memory();
+    }
     st.stats.query_bytes += bytes.len() as u64;
     st.stats.roundtrips += 1;
     // Po oczekiwaniu trzeba odświeżyć odwzorowane pamięci: żądania wysyłamy zaraz za `Sync`, w tym samym obiegu po sieci.
@@ -1117,6 +1153,9 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
         st.stats.t_refresh_ns += t_refresh.elapsed().as_nanos() as u64;
     }
     st.stats.t_syncrecv_ns += t_recv.elapsed().as_nanos() as u64;
+    let e = st.stats.rt_by_cmd.entry(cmd.name).or_insert((0, 0));
+    e.0 += 1;
+    e.1 += t_recv.elapsed().as_nanos() as u64;
     if let Ok(Response::Synced { error }) = sy {
         if error < 0 {
             st.lose();
