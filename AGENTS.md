@@ -178,3 +178,12 @@ Cyberpunk: 252 s oczekiwania na blokadę instancji wobec 102 s jej trzymania na 
 - `fwd.rs`: `exec_with` rozdzielone na `exec_begin` (pod blokadą: przygotowanie i wysyłka, zwraca `Step::Done` albo `Step::Pending`) i `exec_finish` (pod blokadą: obróbka odpowiedzi); `forward()` zwalnia blokadę między nimi (`Pending::receive`). `exec_with` (wołające już trzymają blokadę: swapchain itp.) skleja obie fazy.
 - Stan zmieniony przez inne wątki w trakcie oczekiwania: `submit_gen` (licznik `vkQueueSubmit`): oczekujący wątek kasuje `gpu_dirty` tylko jeśli nikt nie zgłosił pracy; unieważnienia leniwych pamięci są zachowawcze.
 - FurMark: 92-100 -> 104 FPS, trzymanie blokady 4300 ms -> 196 ms na 28 s. Do zmierzenia: ATS i Cyberpunk.
+
+## 2026-11-05: Cyberpunk grywalny, przyczyna "zawieszeń", plan dalszych kroków
+
+- **CP 7,6 FPS mediana (p90 10,6, do 38 w spokojnych scenach), ocena testera: grywalny** (865 s, 7586 klatek; `docs/measurements/2026-11-05-cyberpunk/`).
+- "Zawieszenia" CP przy ładowaniu zapisu to awarie silnika: `Watchdog timeout! (120 seconds)` (`engineWatchdog.cpp`) w raporcie `Cyberpunk2077.exe-*.txt`/`CrashInfo.json`: jakiś wątek tkwił 120 s. Złapano: `vkWaitSemaphores` z blokadą instancji w ręku 10-16 s (zablokowany strumień serwera: serwer wykonuje żądania po kolei, więc długie oczekiwanie na pracę, którą inny wątek zgłosi później, blokuje zgłoszenie tej pracy).
+- Poprawki tej sesji: wersjonowanie stron pamięci po biletach odpowiedzi (odpowiedzi po zwolnieniu blokady wracają w dowolnej kolejności, starsza różnica nie może cofnąć nowszej), watchdog per wątek (8 s; log `WATCHDOG:` w `icd*.log`), asynchroniczny wątek nadawczy (`link.rs`), `GPU_ICD_LOCKED_WAIT`/`GPU_ICD_SYNC_SEND` (przełączniki do bisekcji), `GPU_ICD_SLICE_WAIT=1` (odcinkowe oczekiwania 1-4 ms, doświadczalne, niezweryfikowane w grze).
+- Zawieszenie ATS/CP w tej samej scenie zależy od sceny: kokpit ATS ma 16,6 MB zapisów/klatkę, lekka scena 0,2 MB.
+- Plan: `docs/consult/11-next-steps.md` (push wartości semaforów z serwera, mniej wejść w blokadę, różnice zapisów XOR+LZ4, skan jednym wywołaniem, głębsze potokowanie). Skalowanie obrazu (DLSS/FSR/XeSS): nie pomaga (GPU serwera bezczynne), generowanie klatek dopiero od 30+ FPS bazowych.
+- Znane: po twardych awariach gry serwer trzymał 15 GB VRAM (zwolnił je restart demona); `stream_e2e` raz na ~10 uruchomień zawiódł pod obciążeniem (flaky, do zbadania).
