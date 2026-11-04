@@ -43,6 +43,11 @@ impl Client {
         }
     }
 
+    /// Oddaje gniazdo i numer ostatnio użytej sekwencji (połączenie musi być "czyste": bez niewysłanych i nieodebranych bajtów).
+    pub fn into_stream(self) -> (TcpStream, u16) {
+        (self.stream, self.seq)
+    }
+
     /// Ustawia limit czasu odczytu (`None` = bez limitu, np. dla połączenia wideo).
     pub fn set_read_timeout(&mut self, d: Option<Duration>) -> Result<(), ClientError> {
         self.stream.set_read_timeout(d)?;

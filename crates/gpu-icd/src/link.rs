@@ -6,10 +6,12 @@
 //! Tu każde żądanie z odpowiedzią dostaje bilet (kolejny numer) w chwili wysłania, a odpowiedzi odbiera się w kolejności biletów bez
 //! blokady instancji: wątek o bilecie `k` czeka, aż odczytano odpowiedzi `0..k`, czyta swoją i przekazuje turę dalej.
 
+use std::collections::VecDeque;
+use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Condvar, Mutex};
 
-use gpu_proto::frame::FrameReader;
+use gpu_proto::frame::{flags, Frame, FrameReader};
 use gpu_proto::msg::{Request, Response};
 use gpu_renderd::client::{Client, ClientError};
 
@@ -83,16 +85,40 @@ impl Shared {
     }
 }
 
-/// Połączenie sterujące: zapisy przez `Client` (pod blokadą instancji), odpowiedzi przez `Shared` (bez niej).
+/// Kolejka bajtów do wysłania: wątek nadawczy zapisuje do gniazda, a wątki gry tylko dokładają (bez czekania na przepustowość łącza).
+struct Out {
+    q: Mutex<OutState>,
+    /// Sygnał dla wątku nadawczego: są dane albo zamknięcie.
+    data: Condvar,
+    /// Sygnał dla producentów: kolejka się zmniejszyła.
+    space: Condvar,
+}
+
+struct OutState {
+    queue: VecDeque<Vec<u8>>,
+    bytes: usize,
+    closed: bool,
+    broken: bool,
+}
+
+/// Górny limit zakolejkowanych bajtów (potem producent czeka: ochrona pamięci i przeciwdziałanie bufferbloat).
+const MAX_QUEUED_BYTES: usize = 64 << 20;
+
+/// Połączenie sterujące: zapisy przez wątek nadawczy, odpowiedzi przez `Shared` (bez blokady instancji).
+///
+/// Wątki gry kodują ramki pod blokadą instancji (kolejność w strumieniu), ale same zapisy do gniazda (megabajty zapisów pamięci na klatkę)
+/// robi osobny wątek: wcześniej `write_all` blokował wątek gry na czas wysłania, czyli ok. 60 ms na klatkę przy 7 MB zapisów.
 pub struct Link {
-    writer: Client,
+    out: Arc<Out>,
     shared: Arc<Shared>,
+    sender: Option<std::thread::JoinHandle<()>>,
+    seq: u16,
     /// Ile żądań z odpowiedzią wysłano (numer biletu następnego takiego żądania). Zmieniany tylko pod blokadą instancji.
     sent: u64,
 }
 
 impl Link {
-    /// Łączy się i wykonuje `Hello`; potem przejmuje kopię gniazda do odczytu.
+    /// Łączy się i wykonuje `Hello`; potem przejmuje gniazdo.
     #[allow(dead_code)]
     pub fn connect<A: ToSocketAddrs>(addr: A, token: &[u8]) -> Result<Link, ClientError> {
         Link::from_client(Client::connect(addr, token)?)
@@ -100,8 +126,42 @@ impl Link {
 
     /// Przejmuje połączenie po uwierzytelnieniu (strumień jest wtedy "czysty": żadnych niewysłanych ani nieodebranych bajtów).
     pub fn from_client(client: Client) -> Result<Link, ClientError> {
-        let stream = client.shutdown_handle()?;
-        Ok(Link { writer: client, shared: Arc::new(Shared { turn: Mutex::new(Turn { served: 0, broken: false }), cv: Condvar::new(), reader: Mutex::new(Reader { stream, frames: FrameReader::new() }) }), sent: 0 })
+        let (stream, seq) = client.into_stream();
+        let reader = stream.try_clone()?;
+        let mut writer = stream;
+        let shared = Arc::new(Shared { turn: Mutex::new(Turn { served: 0, broken: false }), cv: Condvar::new(), reader: Mutex::new(Reader { stream: reader, frames: FrameReader::new() }) });
+        let out = Arc::new(Out { q: Mutex::new(OutState { queue: VecDeque::new(), bytes: 0, closed: false, broken: false }), data: Condvar::new(), space: Condvar::new() });
+        let (o, sh) = (out.clone(), shared.clone());
+        let sender = std::thread::Builder::new()
+            .name("gpu-icd-send".into())
+            .spawn(move || loop {
+                let buf = {
+                    let mut g = o.q.lock().unwrap_or_else(|e| e.into_inner());
+                    loop {
+                        if let Some(b) = g.queue.pop_front() {
+                            g.bytes -= b.len();
+                            o.space.notify_all();
+                            break Some(b);
+                        }
+                        if g.closed {
+                            break None;
+                        }
+                        g = o.data.wait(g).unwrap_or_else(|e| e.into_inner());
+                    }
+                };
+                let Some(buf) = buf else { return };
+                if writer.write_all(&buf).is_err() {
+                    // Zerwane połączenie: producenci i oczekujący na odpowiedzi dostają błąd zamiast czekać w nieskończoność.
+                    o.q.lock().unwrap_or_else(|e| e.into_inner()).broken = true;
+                    o.space.notify_all();
+                    let mut t = sh.turn.lock().unwrap_or_else(|e| e.into_inner());
+                    t.broken = true;
+                    sh.cv.notify_all();
+                    return;
+                }
+            })
+            .map_err(ClientError::Io)?;
+        Ok(Link { out, shared, sender: Some(sender), seq, sent: 0 })
     }
 
     pub fn shared(&self) -> Arc<Shared> {
@@ -114,8 +174,32 @@ impl Link {
         self.sent
     }
 
+    fn frame(&mut self, req: &Request, out: &mut Vec<u8>) -> Result<(), ClientError> {
+        self.seq = self.seq.wrapping_add(1);
+        let frame = Frame::new(0, flags::CRC, self.seq, 0, req.encode()).map_err(ClientError::Frame)?;
+        out.extend_from_slice(&frame.encode());
+        Ok(())
+    }
+
+    fn enqueue(&self, bytes: Vec<u8>) -> Result<(), ClientError> {
+        let mut g = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
+        // Producent czeka tylko przy przepełnieniu (i pusta kolejka zawsze przyjmuje jedną, nawet większą partię).
+        while g.bytes + bytes.len() > MAX_QUEUED_BYTES && !g.queue.is_empty() && !g.broken {
+            g = self.out.space.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        if g.broken {
+            return Err(ClientError::Closed);
+        }
+        g.bytes += bytes.len();
+        g.queue.push_back(bytes);
+        self.out.data.notify_one();
+        Ok(())
+    }
+
     pub fn send(&mut self, req: &Request) -> Result<(), ClientError> {
-        self.writer.send(req)?;
+        let mut buf = Vec::new();
+        self.frame(req, &mut buf)?;
+        self.enqueue(buf)?;
         if expects_reply(req) {
             self.sent += 1;
         }
@@ -125,7 +209,11 @@ impl Link {
     /// Wysyła kilka żądań jednym zapisem; zwraca bilet pierwszego z odpowiedzią (kolejne dostają następne numery).
     pub fn send_many(&mut self, reqs: &[Request]) -> Result<u64, ClientError> {
         let first = self.sent;
-        self.writer.send_many(reqs)?;
+        let mut buf = Vec::new();
+        for r in reqs {
+            self.frame(r, &mut buf)?;
+        }
+        self.enqueue(buf)?;
         self.sent += reqs.iter().filter(|r| expects_reply(r)).count() as u64;
         Ok(first)
     }
@@ -138,6 +226,17 @@ impl Link {
             return Err(ClientError::Closed);
         }
         self.shared.recv_at(ticket)
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        // Wątek nadawczy dopisze to, co zostało w kolejce, i skończy; dopiero potem gniazdo się zamknie.
+        self.out.q.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.out.data.notify_all();
+        if let Some(h) = self.sender.take() {
+            let _ = h.join();
+        }
     }
 }
 

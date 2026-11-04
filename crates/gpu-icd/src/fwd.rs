@@ -199,7 +199,8 @@ pub struct Shadow {
 
 /// Zapas puli (zestawy i deskryptory każdego typu), poniżej którego alokacje zestawów idą synchronicznie, oraz częstotliwość audytu.
 pub const DESC_SPEC_MARGIN: u32 = 64;
-const DESC_SPEC_AUDIT_EVERY: u64 = 64;
+/// Audyt co 1024. alokację (przy 900 alokacjach na klatkę w ATS audyt co 64. kosztował 17 ms z klatki 166 ms), a na początku gęściej (co 8. z pierwszych 256).
+const DESC_SPEC_AUDIT_EVERY: u64 = 1024;
 static DESC_SPEC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DESC_SPEC_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1113,7 +1114,10 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
             let lp = std::ptr::read_unaligned(info.add(32) as *const u64) as *const u64;
             let layouts: Vec<u64> = if lp.is_null() { Vec::new() } else { (0..n).map(|i| std::ptr::read_unaligned(lp.add(i))).collect() };
             let predicted = flags().desc_spec && !DESC_SPEC_BROKEN.load(std::sync::atomic::Ordering::Relaxed) && st.desc.would_fit(pool, &layouts, pnext);
-            audited = predicted && DESC_SPEC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(DESC_SPEC_AUDIT_EVERY);
+            audited = predicted && {
+                let n = DESC_SPEC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                n.is_multiple_of(DESC_SPEC_AUDIT_EVERY) || (n < 256 && n.is_multiple_of(8))
+            };
             speculated = predicted && !audited && st.desc.try_allocate(pool, &layouts, pnext);
             alloc_ctx = Some((pool, layouts));
         }
