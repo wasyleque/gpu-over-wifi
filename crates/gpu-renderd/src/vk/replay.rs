@@ -65,6 +65,35 @@ impl Ctx for Recording<'_> {
     }
 }
 
+/// Czas wykonania poleceń na serwerze według nazwy (liczba, ns) i czas samego dekodowania: do rankingu w logu statystyk.
+#[derive(Default)]
+struct CmdTimes {
+    by_name: HashMap<&'static str, (u64, u64)>,
+    decode_ns: u64,
+}
+
+impl CmdTimes {
+    fn merge(&mut self, o: CmdTimes) {
+        self.decode_ns += o.decode_ns;
+        for (k, (n, ns)) in o.by_name {
+            let e = self.by_name.entry(k).or_insert((0, 0));
+            e.0 += n;
+            e.1 += ns;
+        }
+    }
+}
+
+static CMD_TIMES: std::sync::LazyLock<std::sync::Mutex<CmdTimes>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(CmdTimes::default()));
+
+/// Ranking poleceń według łącznego czasu wykonania w `Replayer::execute`: `nazwa liczba ms (średnio µs)`, oraz czas dekodowania.
+pub fn cmd_times_report() -> String {
+    let t = CMD_TIMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<_> = t.by_name.iter().collect();
+    v.sort_by_key(|(_, (_, ns))| std::cmp::Reverse(*ns));
+    let top: Vec<String> = v.iter().take(10).map(|(n, (c, ns))| format!("{} {}x {}ms ({:.1}µs)", n.trim_start_matches("vk"), c, ns / 1_000_000, *ns as f64 / 1e3 / (*c).max(1) as f64)).collect();
+    format!("dekodowanie {} ms; {}", t.decode_ns / 1_000_000, top.join("; "))
+}
+
 pub struct Replayer {
     lib: Arc<LibVulkan>,
     pub registry: Registry,
@@ -184,19 +213,31 @@ impl Replayer {
     /// Wykonuje partię poleceń; przerywa na pierwszym błędzie.
     pub fn execute(&mut self, batch: &[u8]) -> Result<(), i32> {
         let mut dec = Decoder::new(batch);
-        loop {
+        let mut local = CmdTimes::default();
+        let result = loop {
+            let t0 = std::time::Instant::now();
             let rec = Recording { reg: &self.registry, seen: RefCell::new(Vec::new()) };
             let dc = match decode_command(&mut dec, &rec) {
                 Ok(Some(dc)) => dc,
-                Ok(None) => return Ok(()),
+                Ok(None) => break Ok(()),
                 Err(e) => {
                     eprintln!("replay: błąd dekodowania polecenia następnego po {}", self.last_name);
-                    return Err(code(e));
+                    break Err(code(e));
                 }
             };
             let seen = rec.seen.into_inner();
-            self.run(&dc, &seen, false)?;
-        }
+            let t1 = std::time::Instant::now();
+            local.decode_ns += (t1 - t0).as_nanos() as u64;
+            let r = self.run(&dc, &seen, false);
+            let e = local.by_name.entry(dc.command.name).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += t1.elapsed().as_nanos() as u64;
+            if let Err(c) = r {
+                break Err(c);
+            }
+        };
+        CMD_TIMES.lock().unwrap_or_else(|e| e.into_inner()).merge(local);
+        result
     }
 
     /// Wykonuje jedno polecenie. Odpowiedź: kod wyniku (`i32` LE, także ujemny i dodatni jak `VK_NOT_READY`),
