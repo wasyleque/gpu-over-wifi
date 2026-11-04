@@ -113,6 +113,9 @@ pub struct Replayer {
     last_name: &'static str,
     /// Opis `VkDescriptorPoolCreateInfo` po prawdziwym uchwycie puli i licznik nieudanych alokacji (diagnostyka odmów `OUT_OF_POOL_MEMORY`).
     pool_desc: HashMap<u64, String>,
+    /// Pula deskryptorów (identyfikator klienta) -> zestawy z niej zarejestrowane. `vkResetDescriptorPool` i `vkDestroyDescriptorPool` zwalniają
+    /// wszystkie zestawy naraz, więc muszą zdjąć je też z rejestru (inaczej po ok. milionie alokacji rejestr się zapełnia i gra pada).
+    pool_sets: HashMap<u64, Vec<u64>>,
     failed_allocs: u32,
     /// Bufor na kopię odczytywanej pamięci (patrz `stage`), używany wielokrotnie.
     scratch: Vec<u8>,
@@ -188,7 +191,11 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), failed_allocs: 0, scratch: Vec::new() }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new() }
+    }
+
+    pub fn registered_handles(&self) -> usize {
+        self.registry.len()
     }
 
     pub fn set_instance(&mut self, raw: VkInstance) {
@@ -352,6 +359,7 @@ impl Replayer {
             eprintln!("replay: {} zwróciło {result}", cmd.name);
             return if tolerate { Ok(result) } else { Err(result) };
         }
+        let set_ids: Vec<u64> = if cmd.name == "vkAllocateDescriptorSets" { ids.first().cloned().unwrap_or_default() } else { Vec::new() };
         for ((kind, p, _), ids) in outs.iter().zip(ids) {
             for (i, id) in ids.iter().enumerate() {
                 // SAFETY: sterownik wpisał prawdziwy uchwyt w miejsce identyfikatora klienta.
@@ -364,6 +372,10 @@ impl Replayer {
                 self.registry.register(*id, Entry { kind, real, parent, size }).map_err(code)?;
             }
         }
+        if cmd.name == "vkAllocateDescriptorSets" && seen.len() >= 2 {
+            // seen: [urządzenie, pula, układy...]; zestawy z tej alokacji należą do puli seen[1].
+            self.pool_sets.entry(seen[1]).or_default().extend(set_ids);
+        }
         self.unregister_after(cmd, seen);
         Ok(result)
     }
@@ -371,6 +383,11 @@ impl Replayer {
     /// `vkDestroy*` i `vkFree*` zdejmują obiekt z rejestru (identyfikatory z sieci, nie prawdziwe uchwyty).
     fn unregister_after(&mut self, cmd: &CommandMeta, seen: &[u64]) {
         let n = cmd.name;
+        if (n == "vkResetDescriptorPool" || n == "vkDestroyDescriptorPool") && seen.len() >= 2 {
+            for id in self.pool_sets.remove(&seen[1]).unwrap_or_default() {
+                self.registry.unregister(id);
+            }
+        }
         let ids: &[u64] = if n == "vkFreeCommandBuffers" || n == "vkFreeDescriptorSets" {
             seen.get(2..).unwrap_or(&[])
         } else if n == "vkDestroyDevice" || n == "vkDestroyInstance" {

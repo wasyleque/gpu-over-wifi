@@ -49,6 +49,13 @@ struct PdevEntry {
     instance: Handle,
 }
 
+impl VulkanBackend {
+    /// Liczba uchwytów zarejestrowanych przez klienta (do testów wycieków rejestru).
+    pub fn registered_handles(&self) -> usize {
+        self.replay.registered_handles()
+    }
+}
+
 pub struct VulkanBackend {
     lib: Arc<LibVulkan>,
     global: GlobalFns,
