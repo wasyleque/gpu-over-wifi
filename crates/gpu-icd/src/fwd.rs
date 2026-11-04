@@ -760,8 +760,11 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         return 0;
     }
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    crate::watchdog::set(op, crate::watchdog::WAIT_LOCK, 0);
+    let _wd = WdGuard;
     let t_lock = std::time::Instant::now();
     let mut st = lock_state(inst);
+    crate::watchdog::phase(crate::watchdog::HOLD_LOCK, 0);
     LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut hold = HoldTimer(std::time::Instant::now());
@@ -798,9 +801,12 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             // Wykonanie u serwera i tak jest sekwencyjne, a odpowiedzi odbieramy w kolejności biletów (patrz `link`).
             drop(hold);
             drop(st);
+            crate::watchdog::phase(crate::watchdog::WAIT_REPLY, p.base);
             let resp = p.receive();
+            crate::watchdog::phase(crate::watchdog::WAIT_LOCK_FINISH, p.base);
             let t_lock = std::time::Instant::now();
             st = lock_state(inst);
+            crate::watchdog::phase(crate::watchdog::HOLD_LOCK, p.base);
             LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             hold = HoldTimer(std::time::Instant::now());
@@ -1510,6 +1516,8 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
 /// aplikacji sam ją trzyma (przekazał nam wskaźnik do odwzorowanej pamięci), oddajemy stronę bez pobrania zamiast zakleszczyć grę.
 fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
     let Some(inst) = state() else { return false };
+    crate::watchdog::set(0, crate::watchdog::LAZY_FETCH, off as u64);
+    let _wd = WdGuard;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut st = loop {
         match inst.state.try_lock() {
@@ -1530,6 +1538,30 @@ fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
         s.mark_synced(off, off + len);
     }
     true
+}
+
+/// Opis stanu połączenia do raportu watchdoga (bez blokowania: gdy blokada instancji jest zajęta, mówi o tym).
+pub(crate) fn link_state() -> String {
+    match state() {
+        Some(inst) => match inst.state.try_lock() {
+            Ok(st) => st.client.describe(),
+            Err(_) => "blokada instancji zajęta (stanu połączenia nie da się odczytać bez niej)".to_string(),
+        },
+        None => "brak instancji".to_string(),
+    }
+}
+
+pub(crate) fn fast_commands() -> u64 {
+    FAST_COMMANDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Kończy wpis watchdoga bieżącego wątku przy każdym wyjściu z `forward`.
+struct WdGuard;
+
+impl Drop for WdGuard {
+    fn drop(&mut self) {
+        crate::watchdog::done();
+    }
 }
 
 pub(crate) fn install_lazy() {

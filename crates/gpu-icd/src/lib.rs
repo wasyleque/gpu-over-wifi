@@ -36,6 +36,7 @@ mod wsi;
 mod lazy;
 mod lazymap;
 mod link;
+mod watchdog;
 mod shadow;
 #[rustfmt::skip]
 mod icd_table;
@@ -368,6 +369,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
     }));
     fwd::desc_cache_clear();
     fwd::install_lazy();
+    watchdog::start(fwd::link_state, fwd::fast_commands);
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
     {
         let mut st = crate::fwd::lock_state(&*obj);

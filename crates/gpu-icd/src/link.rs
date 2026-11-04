@@ -164,6 +164,13 @@ impl Link {
         Ok(Link { out, shared, sender: Some(sender), seq, sent: 0 })
     }
 
+    /// Opis stanu kolejki odpowiedzi (do diagnostyki zawieszeń).
+    pub fn describe(&self) -> String {
+        let t = self.shared.turn.lock().unwrap_or_else(|e| e.into_inner());
+        let q = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
+        format!("odpowiedzi: wysłano zapytań {}, odebrano {}{}; kolejka nadawcza {} B w {} partiach{}", self.sent, t.served, if t.broken { " (POŁĄCZENIE ZERWANE)" } else { "" }, q.bytes, q.queue.len(), if q.broken { " (nadawca ZERWANY)" } else { "" })
+    }
+
     pub fn shared(&self) -> Arc<Shared> {
         self.shared.clone()
     }
