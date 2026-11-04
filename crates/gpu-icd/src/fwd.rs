@@ -160,6 +160,10 @@ pub struct Flags {
     pub eager_scan: bool,
     /// Odczyt leniwy pamięci HOST_CACHED (domyślnie włączony; `GPU_ICD_NO_LAZY=1` wyłącza).
     pub lazy: bool,
+    /// Spekulatywne odpowiedzi `vkAllocateDescriptorSets` z księgowości puli po stronie klienta (`GPU_ICD_DESC_SPEC=1`). Domyślnie wyłączone:
+    /// ATS dostawał od serwera `VK_ERROR_OUT_OF_POOL_MEMORY` po tym, jak klient obiecał aplikacji sukces (nieznane uchwyty zestawów, gra kończyła się),
+    /// a zysk jest znikomy (ok. 4,4 tys. alokacji na przebieg po 0,3 ms).
+    pub desc_spec: bool,
     /// Szybka ścieżka poleceń `vkCmd*` bez blokady instancji (domyślnie włączona; `GPU_ICD_NO_FASTPATH=1` wyłącza). Dawny crash sterownika
     /// NVIDIA na serwerze miał przyczynę w buforach per wątek zamiast per bufor poleceń; od naprawy pełne sesje Cyberpunka przechodzą.
     pub fastpath: bool,
@@ -171,6 +175,7 @@ pub fn flags() -> &'static Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
+        desc_spec: std::env::var_os("GPU_ICD_DESC_SPEC").is_some(),
         fastpath: std::env::var_os("GPU_ICD_NO_FASTPATH").is_none(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
@@ -766,6 +771,9 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         // Początek nowego nagrywania albo reset: zaległości z przerwanego nagrywania (np. po `vkResetCommandPool`) są śmieciami i
         // nie mogą trafić do strumienia przed nowym `Begin` (serwer dostałby `vkCmd*` dla bufora, który nie nagrywa).
         "vkBeginCommandBuffer" | "vkResetCommandBuffer" if slots[0] != 0 => drop((*(slots[0] as *const DispObj)).take()),
+        // Każde inne `vkCmd*`, które nie poszło szybką ścieżką, wchodzi do wspólnej partii natychmiast, więc zaległe polecenia TEGO bufora
+        // muszą je poprzedzić (kolejność nagrywania w obrębie bufora).
+        n if n.starts_with("vkCmd") && slots[0] != 0 && params.first().is_some_and(|p| p.type_name == "VkCommandBuffer") => drain_cb(&mut st, slots[0]),
         _ => {}
     }
     if cmd.name == "vkCreateGraphicsPipelines" && flags().trace {
@@ -1080,7 +1088,7 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
             let n = std::ptr::read_unaligned(info.add(24) as *const u32).min(4096) as usize;
             let lp = std::ptr::read_unaligned(info.add(32) as *const u64) as *const u64;
             let layouts: Vec<u64> = if lp.is_null() { Vec::new() } else { (0..n).map(|i| std::ptr::read_unaligned(lp.add(i))).collect() };
-            speculated = st.desc.try_allocate(pool, &layouts, pnext);
+            speculated = flags().desc_spec && st.desc.try_allocate(pool, &layouts, pnext);
             alloc_ctx = Some((pool, layouts));
         }
         _ => {}
