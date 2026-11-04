@@ -233,6 +233,12 @@ impl Link {
         Ok(first)
     }
 
+    /// Jak `call`, ale zwraca też bilet odpowiedzi (do wersjonowania stron: odpowiedź o niższym bilecie nie nadpisuje nowszej).
+    pub fn call_t(&mut self, req: &Request) -> (u64, Result<Response, ClientError>) {
+        let ticket = self.sent;
+        (ticket, self.call(req))
+    }
+
     /// Wysyła żądanie i czeka na odpowiedź (z blokadą instancji w ręku wołającego; kolejka biletów obowiązuje także tu).
     pub fn call(&mut self, req: &Request) -> Result<Response, ClientError> {
         let ticket = self.sent;

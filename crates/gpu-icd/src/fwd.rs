@@ -198,6 +198,10 @@ pub struct Shadow {
     tracker: Option<crate::memtrack::Tracker>,
     /// Odczyt leniwy (`lazymap`): po oczekiwaniu na GPU strony są tylko unieważniane, a pobierane przy dotknięciu przez aplikację.
     lazy: Option<std::sync::Arc<crate::lazymap::LazyRegion>>,
+    /// Wersja (bilet odpowiedzi + 1) danych serwera zapisanych na każdej stronie 4 KiB: odpowiedź o niższym bilecie nie nadpisze nowszej.
+    /// Przy zwalnianiu blokady na czas oczekiwania odpowiedzi trafiają do pamięci w dowolnej kolejności, a serwer liczy różnice względem
+    /// poprzedniej wysłanej: starsza różnica zastosowana po nowszej cofnęłaby strony do nieaktualnej treści (np. wartości fence'a).
+    ver: Vec<u64>,
 }
 
 /// Zapas puli (zestawy i deskryptory każdego typu), poniżej którego alokacje zestawów idą synchronicznie, oraz częstotliwość audytu.
@@ -218,7 +222,7 @@ impl Shadow {
     pub fn new(len: usize) -> Shadow {
         let data = crate::memtrack::PageAlignedBuf::new(len);
         let tracker = if len >= TRACK_FROM && std::env::var("GPU_ICD_NO_MEMTRACK").is_err() { crate::memtrack::Tracker::new(data.as_ptr(), data.capacity()) } else { None };
-        Shadow { data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None }
+        Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None }
     }
 
     /// Pamięć z odczytem leniwym (podwójne odwzorowanie `memfd` zarejestrowane w `userfaultfd`); `None`, gdy jądro tego nie obsługuje.
@@ -229,7 +233,7 @@ impl Shadow {
             region.unregister();
             return None;
         };
-        Some(Shadow { data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: Some(tracker), lazy: Some(region) })
+        Some(Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: Some(tracker), lazy: Some(region) })
     }
 
     /// Wskaźnik dla aplikacji (`vkMapMemory`): widok objęty obsługą błędów stron albo zwykły bufor.
@@ -253,6 +257,25 @@ impl Shadow {
         }
         let n = self.data.len();
         (self.pages.changed(&self.data, usize::MAX).0, false, n)
+    }
+
+    /// Wpisuje dane serwera `body` pod `a`, ale tylko na strony, na których nie ma jeszcze nowszej odpowiedzi (`ticket` to bilet tej).
+    pub fn apply_at(&mut self, a: usize, body: &[u8], ticket: u64) {
+        const P: usize = 4096;
+        let end = a + body.len();
+        if end > self.data.len() || body.is_empty() {
+            return;
+        }
+        let mut p = a / P;
+        while p * P < end {
+            let (ps, pe) = ((p * P).max(a), ((p + 1) * P).min(end));
+            if self.ver.get(p).is_some_and(|v| *v <= ticket) {
+                self.data[ps..pe].copy_from_slice(&body[ps - a..pe - a]);
+                self.ver[p] = ticket + 1;
+            }
+            p += 1;
+        }
+        self.mark_synced(a, end);
     }
 
     pub fn mark_synced(&mut self, from: usize, to: usize) {
@@ -425,6 +448,31 @@ impl InstState {
         Some(out)
     }
 
+    /// Czyta zakres pamięci z serwera prosto do jej lokalnej kopii (z wersjonowaniem stron po biletach odpowiedzi); `false` przy błędzie.
+    pub(crate) fn read_mem_into_shadow(&mut self, memory: u64, offset: u64, len: usize) -> bool {
+        self.flush();
+        let mut done = 0usize;
+        while done < len {
+            let n = (len - done).min(MEM_CHUNK);
+            self.stats.roundtrips += 1;
+            self.stats.memr_bytes += n as u64;
+            let (ticket, r) = self.client.call_t(&Request::MemRead { memory, offset: offset + done as u64, len: n as u32 });
+            match r {
+                Ok(Response::Data(d)) if d.len() == n => {
+                    if let Some(s) = self.mems.get_mut(&memory) {
+                        s.apply_at(offset as usize + done, &d, ticket);
+                    }
+                }
+                _ => {
+                    self.lose();
+                    return false;
+                }
+            }
+            done += n;
+        }
+        true
+    }
+
     /// Po zakończonym oczekiwaniu (fence/idle) GPU mogło zapisać odwzorowaną pamięć: dociągamy z serwera tylko zmienione strony.
     /// Bez nowego `vkQueueSubmit` od ostatniego odświeżenia nic nie mogło się zmienić, więc nie pytamy.
     fn read_mapped(&mut self) {
@@ -462,17 +510,13 @@ impl InstState {
     }
 
     /// Wpisuje odpowiedź `MemReadDelta` do lokalnej kopii pamięci `id`; zwraca `true`, gdy serwer ma jeszcze zmiany do wysłania.
-    fn apply_delta(&mut self, id: u64, d: &[u8]) -> bool {
+    fn apply_delta(&mut self, id: u64, d: &[u8], ticket: u64) -> bool {
         let Some((more, segs)) = gpu_proto::pagediff::decode_segments(d) else { return false };
         for (off, body) in segs {
             self.stats.memr_bytes += body.len() as u64;
-            let (a, b) = (off as usize, off as usize + body.len());
-            // Kopiujemy do istniejącego bufora: aplikacja trzyma wskaźnik z `vkMapMemory`.
+            // Kopiujemy do istniejącego bufora (aplikacja trzyma wskaźnik z `vkMapMemory`), z pominięciem stron z nowszą odpowiedzią.
             if let Some(s) = self.mems.get_mut(&id) {
-                if b <= s.data.len() {
-                    s.data[a..b].copy_from_slice(body);
-                    s.mark_synced(a, b);
-                }
+                s.apply_at(off as usize, body, ticket);
             }
         }
         more
@@ -508,8 +552,9 @@ impl InstState {
             self.flush();
             self.stats.roundtrips += 1;
             let req = self.delta_request(id);
-            let Ok(Response::Data(d)) = self.client.call(&req) else { return };
-            if !self.apply_delta(id, &d) {
+            let (ticket, r) = self.client.call_t(&req);
+            let Ok(Response::Data(d)) = r else { return };
+            if !self.apply_delta(id, &d, ticket) {
                 return;
             }
         }
@@ -1414,9 +1459,9 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
     // Odpowiedzi na odświeżenia przyszły razem z resztą (czytane bez blokady), więc tu tylko je wpisujemy.
     let t_refresh = std::time::Instant::now();
     let mut refreshed = false;
-    for (id, d) in p.pre_ids.iter().zip(r.deltas) {
+    for (i, (id, d)) in p.pre_ids.iter().zip(r.deltas).enumerate() {
         if let Some(d) = d {
-            if st.apply_delta(*id, &d) {
+            if st.apply_delta(*id, &d, p.base + 2 + i as u64) {
                 st.drain_delta(*id);
             }
             refreshed = true;
@@ -1539,12 +1584,7 @@ fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
             }
         }
     };
-    let Some(d) = st.read_mem(r.memory, off as u64, len) else { return false };
-    r.fill(off, &d);
-    if let Some(s) = st.mems.get_mut(&r.memory) {
-        s.mark_synced(off, off + len);
-    }
-    true
+    st.read_mem_into_shadow(r.memory, off as u64, len)
 }
 
 /// Opis stanu połączenia do raportu watchdoga (bez blokowania: gdy blokada instancji jest zajęta, mówi o tym).
@@ -1656,13 +1696,9 @@ pub unsafe extern "C" fn invalidate_ranges(_dev: u64, count: u32, r: *const u8) 
     for (mem, off, size) in ranges(count, r) {
         let Some(len) = st.mems.get(&mem).map(|s| s.data.len() as u64) else { continue };
         let end = if size == u64::MAX { len } else { off.saturating_add(size).min(len) };
-        if let Some(d) = st.read_mem(mem, off, (end - off) as usize) {
-            if let Some(s) = st.mems.get_mut(&mem) {
-                s.data[off as usize..end as usize].copy_from_slice(&d);
-                s.mark_synced(off as usize, end as usize);
-                if let Some(r) = &s.lazy {
-                    r.mark_fresh(off as usize, end as usize);
-                }
+        if st.read_mem_into_shadow(mem, off, (end - off) as usize) {
+            if let Some(r) = st.mems.get(&mem).and_then(|s| s.lazy.as_ref()) {
+                r.mark_fresh(off as usize, end as usize);
             }
         }
         map.insert(mem, ());
@@ -1858,6 +1894,28 @@ mod memreq_target_tests {
         assert_eq!(s.dirty_ranges(), vec![(PAGE * 3, PAGE * 4), (PAGE * 10, PAGE * 11)]);
         assert_eq!(s.data[PAGE * 3 + 5], 9, "widok własny widzi zapis aplikacji");
         assert!(s.dirty_ranges().is_empty(), "po odczycie stan jest czysty");
+    }
+
+    #[test]
+    fn an_older_response_never_overwrites_a_newer_one_on_the_same_page() {
+        const PAGE: usize = 4096;
+        let mut s = Shadow::new(PAGE * 4);
+        // Nowsza odpowiedź (bilet 7) wpisała stronę 1, potem przychodzi starsza (bilet 5): strona zostaje z nowszą treścią.
+        s.apply_at(PAGE, &[7u8; PAGE], 7);
+        s.apply_at(PAGE, &[5u8; PAGE], 5);
+        assert!(s.data[PAGE..PAGE * 2].iter().all(|&b| b == 7), "starsza odpowiedź nie cofa strony");
+        // Odpowiedź obejmująca strony 0-1: strona 0 (nikt jej nie wpisał) dostaje dane, strona 1 zostaje z nowszymi.
+        s.apply_at(0, &[6u8; PAGE * 2], 6);
+        assert!(s.data[..PAGE].iter().all(|&b| b == 6));
+        assert!(s.data[PAGE..PAGE * 2].iter().all(|&b| b == 7));
+        // Równy lub wyższy bilet nadpisuje; zakres niewyrównany do strony działa na części stron.
+        s.apply_at(PAGE + 100, &[9u8; 50], 8);
+        assert!(s.data[PAGE + 100..PAGE + 150].iter().all(|&b| b == 9));
+        assert_eq!(s.data[PAGE + 99], 7);
+        assert_eq!(s.data[PAGE + 150], 7);
+        // Bilet 0 działa (wersja = bilet + 1): pierwsza odpowiedź w ogóle na świeżej stronie.
+        s.apply_at(PAGE * 3, &[1u8; 16], 0);
+        assert!(s.data[PAGE * 3..PAGE * 3 + 16].iter().all(|&b| b == 1));
     }
 
 }
