@@ -165,6 +165,8 @@ pub struct Flags {
     /// (`DESC_SPEC_MARGIN`) i audyt: co `DESC_SPEC_AUDIT_EVERY`-ta alokacja idzie synchronicznie; odmowa serwera tam, gdzie przewidzieliśmy
     /// sukces, wyłącza spekulację na stałe.
     pub desc_spec: bool,
+    /// Wyłączniki do szukania przyczyn zawieszeń: `GPU_ICD_LOCKED_WAIT=1` (czekanie na odpowiedź z blokadą instancji, jak dawniej).
+    pub locked_wait: bool,
     /// Szybka ścieżka poleceń `vkCmd*` bez blokady instancji (domyślnie włączona; `GPU_ICD_NO_FASTPATH=1` wyłącza). Dawny crash sterownika
     /// NVIDIA na serwerze miał przyczynę w buforach per wątek zamiast per bufor poleceń; od naprawy pełne sesje Cyberpunka przechodzą.
     pub fastpath: bool,
@@ -177,6 +179,7 @@ pub fn flags() -> &'static Flags {
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
         desc_spec: std::env::var_os("GPU_ICD_NO_DESC_SPEC").is_none(),
+        locked_wait: std::env::var_os("GPU_ICD_LOCKED_WAIT").is_some(),
         fastpath: std::env::var_os("GPU_ICD_NO_FASTPATH").is_none(),
         debug: std::env::var_os("GPU_ICD_DEBUG").is_some(),
         trace: std::env::var_os("GPU_ICD_TRACE").is_some(),
@@ -796,6 +799,10 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let t0 = std::time::Instant::now();
     let r = match exec_begin(&mut st, op, &mut slots, false) {
         Step::Done(v) => v,
+        Step::Pending(p) if flags().locked_wait => {
+            let resp = p.receive();
+            exec_finish(&mut st, p, resp)
+        }
         Step::Pending(p) => {
             // Czekamy na odpowiedź serwera BEZ blokady instancji: pozostałe wątki gry nagrywają, zgłaszają i pytają w tym czasie.
             // Wykonanie u serwera i tak jest sekwencyjne, a odpowiedzi odbieramy w kolejności biletów (patrz `link`).

@@ -113,6 +113,7 @@ pub struct Link {
     shared: Arc<Shared>,
     sender: Option<std::thread::JoinHandle<()>>,
     seq: u16,
+    direct: Option<Mutex<TcpStream>>,
     /// Ile żądań z odpowiedzią wysłano (numer biletu następnego takiego żądania). Zmieniany tylko pod blokadą instancji.
     sent: u64,
 }
@@ -128,6 +129,7 @@ impl Link {
     pub fn from_client(client: Client) -> Result<Link, ClientError> {
         let (stream, seq) = client.into_stream();
         let reader = stream.try_clone()?;
+        let direct_stream = stream.try_clone()?;
         let mut writer = stream;
         let shared = Arc::new(Shared { turn: Mutex::new(Turn { served: 0, broken: false }), cv: Condvar::new(), reader: Mutex::new(Reader { stream: reader, frames: FrameReader::new() }) });
         let out = Arc::new(Out { q: Mutex::new(OutState { queue: VecDeque::new(), bytes: 0, closed: false, broken: false }), data: Condvar::new(), space: Condvar::new() });
@@ -161,7 +163,8 @@ impl Link {
                 }
             })
             .map_err(ClientError::Io)?;
-        Ok(Link { out, shared, sender: Some(sender), seq, sent: 0 })
+        let direct = if std::env::var_os("GPU_ICD_SYNC_SEND").is_some() { Some(Mutex::new(direct_stream)) } else { None };
+        Ok(Link { out, shared, sender: Some(sender), seq, direct, sent: 0 })
     }
 
     /// Opis stanu kolejki odpowiedzi (do diagnostyki zawieszeń).
@@ -189,6 +192,11 @@ impl Link {
     }
 
     fn enqueue(&self, bytes: Vec<u8>) -> Result<(), ClientError> {
+        if let Some(w) = &self.direct {
+            // `GPU_ICD_SYNC_SEND=1`: zapis w wątku wołającego (dawne zachowanie), do porównań przy szukaniu przyczyn zawieszeń.
+            let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
+            return w.write_all(&bytes).map_err(ClientError::Io);
+        }
         let mut g = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
         // Producent czeka tylko przy przepełnieniu (i pusta kolejka zawsze przyjmuje jedną, nawet większą partię).
         while g.bytes + bytes.len() > MAX_QUEUED_BYTES && !g.queue.is_empty() && !g.broken {
