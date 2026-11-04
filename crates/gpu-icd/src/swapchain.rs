@@ -259,7 +259,10 @@ unsafe fn acquire(st: &mut InstState, sc: u64, sem: u64, fence: u64, out: *mut u
 
 pub unsafe extern "C" fn acquire_next_image(_dev: u64, sc: u64, _timeout: u64, sem: u64, fence: u64, out: *mut u32) -> i32 {
     let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
+    crate::watchdog::set_named("vkAcquireNextImageKHR", crate::watchdog::WAIT_LOCK);
+    let _wd = crate::fwd::WdGuard;
     let mut st = crate::fwd::lock_state(inst);
+    crate::watchdog::phase(crate::watchdog::HOLD_LOCK, 0);
     acquire(&mut st, sc, sem, fence, out)
 }
 
@@ -268,13 +271,19 @@ pub unsafe extern "C" fn acquire_next_image2(_dev: u64, info: *const u8, out: *m
     let (Some(sc), Some(sem), Some(fence)) = (rd::<u64>("VkAcquireNextImageInfoKHR", info, "swapchain"), rd::<u64>("VkAcquireNextImageInfoKHR", info, "semaphore"), rd::<u64>("VkAcquireNextImageInfoKHR", info, "fence")) else {
         return VK_ERROR_INITIALIZATION_FAILED;
     };
+    crate::watchdog::set_named("vkAcquireNextImage2KHR", crate::watchdog::WAIT_LOCK);
+    let _wd = crate::fwd::WdGuard;
     let mut st = crate::fwd::lock_state(inst);
+    crate::watchdog::phase(crate::watchdog::HOLD_LOCK, 0);
     acquire(&mut st, sc, sem, fence, out)
 }
 
 pub unsafe extern "C" fn queue_present(queue: u64, info: *const u8) -> i32 {
     let (Some(inst), false) = (state(), info.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
+    crate::watchdog::set_named("vkQueuePresentKHR", crate::watchdog::WAIT_LOCK);
+    let _wd = crate::fwd::WdGuard;
     let mut st = crate::fwd::lock_state(inst);
+    crate::watchdog::phase(crate::watchdog::HOLD_LOCK, 0);
     let (Some(nwait), Some(waits), Some(nsc), Some(scs), Some(idxs), Some(results)) = (
         rd::<u32>("VkPresentInfoKHR", info, "waitSemaphoreCount"),
         rd::<*const u64>("VkPresentInfoKHR", info, "pWaitSemaphores"),

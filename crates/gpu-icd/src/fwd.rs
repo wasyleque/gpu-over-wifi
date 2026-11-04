@@ -1603,7 +1603,7 @@ pub(crate) fn fast_commands() -> u64 {
 }
 
 /// Kończy wpis watchdoga bieżącego wątku przy każdym wyjściu z `forward`.
-struct WdGuard;
+pub(crate) struct WdGuard;
 
 impl Drop for WdGuard {
     fn drop(&mut self) {

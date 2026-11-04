@@ -27,6 +27,8 @@ pub struct Act {
     ticket: AtomicU64,
     /// Milisekundy od startu procesu, kiedy wątek wszedł w obecną fazę.
     since: AtomicU64,
+    /// Wartość `since`, dla której już wypisano raport (jeden raport na zatrzymanie).
+    reported: AtomicU64,
 }
 
 static REGISTRY: Mutex<Vec<Arc<Act>>> = Mutex::new(Vec::new());
@@ -46,7 +48,7 @@ fn me<R>(f: impl FnOnce(&Act) -> R) -> R {
     ME.with(|c| {
         let a = c.get_or_init(|| {
             let t = std::thread::current();
-            let act = Arc::new(Act { name: t.name().map_or_else(|| format!("{:?}", t.id()), |n| n.to_string()), op: AtomicU16::new(0), phase: AtomicU8::new(IDLE), ticket: AtomicU64::new(0), since: AtomicU64::new(0) });
+            let act = Arc::new(Act { name: t.name().map_or_else(|| format!("{:?}", t.id()), |n| n.to_string()), op: AtomicU16::new(0), phase: AtomicU8::new(IDLE), ticket: AtomicU64::new(0), since: AtomicU64::new(0), reported: AtomicU64::new(u64::MAX) });
             REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(act.clone());
             act
         });
@@ -73,6 +75,12 @@ pub fn phase(phase: u8, ticket: u64) {
     });
 }
 
+/// Jak `set`, ale po nazwie polecenia (dla wejść spoza `forward`, np. prezentacja).
+pub fn set_named(name: &str, phase: u8) {
+    let op = gpu_proto::meta::find_command(name).map_or(0, |(op, _)| op);
+    set(op, phase, 0);
+}
+
 pub fn done() {
     PROGRESS.fetch_add(1, Relaxed);
     me(|a| a.phase.store(IDLE, Relaxed));
@@ -90,37 +98,41 @@ fn phase_name(p: u8) -> &'static str {
     }
 }
 
-/// Uruchamia wątek nadzorujący (raz na proces). `link_state` zwraca opis stanu połączenia (odczytane / wysłane odpowiedzi).
-pub fn start(link_state: fn() -> String, extra_progress: fn() -> u64) {
+/// Uruchamia wątek nadzorujący (raz na proces): co 2 s sprawdza każdy wątek i gdy któryś tkwi w jednej fazie dłużej niż 8 s, wypisuje jego stan,
+/// stan pozostałych wątków i kolejki odpowiedzi. Pojedynczy zablokowany wątek (np. ładowanie zasobów) zatrzymuje grę po 120 s przez jej własny
+/// watchdog (REDengine "Watchdog timeout"), choć inne wątki nadal pracują, więc globalny brak postępu nie wystarcza.
+pub fn start(link_state: fn() -> String, _extra_progress: fn() -> u64) {
     static ONCE: OnceLock<()> = OnceLock::new();
     if ONCE.set(()).is_err() {
         return;
     }
-    let _ = std::thread::Builder::new().name("gpu-icd-watchdog".into()).spawn(move || {
-        let (mut last, mut since, mut reported) = (PROGRESS.load(Relaxed) + extra_progress(), Instant::now(), false);
-        loop {
-            std::thread::sleep(Duration::from_secs(2));
-            let p = PROGRESS.load(Relaxed) + extra_progress();
-            if p != last {
-                (last, since, reported) = (p, Instant::now(), false);
+    let _ = std::thread::Builder::new().name("gpu-icd-watchdog".into()).spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let now = now_ms();
+        let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let stuck: Vec<&Arc<Act>> = reg
+            .iter()
+            .filter(|a| {
+                let (ph, since) = (a.phase.load(Relaxed), a.since.load(Relaxed));
+                ph != IDLE && now.saturating_sub(since) >= 8000 && a.reported.load(Relaxed) != since
+            })
+            .collect();
+        if stuck.is_empty() {
+            continue;
+        }
+        for a in &stuck {
+            a.reported.store(a.since.load(Relaxed), Relaxed);
+        }
+        eprintln!("[gpu-icd] WATCHDOG: {} wątków tkwi w jednej fazie od ponad 8 s; {}", stuck.len(), link_state());
+        for a in &reg {
+            let ph = a.phase.load(Relaxed);
+            if ph == IDLE {
                 continue;
             }
-            let busy = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|a| a.phase.load(Relaxed) != IDLE);
-            if !busy || reported || since.elapsed() < Duration::from_secs(8) {
-                continue;
-            }
-            reported = true;
-            let now = now_ms();
-            eprintln!("[gpu-icd] WATCHDOG: brak postępu od {} s; stan wątków ({}):", since.elapsed().as_secs(), link_state());
-            for a in REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-                let ph = a.phase.load(Relaxed);
-                if ph == IDLE {
-                    continue;
-                }
-                let op = a.op.load(Relaxed);
-                let name = gpu_proto::meta::COMMANDS.get(op as usize).map_or("?", |c| c.name);
-                eprintln!("[gpu-icd]   wątek {:<18} {} od {} ms, polecenie {name}, bilet {}", a.name, phase_name(ph), now.saturating_sub(a.since.load(Relaxed)), a.ticket.load(Relaxed));
-            }
+            let op = a.op.load(Relaxed);
+            let name = gpu_proto::meta::COMMANDS.get(op as usize).map_or("?", |c| c.name);
+            let age = now.saturating_sub(a.since.load(Relaxed));
+            eprintln!("[gpu-icd]   wątek {:<18} {} od {} ms, polecenie {name}, bilet {}{}", a.name, phase_name(ph), age, a.ticket.load(Relaxed), if age >= 8000 { "  <== ZATRZYMANY" } else { "" });
         }
     });
 }
