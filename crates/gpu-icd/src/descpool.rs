@@ -137,11 +137,6 @@ impl DescriptorAccounts {
         true
     }
 
-    /// Ile odmów serwera z rzędu (bez resetu między nimi) dostała ta pula.
-    pub fn refused_streak(&self, pool: u64) -> u64 {
-        self.pools.get(&pool).map_or(0, |p| p.refused_since_reset)
-    }
-
     /// Opis stanu naszej księgowości dla odmowy serwera (do logu): ile zestawów i deskryptorów każdego typu zostało wg nas w puli, ile
     /// potrzebowała alokacja oraz ile wynosi pojemność puli. Rozbieżność z faktyczną odmową = sterownik liczy inaczej niż API albo gra
     /// nie zrobiła resetu puli, którego oczekuje.

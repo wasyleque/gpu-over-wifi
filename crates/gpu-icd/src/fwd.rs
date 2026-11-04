@@ -1340,12 +1340,17 @@ pub(crate) unsafe fn exec_with(st: &mut InstState, op: u16, slots: &mut [u64], f
     }
     if let Some((pool, layouts)) = &alloc_ctx {
         if !speculated {
+            // Seria odmów z rzędu (bez żadnej udanej alokacji między nimi) to moment, w którym gra się wywala; normalny cykl to jedna odmowa
+            // i reset puli. Opisujemy od trzeciej odmowy z rzędu, także dla puli nieznanej księgowości.
+            static REFUSED_RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            static EXPLAINED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if result < 0 {
-                // Normalny cykl aplikacji: jedna odmowa, potem reset puli. Opisujemy dopiero odmowy powtórzone bez resetu (tu gra się wywala).
-                static EXPLAINED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                if st.desc.refused_streak(*pool) >= 1 && EXPLAINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 24 {
-                    eprintln!("[gpu-icd] POWTÓRNA odmowa alokacji zestawów ({result}): {}", st.desc.explain(*pool, layouts));
+                let run = REFUSED_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if run >= 3 && EXPLAINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 24 {
+                    eprintln!("[gpu-icd] odmowa alokacji zestawów nr {run} z rzędu ({result}): {}", st.desc.explain(*pool, layouts));
                 }
+            } else {
+                REFUSED_RUN.store(0, std::sync::atomic::Ordering::Relaxed);
             }
             st.desc.after_sync(*pool, layouts, result >= 0);
         }
