@@ -39,7 +39,7 @@ Lokalna karta do WYŚWIETLANIA jest wykrywana automatycznie (kolejność: Intel,
 - Czy okno pokazuje kostkę poprawnie; jeśli nie, komunikat błędu i `GPU_ICD_DEBUG=1`.
 
 ## 6. Znane ograniczenia
-- Wyświetlanie jest dziś synchroniczne na lokalnej karcie (ok. 20 ms/klatkę), co ogranicza FPS do ok. 45-50 niezależnie od serwera.
-- Gry przez Proton/DXVK jeszcze nie sprawdzone (M7). Wiele rozszerzeń Vulkana nie jest ogłaszanych (zasada: tylko to, co działa).
+- Obraz wraca jako H.264 na osobnym połączeniu (dekodowanie VA-API na kliencie); ograniczeniem są obiegi po sieci i praca klienta, nie serwer (stan i plan: `docs/consult/11-next-steps.md`).
+- Gry działają (FurMark, ATS, Hamster Hunter, Cyberpunk 2077 przez Proton; wyniki w README), ale tylko na jednym kliencie; testy na innych maszynach: [`CALL-FOR-TESTERS.md`](CALL-FOR-TESTERS.md). Wiele rozszerzeń Vulkana nie jest ogłaszanych (zasada: tylko to, co działa).
 - Demon na jednym serwerze bywał niestabilny w wyliczaniu karty NVIDIA po dłuższym czasie (przyczyna niewyjaśniona; patrz AGENTS.md).
 - Uwierzytelniony klient może wysłać niepoprawne polecenia Vulkana i zawiesić sterownik serwera: używaj tokena i zaufanej sieci.
