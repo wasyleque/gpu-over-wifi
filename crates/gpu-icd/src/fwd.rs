@@ -871,6 +871,15 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let params = cmd.params();
     let mut slots = vec![0u64; params.len()];
     fill_slots(params, &ints, &floats, &mut slots);
+    // `vkUpdateDescriptorSets`: spec każe czytać tylko ten ze wskaźników pImageInfo/pBufferInfo/pTexelBufferView, który odpowiada typowi
+    // deskryptora; pozostałe mogą zawierać śmieci (Tellusim/GravityMark ich nie zeruje), a kodek dereferencjonuje każdy niezerowy wskaźnik
+    // i wywraca grę (SIGSEGV w `enc_struct`). Kodujemy kopię zapisów z wyzerowanymi nieużywanymi wskaźnikami (pamięć aplikacji zostaje nietknięta).
+    let mut _write_scratch: Vec<u8> = Vec::new();
+    if cmd.name == "vkUpdateDescriptorSets" && slots.len() >= 3 && slots[1] != 0 && slots[1] <= 65536 && slots[2] != 0 {
+        let n = slots[1] as usize;
+        _write_scratch = sanitize_descriptor_writes(std::slice::from_raw_parts(slots[2] as *const u8, n * 64));
+        slots[2] = _write_scratch.as_ptr() as u64;
+    }
     match cmd.name {
         // Zamknięcie nagrywania: wszystko, co ten bufor zebrał, idzie do wspólnej partii PRZED `vkEndCommandBuffer`.
         "vkEndCommandBuffer" => drain_cb(&mut st, slots[0]),
@@ -946,6 +955,27 @@ unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     trace(cmd.name, r, t0.elapsed().as_micros());
     periodic_stats(&st.stats);
     r
+}
+
+/// Kopia tablicy `VkWriteDescriptorSet` (64 B każdy) z wyzerowanymi wskaźnikami, których typ deskryptora nie używa (patrz `forward`).
+fn sanitize_descriptor_writes(src: &[u8]) -> Vec<u8> {
+    let mut out = src.to_vec();
+    for w in out.as_chunks_mut::<64>().0 {
+        let ty = u32::from_le_bytes([w[36], w[37], w[38], w[39]]);
+        // VkWriteDescriptorSet: pImageInfo @40, pBufferInfo @48, pTexelBufferView @56.
+        let (keep_image, keep_buffer, keep_texel) = match ty {
+            0..=3 | 10 => (true, false, false),
+            4 | 5 => (false, false, true),
+            6..=9 => (false, true, false),
+            _ => (true, true, true), // typy z rozszerzeń (inline uniform block, struktury przyspieszenia): wskaźniki bez zmian
+        };
+        for (keep, at) in [(keep_image, 40usize), (keep_buffer, 48), (keep_texel, 56)] {
+            if !keep {
+                w[at..at + 8].fill(0);
+            }
+        }
+    }
+    out
 }
 
 /// Zapamiętuje, co przypisano do pamięci (bufory: zakres i użycie; obrazy: cała pamięć), żeby po oczekiwaniu odświeżać tylko to,
@@ -1993,6 +2023,29 @@ mod memreq_target_tests {
         // Bilet 0 działa (wersja = bilet + 1): pierwsza odpowiedź w ogóle na świeżej stronie.
         s.apply_at(PAGE * 3, &[1u8; 16], 0);
         assert!(s.data[PAGE * 3..PAGE * 3 + 16].iter().all(|&b| b == 1));
+    }
+
+    #[test]
+    fn unused_pointers_of_write_descriptor_sets_are_zeroed_per_descriptor_type() {
+        let mk = |ty: u32| {
+            let mut w = vec![0u8; 64];
+            w[36..40].copy_from_slice(&ty.to_le_bytes());
+            for (i, at) in [40usize, 48, 56].into_iter().enumerate() {
+                w[at..at + 8].copy_from_slice(&(0xDEAD_0000u64 + i as u64).to_le_bytes());
+            }
+            w
+        };
+        let ptrs = |w: &[u8]| [40usize, 48, 56].map(|at| u64::from_le_bytes(w[at..at + 8].try_into().unwrap()) != 0);
+        assert_eq!(ptrs(&sanitize_descriptor_writes(&mk(6))), [false, true, false], "UBO: tylko pBufferInfo");
+        assert_eq!(ptrs(&sanitize_descriptor_writes(&mk(7))), [false, true, false], "SSBO");
+        assert_eq!(ptrs(&sanitize_descriptor_writes(&mk(1))), [true, false, false], "obraz z samplerem: tylko pImageInfo");
+        assert_eq!(ptrs(&sanitize_descriptor_writes(&mk(4))), [false, false, true], "widok bufora: tylko pTexelBufferView");
+        assert_eq!(ptrs(&sanitize_descriptor_writes(&mk(1_000_138_000))), [true, true, true], "typ z rozszerzenia bez zmian");
+        // Dwa zapisy w tablicy: każdy traktowany osobno.
+        let mut two = mk(6);
+        two.extend(mk(3));
+        let out = sanitize_descriptor_writes(&two);
+        assert_eq!((ptrs(&out[..64]), ptrs(&out[64..])), ([false, true, false], [true, false, false]));
     }
 
 }
