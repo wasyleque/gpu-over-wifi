@@ -8,9 +8,13 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 *FurMark (Vulkan) running on a Ryzen laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable, returned as H.264: 1280x720, 98 FPS on average over 10 s (min 68, max 110; the window shows the remote card). It is a GPU stress test, yet the remote GPU is mostly idle here, so the limit is our transport, not the card; that is what we are optimising.*
 
+![American Truck Simulator (native Vulkan) running on a Ryzen laptop, rendered on a remote RTX 3090 Ti](docs/images/ats-remote-rtx3090ti.png)
+
+*American Truck Simulator (native Linux Vulkan game) in the cab on the Ryzen 5 4500U laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable: **68-72 FPS** in light scenes (it was 3-45 FPS a day earlier). In a busy cockpit scene with mirrors it drops to about 6 FPS because the game rewrites ~17 MB of mapped memory per frame. The frame-rate overlay was not enabled in this screenshot; the numbers come from the driver's own statistics ([`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md)).*
+
 ![Cyberpunk 2077 (DirectX 12 through Proton) running on a Ryzen laptop, rendered on a remote RTX 3090 Ti](docs/images/cyberpunk-2077-remote-rtx3090ti.png)
 
-*Cyberpunk 2077, a DirectX 12 game running through Proton and vkd3d-proton on the Ryzen laptop, drawn by the RTX 3090 Ti in another machine (intro cutscene in a 1024x768 window). It renders correctly but slowly, about 4-5 FPS: the game asks the driver ~190 questions per frame and each one is a network round trip, so neither the GPU, the CPU nor the link is the limit; cutting round trips is the current work. Cyberpunk 2077 is a trademark of CD PROJEKT S.A.; the screenshot is shown only to demonstrate the driver.*
+*Cyberpunk 2077, a DirectX 12 game running through Proton and vkd3d-proton on the Ryzen laptop, drawn by the RTX 3090 Ti in another machine (the screenshot is from the intro cutscene, 1024x768 window). It is now **playable**: in a 14-minute session at 1080p it ran at **7.6 FPS median (up to 38 FPS in quiet moments)**, up from 2-5 FPS a day earlier, and the tester called it playable. It is still far from smooth: every frame waits for ~76 network round trips, mostly semaphore waits, and about 5 MB of mapped memory is uploaded per frame ([`docs/measurements/2026-11-05-cyberpunk`](docs/measurements/2026-11-05-cyberpunk/README.md), next steps in [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md)).*
 
 ## What is in here
 
@@ -22,7 +26,7 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 | Works | Not yet |
 |---|---|
-| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally | Smooth heavy games: Cyberpunk 2077 (DirectX 12 via Proton) renders but at ~4-5 FPS, American Truck Simulator is held back by loading stalls; both are bound by network round trips |
+| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally; **real games run**: American Truck Simulator 68-72 FPS (light scenes), Cyberpunk 2077 playable at ~8 FPS (38 in quiet scenes), Hamster Hunter 21-34 FPS, FurMark ~93 FPS | Smooth heavy games: Cyberpunk 2077 (DirectX 12 via Proton) is playable but far from 30 FPS and busy scenes (ATS cockpit) drop to ~6 FPS; both are bound by network round trips and per-frame memory uploads, plan in [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md) |
 | LZ4 and H.264 frame transport, selectable (`GPU_ICD_CODEC`) | Windows client driver, HEVC |
 | AI proxy with VRAM-aware scheduling, DeepSeek via InferSSD | Game-session reservations in the scheduler |
 
