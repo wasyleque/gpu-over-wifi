@@ -75,6 +75,8 @@ struct InstanceObj {
 }
 
 struct InstState {
+    /// Wskaźnik na własny `InstanceObj`: obiekty dyspozycyjne zapamiętują go, żeby polecenia wracały do właściwej instancji (proces może mieć kilka).
+    owner: usize,
     client: link::Link,
     remote: u64,
     pdevs: Vec<*mut PdevObj>,
@@ -148,6 +150,8 @@ fn instance_extensions() -> Vec<(&'static str, u32)> {
 
 /// Jedyna instancja procesu (M2a); polecenia generyczne szukają przez nią połączenia.
 static CURRENT: std::sync::atomic::AtomicPtr<InstanceObj> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// Wszystkie żywe instancje procesu (gry tworzą ich kilka naraz: DXVK i vkd3d-proton, sondy możliwości). `CURRENT` to ostatnio utworzona z żywych.
+static INSTANCES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 #[repr(C)]
 struct PdevObj {
@@ -363,6 +367,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             stats: fwd::Stats::default(),
             swapchains: HashMap::new(),
             device_pdev: HashMap::new(),
+            owner: 0,
             addr: addr.clone(),
             token: token.clone(),
         }),
@@ -371,8 +376,10 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
     fwd::install_lazy();
     watchdog::start(fwd::link_state, fwd::fast_commands);
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
+    INSTANCES.lock().unwrap_or_else(|e| e.into_inner()).push(obj as usize);
     {
         let mut st = crate::fwd::lock_state(&*obj);
+        st.owner = obj as usize;
         for rp in remote_pds {
             if !all {
                 let q = st.query(rp, PdFunc::Properties2, 0, 0, &[]);
@@ -398,7 +405,11 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
     if inst.is_null() {
         return;
     }
-    CURRENT.store(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut live = INSTANCES.lock().unwrap_or_else(|e| e.into_inner());
+        live.retain(|&p| p != inst as usize);
+        CURRENT.store(live.last().map_or(std::ptr::null_mut(), |&p| p as *mut InstanceObj), std::sync::atomic::Ordering::SeqCst);
+    }
     fwd::desc_cache_clear();
     let obj = Box::from_raw(inst);
     let mut st = crate::fwd::lock_state(&obj);

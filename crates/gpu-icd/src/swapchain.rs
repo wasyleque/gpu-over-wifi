@@ -12,6 +12,7 @@ use crate::fwd::{exec_named, exec_named_async};
 use crate::video::VideoThread;
 use crate::present::{rgba_to_bgra, Presenter};
 use crate::sbuild::S;
+use crate::fwd::state_of_device;
 use crate::{with_local, InstState, InstanceObj, CURRENT};
 
 const VK_ERROR_INITIALIZATION_FAILED: i32 = -3;
@@ -188,7 +189,7 @@ unsafe fn create_inner(st: &mut InstState, dev: u64, info: *const u8) -> Result<
 }
 
 pub unsafe extern "C" fn create_swapchain(dev: u64, info: *const u8, _alloc: *const c_void, out: *mut u64) -> i32 {
-    let (Some(inst), false, false) = (state(), info.is_null(), out.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
+    let (Some(inst), false, false) = (state_of_device(dev), info.is_null(), out.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
     let mut st = crate::fwd::lock_state(inst);
     match create_inner(&mut st, dev, info) {
         Ok(id) => {
@@ -200,7 +201,7 @@ pub unsafe extern "C" fn create_swapchain(dev: u64, info: *const u8, _alloc: *co
 }
 
 pub unsafe extern "C" fn destroy_swapchain(dev: u64, sc: u64, _alloc: *const c_void) {
-    let Some(inst) = state() else { return };
+    let Some(inst) = state_of_device(dev) else { return };
     let mut st = crate::fwd::lock_state(inst);
     let Some(mut sw) = st.swapchains.remove(&sc) else { return };
     if let Some(v) = sw.video.as_mut() {
@@ -221,7 +222,7 @@ pub unsafe extern "C" fn destroy_swapchain(dev: u64, sc: u64, _alloc: *const c_v
 }
 
 pub unsafe extern "C" fn get_swapchain_images(_dev: u64, sc: u64, count: *mut u32, out: *mut u64) -> i32 {
-    let (Some(inst), Some(count)) = (state(), count.as_mut()) else { return VK_ERROR_INITIALIZATION_FAILED };
+    let (Some(inst), Some(count)) = (state_of_device(_dev), count.as_mut()) else { return VK_ERROR_INITIALIZATION_FAILED };
     let st = crate::fwd::lock_state(inst);
     let Some(sw) = st.swapchains.get(&sc) else { return VK_ERROR_INITIALIZATION_FAILED };
     if out.is_null() {
@@ -258,7 +259,7 @@ unsafe fn acquire(st: &mut InstState, sc: u64, sem: u64, fence: u64, out: *mut u
 }
 
 pub unsafe extern "C" fn acquire_next_image(_dev: u64, sc: u64, _timeout: u64, sem: u64, fence: u64, out: *mut u32) -> i32 {
-    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let Some(inst) = state_of_device(_dev) else { return VK_ERROR_INITIALIZATION_FAILED };
     crate::watchdog::set_named("vkAcquireNextImageKHR", crate::watchdog::WAIT_LOCK);
     let _wd = crate::fwd::WdGuard;
     let mut st = crate::fwd::lock_state(inst);
@@ -267,7 +268,7 @@ pub unsafe extern "C" fn acquire_next_image(_dev: u64, sc: u64, _timeout: u64, s
 }
 
 pub unsafe extern "C" fn acquire_next_image2(_dev: u64, info: *const u8, out: *mut u32) -> i32 {
-    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let Some(inst) = state_of_device(_dev) else { return VK_ERROR_INITIALIZATION_FAILED };
     let (Some(sc), Some(sem), Some(fence)) = (rd::<u64>("VkAcquireNextImageInfoKHR", info, "swapchain"), rd::<u64>("VkAcquireNextImageInfoKHR", info, "semaphore"), rd::<u64>("VkAcquireNextImageInfoKHR", info, "fence")) else {
         return VK_ERROR_INITIALIZATION_FAILED;
     };
@@ -279,7 +280,7 @@ pub unsafe extern "C" fn acquire_next_image2(_dev: u64, info: *const u8, out: *m
 }
 
 pub unsafe extern "C" fn queue_present(queue: u64, info: *const u8) -> i32 {
-    let (Some(inst), false) = (state(), info.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
+    let (Some(inst), false) = (crate::fwd::instance_of("VkQueue", queue).or_else(state), info.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
     crate::watchdog::set_named("vkQueuePresentKHR", crate::watchdog::WAIT_LOCK);
     let _wd = crate::fwd::WdGuard;
     let mut st = crate::fwd::lock_state(inst);

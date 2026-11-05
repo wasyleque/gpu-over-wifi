@@ -36,6 +36,8 @@ const DISPATCHABLE: &[&str] = &["VkInstance", "VkPhysicalDevice", "VkDevice", "V
 pub struct DispObj {
     loader_data: usize,
     id: u64,
+    /// Instancja (`InstanceObj`), która wydała ten obiekt; 0 = nieznana (wtedy bieżąca).
+    inst: usize,
     /// Dla bufora poleceń: zakodowane `vkCmd*` jeszcze niewysłane do wspólnej partii (szybka ścieżka, patrz `fast_record`). Bufor jest
     /// PER BUFOR POLECEŃ, a nie per wątek: vkd3d-proton nagrywa jeden bufor na kilku wątkach, a polecenia z wątku A nie mogą wyprzedzić
     /// `vkEndCommandBuffer` wywołanego na wątku B (serwer dostawał `vkCmd*` po zamknięciu bufora i sterownik NVIDIA kończył się segfaultem).
@@ -44,7 +46,7 @@ pub struct DispObj {
 
 impl DispObj {
     pub(crate) fn new(id: u64) -> DispObj {
-        DispObj { loader_data: 0, id, pending: std::sync::Mutex::new(Vec::new()) }
+        DispObj { loader_data: 0, id, inst: 0, pending: std::sync::Mutex::new(Vec::new()) }
     }
 
     /// Dopisuje zakodowane polecenie; zwraca, czy bufor osiągnął próg opróżnienia.
@@ -239,9 +241,9 @@ impl Shadow {
     }
 
     /// Pamięć z odczytem leniwym (podwójne odwzorowanie `memfd` zarejestrowane w `userfaultfd`); `None`, gdy jądro tego nie obsługuje.
-    pub fn new_lazy(len: usize, memory: u64) -> Option<Shadow> {
+    pub fn new_lazy(len: usize, memory: u64, owner: usize) -> Option<Shadow> {
         let data = crate::memtrack::PageAlignedBuf::new_shared(len)?;
-        let region = crate::lazymap::LazyRegion::register(memory, data.app_ptr(), data.as_ptr(), data.capacity())?;
+        let region = crate::lazymap::LazyRegion::register(memory, owner, data.app_ptr(), data.as_ptr(), data.capacity())?;
         let Some(tracker) = crate::memtrack::Tracker::attached(data.app_ptr(), data.capacity()) else {
             region.unregister();
             return None;
@@ -634,6 +636,33 @@ impl InstState {
     }
 }
 
+/// Instancja, do której należy uchwyt dyspozycyjny aplikacji (`None`: nieznany rodzaj albo obiekt bez właściciela).
+///
+/// # Safety
+/// `handle` to wartość uchwytu wydanego przez ten sterownik (wskaźnik na nasz obiekt) albo 0.
+pub(crate) unsafe fn instance_of(kind: &str, handle: u64) -> Option<&'static InstanceObj> {
+    if handle == 0 {
+        return None;
+    }
+    match kind {
+        "VkInstance" => (handle as *const InstanceObj).as_ref(),
+        "VkPhysicalDevice" => (*(handle as *const super::PdevObj)).instance.as_ref(),
+        "VkDevice" | "VkQueue" | "VkCommandBuffer" => ((*(handle as *const DispObj)).inst as *const InstanceObj).as_ref(),
+        _ => None,
+    }
+}
+
+/// Instancja polecenia: z pierwszego uchwytu dyspozycyjnego, a gdy go nie ma (lub nie ma właściciela), bieżąca.
+unsafe fn state_for(cmd: &gpu_proto::meta::CommandMeta, first: u64) -> Option<&'static InstanceObj> {
+    let kind = cmd.params().first().map(|p| p.type_name).filter(|k| DISPATCHABLE.contains(k));
+    kind.and_then(|k| instance_of(k, first)).or_else(state)
+}
+
+/// Instancja dla funkcji wejściowych z uchwytem urządzenia lub kolejki pod ręką.
+pub(crate) unsafe fn state_of_device(dev: u64) -> Option<&'static InstanceObj> {
+    instance_of("VkDevice", dev).or_else(state)
+}
+
 fn state() -> Option<&'static InstanceObj> {
     // SAFETY: wskaźnik ustawia `create_instance` i zeruje `destroy_instance`; obiekt żyje między nimi.
     unsafe { CURRENT.load(std::sync::atomic::Ordering::SeqCst).as_ref() }
@@ -689,7 +718,7 @@ fn desc_cache_store(key: Vec<u8>, value: Vec<u8>) {
 /// Argumenty muszą pochodzić z wywołania aplikacji (device, pDescriptorInfo, dataSize, pDescriptor).
 unsafe fn descriptor_lockfree(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 14], floats: &[f64; 8]) -> bool {
     let (info, size, out) = (ints[1], ints[2], ints[3]);
-    if out == 0 || size > DESC_CACHE_MAX_BYTES || state().is_none() {
+    if out == 0 || size > DESC_CACHE_MAX_BYTES || state_for(cmd, ints[0]).is_none() {
         return false;
     }
     if let Some((ty, address, range)) = crate::descsynth::input_of(info as *const u8) {
@@ -813,7 +842,7 @@ fn fill_slots(params: &[gpu_proto::meta::MemberMeta], ints: &[u64; 14], floats: 
 unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 14], floats: &[f64; 8]) -> bool {
     let params = cmd.params();
     let mut slots = [0u64; 32];
-    if params.len() > slots.len() || state().is_none() {
+    if params.len() > slots.len() || state_for(cmd, ints[0]).is_none() {
         return false;
     }
     fill_slots(params, ints, floats, &mut slots);
@@ -830,7 +859,7 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
     // SAFETY: uchwyt bufora poleceń to wskaźnik na obiekt ICD żyjący do `vkFreeCommandBuffers`/zniszczenia puli.
     if (*cb).push(&bytes) {
         let data = (*cb).take();
-        if let Some(inst) = state() {
+        if let Some(inst) = instance_of("VkCommandBuffer", slots[0]).or_else(state) {
             let mut st = lock_state(inst);
             st.batch.extend_from_slice(&data);
             st.stats.commands += 1;
@@ -880,7 +909,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     if flags().fastpath && fast_table().get(op as usize).copied().unwrap_or(false) && !flags().trace && fast_record(op, cmd, &ints, &floats) {
         return 0;
     }
-    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    let Some(inst) = state_for(cmd, ints[0]) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
     crate::watchdog::set(op, crate::watchdog::WAIT_LOCK, 0);
     let _wd = WdGuard;
     let t_lock = std::time::Instant::now();
@@ -1345,7 +1374,13 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     }
     // Uchwyty wyjściowe nadaje klient: wpisujemy identyfikatory w pamięć aplikacji przed zakodowaniem.
     let mut disp_outs: Vec<(*mut u64, u64)> = Vec::new();
-    let Ok(outs) = out_handles(cmd, args) else { return Step::Done(fail(VK_ERROR_INITIALIZATION_FAILED)) };
+    let outs = match out_handles(cmd, args) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("gpu-icd: {}: nie da się ustalić uchwytów wyjściowych: {e:?}", cmd.name);
+            return Step::Done(fail(VK_ERROR_INITIALIZATION_FAILED));
+        }
+    };
     for (kind, ptr, n) in outs {
         for i in 0..n {
             let id = st.alloc_id();
@@ -1443,7 +1478,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     }
     // Obiekty dyspozycyjne: aplikacja dostaje wskaźnik na obiekt ICD, a w protokole obowiązuje jego identyfikator.
     for (slot, id) in disp_outs {
-        let obj = Box::into_raw(Box::new(DispObj::new(id)));
+        let mut disp = DispObj::new(id);
+        disp.inst = st.owner;
+        let obj = Box::into_raw(Box::new(disp));
         std::ptr::write_unaligned(slot, obj as u64);
         if cmd.name == "vkGetDeviceQueue" {
             let dev = IcdCtx.handle_to_wire("VkDevice", slots[0]).unwrap_or(0);
@@ -1710,7 +1747,7 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
 /// Pobranie zakresu leniwej pamięci z serwera dla wątku obsługi błędów stron (`lazymap`). Blokada instancji z limitem czasu: gdy wątek
 /// aplikacji sam ją trzyma (przekazał nam wskaźnik do odwzorowanej pamięci), oddajemy stronę bez pobrania zamiast zakleszczyć grę.
 fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
-    let Some(inst) = state() else { return false };
+    let Some(inst) = (unsafe { (r.owner as *const InstanceObj).as_ref() }).or_else(state) else { return false };
     crate::watchdog::set(0, crate::watchdog::LAZY_FETCH, off as u64);
     let _wd = WdGuard;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1763,7 +1800,7 @@ pub(crate) fn install_lazy() {
 // ---------- pamięć odwzorowana (lokalnie; synchronizacja z serwerem w punktach) ----------
 
 pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64, _flags: u32, out: *mut *mut u8) -> i32 {
-    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let Some(inst) = state_of_device(_dev) else { return VK_ERROR_INITIALIZATION_FAILED };
     let mut st = lock_state(inst);
     let Some(total) = st.mem_sizes.get(&mem).copied() else { return VK_ERROR_MEMORY_MAP_FAILED };
     if offset > total || (size != u64::MAX && offset.saturating_add(size) > total) || out.is_null() {
@@ -1774,7 +1811,7 @@ pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64,
         // Pamięć bez HOST_CACHED dostaje odczyt leniwy tylko na życzenie (`GPU_ICD_LAZY_ALL=1`): w Black Book (DXVK) zawieszał GPU serwera.
         let cached = st.stats.mem_flags.get(&mem).is_some_and(|&(_, fl)| fl & 0x8 != 0);
         let eligible = flags().lazy && (cached || lazy_all()) && st.mem_refresh.get(&mem).copied().unwrap_or(false) && (LAZY_MIN..=LAZY_MAX).contains(&(total as usize));
-        let lazy = if eligible { Shadow::new_lazy(total as usize, mem) } else { None };
+        let lazy = if eligible { Shadow::new_lazy(total as usize, mem, st.owner) } else { None };
         if lazy.is_some() {
             st.stats.lazy_memories += 1;
             if flags().periodic || flags().debug {
@@ -1795,7 +1832,7 @@ pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64,
 }
 
 pub unsafe extern "C" fn unmap_memory(_dev: u64, mem: u64) {
-    if let Some(inst) = state() {
+    if let Some(inst) = state_of_device(_dev) {
         let mut st = lock_state(inst);
         let span = st.mems.get_mut(&mem).map(|s| {
             s.mapped = false;
@@ -1821,7 +1858,7 @@ unsafe fn ranges(count: u32, r: *const u8) -> Vec<(u64, u64, u64)> {
 }
 
 pub unsafe extern "C" fn flush_ranges(_dev: u64, count: u32, r: *const u8) -> i32 {
-    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let Some(inst) = state_of_device(_dev) else { return VK_ERROR_INITIALIZATION_FAILED };
     let mut st = lock_state(inst);
     for (mem, off, size) in ranges(count, r) {
         let Some(sh) = st.mems.get(&mem) else { continue };
@@ -1836,7 +1873,7 @@ pub unsafe extern "C" fn flush_ranges(_dev: u64, count: u32, r: *const u8) -> i3
 }
 
 pub unsafe extern "C" fn invalidate_ranges(_dev: u64, count: u32, r: *const u8) -> i32 {
-    let Some(inst) = state() else { return VK_ERROR_INITIALIZATION_FAILED };
+    let Some(inst) = state_of_device(_dev) else { return VK_ERROR_INITIALIZATION_FAILED };
     let mut st = lock_state(inst);
     let mut map: HashMap<u64, ()> = HashMap::new();
     for (mem, off, size) in ranges(count, r) {
@@ -2027,7 +2064,7 @@ mod memreq_target_tests {
     #[test]
     fn lazy_shadow_tracks_writes_made_through_the_app_view() {
         const PAGE: usize = 4096;
-        let Some(mut s) = Shadow::new_lazy(PAGE * 64, 77) else {
+        let Some(mut s) = Shadow::new_lazy(PAGE * 64, 77, 0) else {
             eprintln!("POMINIĘTO: brak userfaultfd MINOR dla shmem");
             return;
         };

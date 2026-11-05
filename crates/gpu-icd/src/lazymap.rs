@@ -114,6 +114,8 @@ struct State {
 pub struct LazyRegion {
     /// Identyfikator pamięci w protokole (dla `fetch`).
     pub memory: u64,
+    /// Instancja sterownika (`InstanceObj`), do której należy pamięć: pobranie idzie jej połączeniem.
+    pub owner: usize,
     app: usize,
     own: usize,
     len: usize,
@@ -173,7 +175,7 @@ pub fn set_fetch(f: Fetch) {
 impl LazyRegion {
     /// Rejestruje podwójne odwzorowanie `app`/`own` (`len` wielokrotność strony, strony `own` muszą być już w pamięci podręcznej stron,
     /// czyli dotknięte). Zwraca `None`, gdy jądro odmawia (wtedy wołający zostaje przy zwykłej pamięci).
-    pub fn register(memory: u64, app: *mut u8, own: *mut u8, len: usize) -> Option<Arc<LazyRegion>> {
+    pub fn register(memory: u64, owner: usize, app: *mut u8, own: *mut u8, len: usize) -> Option<Arc<LazyRegion>> {
         let h = hub()?;
         let (a, o) = (app as usize, own as usize);
         if !a.is_multiple_of(PAGE) || !len.is_multiple_of(PAGE) || len == 0 {
@@ -190,7 +192,7 @@ impl LazyRegion {
             return None;
         }
         let pages = len / PAGE;
-        let region = Arc::new(LazyRegion { memory, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: FETCH_WINDOW_MIN, last_end: usize::MAX, recheck: Vec::new() }) });
+        let region = Arc::new(LazyRegion { memory, owner, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: FETCH_WINDOW_MIN, last_end: usize::MAX, recheck: Vec::new() }) });
         h.regions.write().unwrap_or_else(|e| e.into_inner()).insert(a, region.clone());
         Some(region)
     }
@@ -388,7 +390,7 @@ mod tests {
             return None;
         }
         set_fetch(fake_fetch);
-        let r = LazyRegion::register(1, dm.app_ptr(), dm.own_ptr(), dm.len())?;
+        let r = LazyRegion::register(1, 0, dm.app_ptr(), dm.own_ptr(), dm.len())?;
         Some((dm, r))
     }
 
