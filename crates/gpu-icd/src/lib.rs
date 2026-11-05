@@ -610,8 +610,26 @@ unsafe extern "C" fn enumerate_device_layer_properties(_p: *mut c_void, count: *
 }
 
 /// M1: zapytania o formaty obrazów nie są jeszcze przekazywane do serwera (brak w protokole).
-unsafe extern "C" fn get_image_format_properties(_p: *mut c_void, _f: u32, _t: u32, _tiling: u32, _usage: u32, _flags: u32, _out: *mut u8) -> VkResult {
-    VK_ERROR_FORMAT_NOT_SUPPORTED
+/// `vkGetPhysicalDeviceImageFormatProperties` (bez `2`): składamy z wariantu `2`, przekazywanego do prawdziwej karty. Wcześniej zawsze zwracał
+/// `VK_ERROR_FORMAT_NOT_SUPPORTED`, co wywracało inicjalizację programów, które sprawdzają tym zapytaniem format swapchaina (GravityMark/Tellusim).
+unsafe extern "C" fn get_image_format_properties(p: *mut c_void, format: u32, ty: u32, tiling: u32, usage: u32, flags: u32, out: *mut u8) -> VkResult {
+    let Some((op, _)) = gpu_proto::meta::find_command("vkGetPhysicalDeviceImageFormatProperties2") else { return VK_ERROR_FORMAT_NOT_SUPPORTED };
+    // SAFETY: wpis tabeli dla tego polecenia to funkcja o sygnaturze (physicalDevice, pImageFormatInfo, pImageFormatProperties) -> VkResult.
+    let f2: unsafe extern "C" fn(*mut c_void, *const u8, *mut u8) -> VkResult = std::mem::transmute(icd_table::ENTRIES[op as usize] as usize);
+    // VkPhysicalDeviceImageFormatInfo2 (40 B): sType @0, pNext @8, format @16, type @20, tiling @24, usage @28, flags @32.
+    let mut info = [0u8; 40];
+    info[0..4].copy_from_slice(&1_000_059_004u32.to_le_bytes());
+    for (at, v) in [(16usize, format), (20, ty), (24, tiling), (28, usage), (32, flags)] {
+        info[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    // VkImageFormatProperties2 (48 B): sType @0, pNext @8, imageFormatProperties @16 (32 B).
+    let mut props = [0u8; 48];
+    props[0..4].copy_from_slice(&1_000_059_003u32.to_le_bytes());
+    let r = f2(p, info.as_ptr(), props.as_mut_ptr());
+    if r >= 0 && !out.is_null() {
+        std::ptr::copy_nonoverlapping(props.as_ptr().add(16), out, 32);
+    }
+    r
 }
 
 unsafe extern "C" fn get_sparse_image_format_properties(_p: *mut c_void, _f: u32, _t: u32, _s: u32, _usage: u32, _tiling: u32, count: *mut u32, _out: *mut u8) {
@@ -700,6 +718,9 @@ unsafe extern "C" fn surface_capabilities(_pd: *mut c_void, surface: u64, out: *
 
 unsafe extern "C" fn surface_formats(_pd: *mut c_void, surface: u64, count: *mut u32, out: *mut u8) -> VkResult {
     let Some(count) = count.as_mut() else { return VK_ERROR_INITIALIZATION_FAILED };
+    if std::env::var("GPU_ICD_DEBUG").is_ok() {
+        eprintln!("[gpu-icd] vkGetPhysicalDeviceSurfaceFormatsKHR: powierzchnia {surface:#x}, lokalnie {:?}, po filtrze {:?}", with_local(|l| l.surface_formats(surface)).flatten(), with_local(|l| l.surface_formats(surface)).flatten().map(|f| wsi::filter_formats(&f)));
+    }
     let Some(list) = with_local(|l| l.surface_formats(surface)).flatten().map(|f| wsi::filter_formats(&f)) else { return VK_ERROR_INITIALIZATION_FAILED };
     if out.is_null() {
         *count = list.len() as u32;
