@@ -99,9 +99,13 @@ struct Out {
 }
 
 /// Zapis pamięci do skompresowania i opakowania w ramkę. Robi to wątek roboczy albo, gdy żaden jeszcze go nie wziął, wątek nadawczy w swojej kolei.
+/// Wejście zadania: numer ramki, pamięć, przesunięcie, bajty.
+type JobInput = (u16, u64, u64, Vec<u8>);
+type JobOutput = Result<Vec<u8>, ()>;
+
 struct Job {
-    input: Mutex<Option<(u16, u64, u64, Vec<u8>)>>,
-    output: Mutex<Option<Result<Vec<u8>, ()>>>,
+    input: Mutex<Option<JobInput>>,
+    output: Mutex<Option<JobOutput>>,
     done: Condvar,
     len: usize,
 }
@@ -498,7 +502,8 @@ mod tests {
     fn parallel_framing_keeps_memory_writes_in_order_and_intact() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
-        let seen: Arc<Mutex<Vec<(u64, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        type Seen = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let seen2 = seen.clone();
         let srv = std::thread::spawn(move || {
             let (mut s, _) = l.accept().unwrap();
