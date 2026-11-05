@@ -12,6 +12,7 @@ use std::sync::Arc;
 use gpu_proto::msg::PdFunc;
 use gpu_proto::stype::lookup;
 
+use crate::handler::DeltaItem;
 use crate::handler::{GpuBackend, ERR_UNKNOWN};
 use crate::vk::chain::{build_chain, PNEXT_OFFSET};
 use crate::vk::handles::{Handle, HandleTable};
@@ -377,6 +378,14 @@ impl GpuBackend for VulkanBackend {
 
     fn mem_read(&mut self, memory: u64, offset: u64, len: u32) -> Result<Vec<u8>, i32> {
         self.replay.mem_read(memory, offset, len)
+    }
+
+    fn mem_prefetch(&mut self, items: &[DeltaItem]) {
+        self.replay.mem_prefetch(items);
+    }
+
+    fn mem_prefetch_end(&mut self) {
+        self.replay.mem_prefetch_end();
     }
 
     fn mem_read_delta(&mut self, memory: u64, max_bytes: usize) -> Result<Vec<u8>, i32> {

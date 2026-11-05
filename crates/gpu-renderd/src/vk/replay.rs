@@ -17,6 +17,7 @@ use gpu_vkcodec::codec::{arg_uint, decode_command, encode_out_params, out_handle
 use gpu_vkcodec::CodecError;
 use gpu_wire::{Decoder, Encoder};
 
+use crate::handler::DeltaItem;
 use crate::handler::ERR_UNKNOWN;
 use crate::vk::loader::{LibVulkan, VkInstance};
 use crate::vk::registry::{Entry, Registry};
@@ -515,6 +516,15 @@ impl Replayer {
         let out = gpu_proto::pagediff::encode_segments(data.get(&scratch), &changed, more);
         self.scratch = scratch;
         Ok(out)
+    }
+
+    /// Patrz `GpuBackend::mem_prefetch`.
+    pub fn mem_prefetch(&mut self, items: &[DeltaItem]) {
+        self.gpu_prefetch(items);
+    }
+
+    pub fn mem_prefetch_end(&mut self) {
+        self.gpu_prefetch_end();
     }
 
     pub fn mem_read(&mut self, memory: u64, offset: u64, len: u32) -> Result<Vec<u8>, i32> {

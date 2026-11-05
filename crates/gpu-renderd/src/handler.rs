@@ -14,6 +14,9 @@ pub const ERR_PROTOCOL: i32 = 0;
 pub const MAX_INSTANCES: usize = 16;
 
 /// Backend karty graficznej. Błąd to ujemny `VkResult`.
+/// Żądanie odczytu różnic pamięci: (pamięć, zakresy albo `None` = cała pamięć).
+pub type DeltaItem = (u64, Option<Vec<(u64, u64)>>);
+
 pub trait GpuBackend {
     fn instance_version(&mut self) -> Result<u32, i32>;
     fn instance_extensions(&mut self) -> Result<Vec<(String, u32)>, i32>;
@@ -48,6 +51,11 @@ pub trait GpuBackend {
     fn mem_read_delta(&mut self, _memory: u64, _max_bytes: usize) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
     }
+    /// Grupa kolejnych żądań odczytu różnic: backend może przygotować dane dla wszystkich naraz (np. jedna kopia GPU). `items`: (pamięć, zakresy
+    /// albo `None` = cała pamięć). Domyślnie nic nie robi.
+    fn mem_prefetch(&mut self, _items: &[DeltaItem]) {}
+    /// Koniec grupy (przygotowane dane przestają obowiązywać).
+    fn mem_prefetch_end(&mut self) {}
     /// Jak `mem_read_delta`, ale porównuje tylko podane zakresy bajtów (patrz `Request::MemReadDeltaRanges`).
     fn mem_read_delta_ranges(&mut self, _memory: u64, _ranges: &[(u64, u64)], _max_bytes: usize, _cached: bool) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
@@ -163,6 +171,15 @@ impl<B: GpuBackend> Session<B> {
     }
 
     /// Jak `handle`, ale `None` dla poleceń bez odpowiedzi (`Cmds`, `MemWrite`) wykonanych poprawnie.
+    /// Przed grupą kolejnych żądań odczytu różnic (patrz `GpuBackend::mem_prefetch`).
+    pub fn prefetch_deltas(&mut self, items: &[DeltaItem]) {
+        self.timed(3, |b| b.mem_prefetch(items));
+    }
+
+    pub fn prefetch_end(&mut self) {
+        self.backend.mem_prefetch_end();
+    }
+
     pub fn handle_request(&mut self, req: Request) -> Option<Response> {
         let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::PresentFrame { .. });
         let r = self.handle(req);

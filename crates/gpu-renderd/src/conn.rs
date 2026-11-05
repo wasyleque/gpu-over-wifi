@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use gpu_proto::frame::{flags, Frame, FrameError, FrameReader};
 use gpu_proto::msg::{MsgError, Request, Response};
 
+use crate::handler::DeltaItem;
 use crate::handler::{GpuBackend, Session, ERR_PROTOCOL};
 
 /// Jedyny strumień używany w M1: sterowanie (żądanie -> odpowiedź).
@@ -57,6 +58,15 @@ fn video_loop<W: Write>(rx: std::sync::mpsc::Receiver<Vec<u8>>, writer: &mut W) 
     Ok(())
 }
 
+/// Żądanie odczytu różnic pamięci jako (pamięć, zakresy albo `None` = cała pamięć); inne żądania dają `None`.
+fn delta_item(req: &Request) -> Option<DeltaItem> {
+    match req {
+        Request::MemReadDelta { memory } => Some((*memory, None)),
+        Request::MemReadDeltaRanges { memory, ranges, .. } => Some((*memory, Some(ranges.clone()))),
+        _ => None,
+    }
+}
+
 /// Wypisuje zaległe odpowiedzi jednym zapisem (kolejność bajtów w strumieniu bez zmian).
 fn flush_pending<W: Write>(writer: &mut W, pending: &mut Vec<u8>) -> Result<(), ServeError> {
     if !pending.is_empty() {
@@ -87,6 +97,9 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
     let mut buf = vec![0u8; 64 * 1024];
     // Odpowiedzi na wszystkie żądania z jednego odczytu idą jednym zapisem (patrz `flush_pending`): mniej pakietów i wywołań systemowych.
     let mut pending: Vec<u8> = Vec::new();
+    // Ramki wyjęte z czytnika przy podglądaniu następnych żądań (patrz grupa odczytów różnic niżej).
+    let mut ahead: std::collections::VecDeque<Frame> = std::collections::VecDeque::new();
+    let mut group_left = 0usize;
 
     // Inner function to handle the main loop logic
     let result = (|| -> Result<(), ServeError> {
@@ -115,13 +128,16 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
 
             // Process all complete frames from the buffer
             loop {
-                let frame = match fr.next_frame() {
-                    Ok(Some(f)) => f,
-                    Ok(None) => break,
-                    Err(e) => {
-                        flush_pending(writer, &mut pending)?;
-                        return Err(e.into());
-                    }
+                let frame = match ahead.pop_front() {
+                    Some(f) => f,
+                    None => match fr.next_frame() {
+                        Ok(Some(f)) => f,
+                        Ok(None) => break,
+                        Err(e) => {
+                            flush_pending(writer, &mut pending)?;
+                            return Err(e.into());
+                        }
+                    },
                 };
                 // Check if frame is on the correct stream or has ZSTD compression (unsupported)
                 if frame.header.stream != STREAM_CONTROL || frame.header.flags & flags::ZSTD != 0 {
@@ -166,7 +182,36 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
                     send_reply(writer, &frame, &reply)?;
                     continue;
                 }
+                // Kolejne żądania odczytu różnic pamięci, które już przyszły (klient odświeża po jednym oczekiwaniu kilka pamięci), idą do backendu jako
+                // grupa: jedna kopia GPU i jeden płotek zamiast jednego na pamięć. Odpowiedzi nadal wychodzą po jednej, w kolejności żądań.
+                if let Some(item) = delta_item(&req) {
+                    if group_left == 0 && session.is_authenticated() {
+                        let mut items = vec![item];
+                        while let Ok(Some(f)) = fr.next_frame() {
+                            let next = if f.header.stream == STREAM_CONTROL { Request::decode(&f.payload).ok().and_then(|r| delta_item(&r)) } else { None };
+                            ahead.push_back(f);
+                            match next {
+                                Some(it) => items.push(it),
+                                None => break,
+                            }
+                        }
+                        if items.len() >= 2 {
+                            session.prefetch_deltas(&items);
+                            group_left = items.len();
+                        }
+                    }
+                } else if group_left > 0 {
+                    session.prefetch_end();
+                    group_left = 0;
+                }
+                let handled_delta = delta_item(&req).is_some();
                 let Some(response) = session.handle_request(req) else { continue };
+                if handled_delta && group_left > 0 {
+                    group_left -= 1;
+                    if group_left == 0 {
+                        session.prefetch_end();
+                    }
+                }
 
                 // Encode and send the response
                 let response_frame = Frame::new(
@@ -242,6 +287,20 @@ mod tests {
         }
         fn mem_read(&mut self, _: u64, _: u64, len: u32) -> Result<Vec<u8>, i32> {
             Ok(vec![9; len as usize])
+        }
+        fn mem_prefetch(&mut self, items: &[DeltaItem]) {
+            self.log.borrow_mut().push(format!("prefetch {:?}", items.iter().map(|i| i.0).collect::<Vec<_>>()));
+        }
+        fn mem_prefetch_end(&mut self) {
+            self.log.borrow_mut().push("prefetch_end".into());
+        }
+        fn mem_read_delta(&mut self, memory: u64, _: usize) -> Result<Vec<u8>, i32> {
+            self.log.borrow_mut().push(format!("delta {memory}"));
+            Ok(vec![memory as u8])
+        }
+        fn mem_read_delta_ranges(&mut self, memory: u64, _: &[(u64, u64)], _: usize, _: bool) -> Result<Vec<u8>, i32> {
+            self.log.borrow_mut().push(format!("ranges {memory}"));
+            Ok(vec![memory as u8])
         }
     }
 
@@ -320,6 +379,32 @@ mod tests {
         assert_eq!(r[1].1, Response::U32(0x0040_3000));
         assert_eq!((r[1].0.header.seq, r[1].0.header.epoch), (8, 42));
         assert_ne!(r[1].0.header.flags & flags::CRC, 0, "odpowiedzi mają CRC");
+    }
+
+    #[test]
+    fn consecutive_memory_delta_requests_are_prefetched_as_one_group_and_answered_in_order() {
+        let (mut s, log) = session();
+        let mut input = req_frame(1, 0, &hello());
+        input.extend(req_frame(2, 0, &Request::EnumInstanceVersion));
+        input.extend(req_frame(3, 0, &Request::MemReadDelta { memory: 11 }));
+        input.extend(req_frame(4, 0, &Request::MemReadDeltaRanges { memory: 12, ranges: vec![(0, 4096)], cached: false }));
+        input.extend(req_frame(5, 0, &Request::MemReadDelta { memory: 13 }));
+        input.extend(req_frame(6, 0, &Request::EnumInstanceVersion));
+        // Pojedyncze żądanie po innym poleceniu nie tworzy grupy.
+        input.extend(req_frame(7, 0, &Request::MemReadDelta { memory: 14 }));
+        let mut out = Vec::new();
+        assert_eq!(serve_connection(&mut s, &mut Cursor::new(input), &mut out), Ok(()));
+        let r = parse_responses(&out);
+        assert_eq!(r.iter().map(|(f, _)| f.header.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6, 7], "kolejność odpowiedzi");
+        assert_eq!(r[2].1, Response::Data(vec![11]));
+        assert_eq!(r[3].1, Response::Data(vec![12]));
+        assert_eq!(r[4].1, Response::Data(vec![13]));
+        assert_eq!(r[6].1, Response::Data(vec![14]));
+        let l = log.borrow().clone();
+        let pos = |x: &str| l.iter().position(|e| e == x).unwrap_or_else(|| panic!("brak {x} w {l:?}"));
+        assert_eq!(l.iter().filter(|e| e.starts_with("prefetch ")).count(), 1, "tylko jedna grupa: {l:?}");
+        assert!(pos("prefetch [11, 12, 13]") < pos("delta 11") && pos("delta 11") < pos("ranges 12") && pos("ranges 12") < pos("delta 13"));
+        assert!(pos("delta 13") < pos("prefetch_end") && pos("prefetch_end") < pos("delta 14"), "koniec grupy przed następnym żądaniem: {l:?}");
     }
 
     /// Zapisy do gniazda liczone osobno, żeby sprawdzić, że odpowiedzi na grupę żądań idą razem.

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use super::{call_thunk, Replayer, Staged, VK_WHOLE_SIZE};
+use crate::handler::DeltaItem;
 use crate::handler::ERR_UNKNOWN;
 
 const BUFFER_USAGE_TRANSFER_SRC: u32 = 0x1;
@@ -22,7 +23,6 @@ pub(super) struct Staging {
     buf: u64,
     mem: u64,
     ptr: usize,
-    size: usize,
     coherent: bool,
 }
 
@@ -31,7 +31,8 @@ struct DevCopy {
     pool: u64,
     cmd: u64,
     fence: u64,
-    staging: Staging,
+    /// Bufor pośredni w RAM per pamięć (prawdziwy uchwyt): jedna kopia GPU może obejmować kilka pamięci naraz (jedno zgłoszenie i jeden płotek).
+    stagings: HashMap<u64, Staging>,
     /// Pamięć (prawdziwy uchwyt) -> bufor TRANSFER_SRC związany z całą pamięcią.
     srcs: HashMap<u64, u64>,
 }
@@ -43,6 +44,8 @@ pub(super) struct GpuCopy {
     devs: HashMap<u64, DevCopy>,
     /// Identyfikator pamięci klienta -> indeks typu pamięci z `vkAllocateMemory`.
     pub mem_types: HashMap<u64, u32>,
+    /// Dane przygotowane przez `gpu_prefetch` dla bieżącej grupy żądań: pamięć -> (wskaźnik lustra, rozmiar).
+    pub ready: HashMap<u64, (usize, usize)>,
     failures: u32,
     pub used: u64,
     pub ns: u64,
@@ -109,9 +112,9 @@ impl Replayer {
         for (_, b) in d.srcs {
             let _ = self.vk("vkDestroyBuffer", &[device, b, 0]);
         }
-        if d.staging.buf != 0 {
-            let _ = self.vk("vkDestroyBuffer", &[device, d.staging.buf, 0]);
-            let _ = self.vk("vkFreeMemory", &[device, d.staging.mem, 0]);
+        for (_, st) in d.stagings {
+            let _ = self.vk("vkDestroyBuffer", &[device, st.buf, 0]);
+            let _ = self.vk("vkFreeMemory", &[device, st.mem, 0]);
         }
         if d.fence != 0 {
             let _ = self.vk("vkDestroyFence", &[device, d.fence, 0]);
@@ -131,9 +134,16 @@ impl Replayer {
 
     /// Przed `vkFreeMemory`: zdejmuje bufor, który kopia związała z tą pamięcią.
     pub(super) fn copy_forget_memory(&mut self, device: u64, memory: u64) {
-        let b = self.copy.devs.get_mut(&device).and_then(|d| d.srcs.remove(&memory));
+        let (b, st) = match self.copy.devs.get_mut(&device) {
+            Some(d) => (d.srcs.remove(&memory), d.stagings.remove(&memory)),
+            None => (None, None),
+        };
         if let Some(b) = b {
             let _ = self.vk("vkDestroyBuffer", &[device, b, 0]);
+        }
+        if let Some(st) = st {
+            let _ = self.vk("vkDestroyBuffer", &[device, st.buf, 0]);
+            let _ = self.vk("vkFreeMemory", &[device, st.mem, 0]);
         }
     }
 
@@ -160,13 +170,9 @@ impl Replayer {
         Ok(())
     }
 
-    fn ensure_staging(&mut self, device: u64, physical: u64, size: usize) -> Result<(), i32> {
-        if self.copy.devs.get(&device).is_some_and(|d| d.staging.size >= size) {
+    fn ensure_staging(&mut self, device: u64, physical: u64, mem_real: u64, size: usize) -> Result<(), i32> {
+        if self.copy.devs.get(&device).is_some_and(|d| d.stagings.contains_key(&mem_real)) {
             return Ok(());
-        }
-        if let Some(old) = self.copy.devs.get_mut(&device).map(|d| std::mem::take(&mut d.staging)).filter(|s| s.buf != 0) {
-            let _ = self.vk("vkDestroyBuffer", &[device, old.buf, 0]);
-            let _ = self.vk("vkFreeMemory", &[device, old.mem, 0]);
         }
         let (buf, req_size, bits) = self.create_buffer(device, size as u64, BUFFER_USAGE_TRANSFER_DST)?;
         let (ty, coherent) = self.host_cached_type(physical, bits)?;
@@ -180,7 +186,7 @@ impl Replayer {
         let mut ptr: *mut u8 = std::ptr::null_mut();
         self.vk_ok("vkMapMemory", &[device, mem, 0, VK_WHOLE_SIZE, 0, &mut ptr as *mut *mut u8 as u64])?;
         if let Some(d) = self.copy.devs.get_mut(&device) {
-            d.staging = Staging { buf, mem, ptr: ptr as usize, size, coherent };
+            d.stagings.insert(mem_real, Staging { buf, mem, ptr: ptr as usize, coherent });
         }
         Ok(())
     }
@@ -204,33 +210,46 @@ impl Replayer {
         Ok(buf)
     }
 
-    /// Kopiuje `spans` pamięci `memory` (identyfikator klienta) przez GPU do bufora w RAM pod tymi samymi przesunięciami; zwraca wskaźnik na lustro.
+    /// Kopiuje przedziały bajtów kilku pamięci TEGO SAMEGO urządzenia przez GPU do buforów w RAM (te same przesunięcia) jednym zgłoszeniem i jednym
+    /// płotkiem; zwraca (pamięć, wskaźnik lustra, rozmiar). Jedno zgłoszenie na pamięć kosztowało ok. 0,6 ms, a po każdym oczekiwaniu klient
+    /// odświeża kilka pamięci (53 tys. żądań na 3 429 klatek Rise of the Tomb Raider).
     /// `Err`: nie da się (brak kolejki, niezgodny typ pamięci, błąd sterownika) i trzeba czytać procesorem.
-    fn copy_via_gpu(&mut self, memory: u64, spans: &[(usize, usize)]) -> Result<Staged, i32> {
-        if self.copy.failures >= 3 {
+    fn copy_many(&mut self, items: &[(u64, Vec<(usize, usize)>)]) -> Result<Vec<(u64, usize, usize)>, i32> {
+        if self.copy.failures >= 3 || items.is_empty() {
             return Err(ERR_UNKNOWN);
         }
-        let e = *self.registry.get(memory).ok_or(ERR_UNKNOWN)?;
-        let (device, mem_real, size) = (e.parent, e.real, e.size as usize);
+        let first = *self.registry.get(items[0].0).ok_or(ERR_UNKNOWN)?;
+        let device = first.parent;
         let physical = self.registry.entries_of_kind("VkDevice").into_iter().find(|(_, d)| d.real == device).map(|(_, d)| d.parent).ok_or(ERR_UNKNOWN)?;
-        let mem_type = *self.copy.mem_types.get(&memory).ok_or(ERR_UNKNOWN)?;
         let &(queue, _) = self.copy.queues.get(&device).ok_or(ERR_UNKNOWN)?;
         let r = (|| {
             self.ensure_dev(device)?;
-            self.ensure_staging(device, physical, size)?;
-            let src = self.ensure_src(device, mem_real, mem_type, size)?;
-            let d = self.copy.devs.get(&device).ok_or(ERR_UNKNOWN)?;
-            let (cmd, fence, dst, stg_ptr, coherent, stg_mem) = (d.cmd, d.fence, d.staging.buf, d.staging.ptr, d.staging.coherent, d.staging.mem);
-            let mut regions: Vec<u8> = Vec::new();
-            let mut spans_v: Vec<(usize, usize)> = spans.to_vec();
-            if spans_v.len() > MAX_REGIONS {
-                spans_v = vec![(spans_v[0].0, spans_v[spans_v.len() - 1].1)];
-            }
-            for &(a, b) in &spans_v {
-                for v in [a as u64, a as u64, (b - a) as u64] {
-                    regions.extend_from_slice(&v.to_le_bytes());
+            // (src, dst, ptr, size, coherent, staging memory, regions, liczba przedziałów, identyfikator pamięci)
+            let mut jobs = Vec::new();
+            for (memory, spans) in items {
+                let e = *self.registry.get(*memory).ok_or(ERR_UNKNOWN)?;
+                if e.parent != device {
+                    return Err(ERR_UNKNOWN);
                 }
+                let size = e.size as usize;
+                let mem_type = *self.copy.mem_types.get(memory).ok_or(ERR_UNKNOWN)?;
+                self.ensure_staging(device, physical, e.real, size)?;
+                let src = self.ensure_src(device, e.real, mem_type, size)?;
+                let st = self.copy.devs.get(&device).and_then(|d| d.stagings.get(&e.real)).ok_or(ERR_UNKNOWN)?;
+                let mut spans_v: Vec<(usize, usize)> = spans.clone();
+                if spans_v.len() > MAX_REGIONS {
+                    spans_v = vec![(spans_v[0].0, spans_v[spans_v.len() - 1].1)];
+                }
+                let mut regions: Vec<u8> = Vec::new();
+                for &(a, b) in &spans_v {
+                    for v in [a as u64, a as u64, (b - a) as u64] {
+                        regions.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                jobs.push((src, st.buf, st.ptr, size, st.coherent, st.mem, regions, spans_v.len(), *memory));
             }
+            let d = self.copy.devs.get(&device).ok_or(ERR_UNKNOWN)?;
+            let (cmd, fence) = (d.cmd, d.fence);
             let mut bi = [0u8; 32];
             put32(&mut bi, 0, 42);
             put32(&mut bi, 16, 1); // ONE_TIME_SUBMIT
@@ -241,7 +260,9 @@ impl Replayer {
             put32(&mut mb, 16, 0x10000); // MEMORY_WRITE
             put32(&mut mb, 20, 0x800); // TRANSFER_READ
             self.vk("vkCmdPipelineBarrier", &[cmd, 0x10000, 0x1000, 0, 1, mb.as_ptr() as u64, 0, 0, 0, 0])?;
-            self.vk("vkCmdCopyBuffer", &[cmd, src, dst, spans_v.len() as u64, regions.as_ptr() as u64])?;
+            for j in &jobs {
+                self.vk("vkCmdCopyBuffer", &[cmd, j.0, j.1, j.7 as u64, j.6.as_ptr() as u64])?;
+            }
             self.vk_ok("vkEndCommandBuffer", &[cmd])?;
             let mut si = [0u8; 72];
             put32(&mut si, 0, 4);
@@ -254,14 +275,18 @@ impl Replayer {
                 eprintln!("replay: kopia GPU: czekanie na płotek zwróciło {w}");
                 return Err(ERR_UNKNOWN);
             }
-            if !coherent {
-                let mut r = [0u8; 40];
-                put32(&mut r, 0, 6);
-                put64(&mut r, 16, stg_mem);
-                put64(&mut r, 32, VK_WHOLE_SIZE);
-                self.vk_ok("vkInvalidateMappedMemoryRanges", &[device, 1, r.as_ptr() as u64])?;
+            let mut out = Vec::new();
+            for j in &jobs {
+                if !j.4 {
+                    let mut r = [0u8; 40];
+                    put32(&mut r, 0, 6);
+                    put64(&mut r, 16, j.5);
+                    put64(&mut r, 32, VK_WHOLE_SIZE);
+                    self.vk_ok("vkInvalidateMappedMemoryRanges", &[device, 1, r.as_ptr() as u64])?;
+                }
+                out.push((j.8, j.2, j.3));
             }
-            Ok(Staged::Mapped(stg_ptr as *const u8, size))
+            Ok(out)
         })();
         match &r {
             Ok(_) => self.copy.used += 1,
@@ -283,18 +308,72 @@ impl Replayer {
         (ty as usize) >= n || u32::from_le_bytes(props[4 + 8 * ty as usize..8 + 8 * ty as usize].try_into().unwrap()) & MEM_HOST_CACHED != 0
     }
 
-    /// Dane do porównania stron `spans` z pamięci `memory`: kopia GPU, gdy się opłaca i się da; `None` = czytaj procesorem.
+    /// Dane do porównania stron `spans` z pamięci `memory`: wcześniej przygotowane przez `gpu_prefetch` (grupa żądań) albo kopia GPU, gdy się
+    /// opłaca i się da; `None` = czytaj procesorem.
     pub(super) fn gpu_staged(&mut self, memory: u64, spans: &[(usize, usize)]) -> Option<Staged> {
+        if let Some((ptr, size)) = self.copy.ready.remove(&memory) {
+            return Some(Staged::Mapped(ptr as *const u8, size));
+        }
         let total: usize = spans.iter().map(|(a, b)| b - a).sum();
         if total < MIN_BYTES || std::env::var_os("GPU_RENDERD_NO_GPU_COPY").is_some() {
             return None;
         }
         let t = std::time::Instant::now();
-        let r = self.copy_via_gpu(memory, spans).ok();
+        let r = self.copy_many(&[(memory, spans.to_vec())]).ok().and_then(|v| v.first().map(|&(_, p, n)| Staged::Mapped(p as *const u8, n)));
         self.copy.ns += t.elapsed().as_nanos() as u64;
-        if self.copy.used % 2000 == 1 && r.is_some() {
+        self.copy_report(r.is_some());
+        r
+    }
+
+    fn copy_report(&self, ok: bool) {
+        if self.copy.used % 2000 == 1 && ok {
             eprintln!("gpu-renderd: kopia GPU odczytu pamięci: {} użyć, {} ms łącznie, {} porażek", self.copy.used, self.copy.ns / 1_000_000, self.copy.failures);
         }
-        r
+    }
+
+    /// Grupa żądań odczytu różnic (klient odświeża po jednym oczekiwaniu kilka pamięci): kopiujemy wszystkie pamięci bez cache jednym zgłoszeniem
+    /// GPU i jednym płotkiem, a pojedyncze żądania z grupy biorą gotowe dane z `gpu_staged`. `items`: (pamięć, zakresy albo cała pamięć).
+    pub(super) fn gpu_prefetch(&mut self, items: &[DeltaItem]) {
+        self.copy.ready.clear();
+        if self.copy.failures >= 3 || std::env::var_os("GPU_RENDERD_NO_GPU_COPY").is_some() {
+            return;
+        }
+        let mut want: Vec<(u64, Vec<(usize, usize)>)> = Vec::new();
+        let mut device = None;
+        for (memory, ranges) in items {
+            if want.iter().any(|w| w.0 == *memory) || self.mem_is_host_cached(*memory) {
+                continue;
+            }
+            let Some(e) = self.registry.get(*memory).copied() else { continue };
+            if device.is_some_and(|d| d != e.parent) {
+                continue; // inne urządzenie: to żądanie pójdzie osobno
+            }
+            let size = e.size as usize;
+            let spans = match ranges {
+                Some(r) => gpu_proto::pagediff::page_spans(r, size),
+                None => vec![(0usize, size)],
+            };
+            if spans.iter().map(|(a, b)| b - a).sum::<usize>() < MIN_BYTES {
+                continue;
+            }
+            device = Some(e.parent);
+            want.push((*memory, spans));
+        }
+        if want.len() < 2 {
+            return; // jedna pamięć: zwykła ścieżka robi to samo bez dodatkowego kodu
+        }
+        let t = std::time::Instant::now();
+        if let Ok(v) = self.copy_many(&want) {
+            for (m, p, n) in v {
+                self.copy.ready.insert(m, (p, n));
+            }
+        }
+        self.copy.ns += t.elapsed().as_nanos() as u64;
+        self.copy_report(true);
+    }
+
+    /// Koniec grupy: niewykorzystane przygotowane dane nie mogą przeżyć do następnego żądania (zawartość pamięci karty zmienia się w czasie).
+    pub(super) fn gpu_prefetch_end(&mut self) {
+        self.copy.ready.clear();
     }
 }
