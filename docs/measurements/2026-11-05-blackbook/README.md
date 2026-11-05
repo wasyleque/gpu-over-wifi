@@ -22,3 +22,9 @@ Over 14 541 frames: 76 000 GPU copies, 0 failures, `memreaddelta` 51 s (was 199 
 
 Switches: `GPU_RENDERD_NO_GPU_COPY=1` (server) disables the GPU copy; `GPU_ICD_LAZY_ALL=1` (client) re-enables
 lazy read-back for non-cached memory (slower in this game).
+
+## Later the same night (build 0.3.5)
+
+Compression of memory writes moved off the instance lock and spread over two framing workers (a single framing sender doubled the wait for
+the server and dropped the mean to 31 FPS; the pipeline fixed that). 12 113 frames: mean **52.7 FPS**, 60-63 FPS for most of the session; server wait 14.4 ms
+per frame, instance lock held 3.0 ms per frame (6.6-7.3 before), `vkWaitSemaphores` 4.4 ms.
