@@ -21,6 +21,8 @@ use crate::handler::ERR_UNKNOWN;
 use crate::vk::loader::{LibVulkan, VkInstance};
 use crate::vk::registry::{Entry, Registry};
 
+mod copy;
+
 const MAX_INTS: usize = 14;
 const MAX_FLOATS: usize = 8;
 const VK_WHOLE_SIZE: u64 = u64::MAX;
@@ -119,6 +121,8 @@ pub struct Replayer {
     failed_allocs: u32,
     /// Bufor na kopię odczytywanej pamięci (patrz `stage`), używany wielokrotnie.
     scratch: Vec<u8>,
+    /// Odczyt pamięci przez kopię GPU (patrz `copy`).
+    copy: copy::GpuCopy,
 }
 
 // SAFETY: wskaźniki to uchwyty i adresy odwzorowań sterownika używane wyłącznie przez wątek sesji.
@@ -191,7 +195,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new() }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new(), copy: Default::default() }
     }
 
     pub fn registered_handles(&self) -> usize {
@@ -331,6 +335,12 @@ impl Replayer {
                 }
             }
         }
+        // Obiekty pomocnicze kopii GPU zwalniamy przed obiektami, na których wiszą (inaczej zostaną w sterowniku).
+        if cmd.name == "vkDestroyDevice" {
+            self.copy_forget_device(ints[0]);
+        } else if cmd.name == "vkFreeMemory" && ints.len() >= 2 {
+            self.copy_forget_memory(ints[0], ints[1]);
+        }
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
         let t0 = std::time::Instant::now();
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
@@ -362,6 +372,17 @@ impl Replayer {
         if result < 0 {
             eprintln!("replay: {} zwróciło {result}", cmd.name);
             return if tolerate { Ok(result) } else { Err(result) };
+        }
+        if cmd.name == "vkGetDeviceQueue" && ints.len() >= 4 {
+            // SAFETY: parametr 3 to wskaźnik wyjściowy na uchwyt kolejki (sterownik właśnie go wpisał).
+            let q = unsafe { std::ptr::read_unaligned(ints[3] as *const u64) };
+            self.copy.queues.entry(ints[0]).or_insert((q, ints[1] as u32));
+        }
+        if cmd.name == "vkAllocateMemory" {
+            // SAFETY: `args` to sloty tego polecenia; `pAllocateInfo->memoryTypeIndex` czytamy z zdekodowanej struktury.
+            if let (Some(t), Some(id)) = (unsafe { arg_uint(cmd, args, "pAllocateInfo->memoryTypeIndex") }, ids.first().and_then(|v| v.first())) {
+                self.copy.mem_types.insert(*id, t as u32);
+            }
         }
         let set_ids: Vec<u64> = if cmd.name == "vkAllocateDescriptorSets" { ids.first().cloned().unwrap_or_default() } else { Vec::new() };
         for ((kind, p, _), ids) in outs.iter().zip(ids) {
@@ -406,6 +427,7 @@ impl Replayer {
             self.registry.unregister(*id);
             self.maps.remove(id);
             self.pages.remove(id);
+            self.copy.mem_types.remove(id);
         }
     }
 
@@ -477,8 +499,12 @@ impl Replayer {
         let spans = gpu_proto::pagediff::page_spans(ranges, size);
         // Pamięć HOST_CACHED czyta się szybko: kopia pośrednia (potrzebna tylko dla wolnej pamięci write-combined) byłaby stratą.
         let spans_for_stage: &[(usize, usize)] = if cached { &[] } else { &spans };
+        let gpu = if cached { None } else { self.gpu_staged(memory, &spans) };
         // SAFETY: odwzorowanie ma `e.size` bajtów.
-        let (data, scratch) = unsafe { stage(ptr, size, spans_for_stage, std::mem::take(&mut self.scratch)) };
+        let (data, scratch) = match gpu {
+            Some(d) => (d, std::mem::take(&mut self.scratch)),
+            None => unsafe { stage(ptr, size, spans_for_stage, std::mem::take(&mut self.scratch)) },
+        };
         let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(size));
         let (changed, more) = tracker.changed_in(data.get(&scratch), ranges, max_bytes);
         let out = gpu_proto::pagediff::encode_segments(data.get(&scratch), &changed, more);
