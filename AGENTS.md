@@ -187,3 +187,10 @@ Cyberpunk: 252 s oczekiwania na blokadę instancji wobec 102 s jej trzymania na 
 - Zawieszenie ATS/CP w tej samej scenie zależy od sceny: kokpit ATS ma 16,6 MB zapisów/klatkę, lekka scena 0,2 MB.
 - Plan: `docs/consult/11-next-steps.md` (push wartości semaforów z serwera, mniej wejść w blokadę, różnice zapisów XOR+LZ4, skan jednym wywołaniem, głębsze potokowanie). Skalowanie obrazu (DLSS/FSR/XeSS): nie pomaga (GPU serwera bezczynne), generowanie klatek dopiero od 30+ FPS bazowych.
 - Znane: po twardych awariach gry serwer trzymał 15 GB VRAM (zwolnił je restart demona); `stream_e2e` raz na ~10 uruchomień zawiódł pod obciążeniem (flaky, do zbadania).
+
+## 2026-11-05 (noc): GravityMark, areny śledzenia, sprzątanie VRAM
+
+- Arena śledzenia (`memtrack::Arena`): jedna rejestracja `userfaultfd` dla kopii wszystkich odwzorowanych pamięci, `Shadow::new` przydziela z niej (poza pamięciami leniwymi), `write_mapped` robi jeden skan zbiorczy (scalone zajęte przedziały); haszowanie małych pamięci zniknęło. Test na prawdziwym jądrze.
+- GravityMark (Vulkan, Tellusim) nie startował: `vkEnumeratePhysicalDeviceGroups` brak, `cooperative_matrix` ogłaszane bez możliwości kodowania zapytania, `vkGetPhysicalDeviceImageFormatProperties` (bez `2`) było stubem `FORMAT_NOT_SUPPORTED`, `vkGetPipelineCacheData` niekodowalne (lokalnie: pusta pamięć), `vkUpdateDescriptorSets` z niezerowanymi nieużywanymi wskaźnikami (crash w `enc_struct`; kopia z wyzerowanymi, test). Po tym 7-8 FPS; odczyt leniwy także dla pamięci bez cache (21 ms/żądanie odświeżenia 8 MB WC) -> 15-16; pule z typami z rozszerzeń znów spekulują alokacje -> 30-33 FPS niezależnie od sceny (stały koszt ~31 ms/klatkę po stronie klienta, do znalezienia).
+- Serwer: `destroy_devices` zwalnia wszystkie `VkDeviceMemory` urządzenia przed `vkDestroyDevice` (sterownik NVIDIA nie zwalniał pamięci: 2 GB VRAM po GravityMarku, 15 GB po awariach gier). Po zmianie VRAM wraca do 43 MB.
+- `gm.sh` (job): GravityMark przez nasz sterownik; `GPU_ICD_MAX_INFLIGHT` 3/6/10 nie zmienia 32 FPS. `stream_e2e` bywa flaky tylko pod dużym obciążeniem maszyny (test zlicza urządzenia między sesjami), samodzielnie 0/25 błędów.
