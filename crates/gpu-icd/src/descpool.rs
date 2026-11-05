@@ -120,7 +120,12 @@ impl DescriptorAccounts {
             }
         }
         // Bezpieczna jest tylko pula bez flag poza UPDATE_AFTER_BIND (0x2): FREE_DESCRIPTOR_SET dopuszcza fragmentację.
-        let special = pnext != 0 || flags & !0x2 != 0 || sizes.iter().any(|(t, _)| *t >= 1_000_000_000);
+        // Rozmiary typów z rozszerzeń (np. struktury przyspieszenia w puli GravityMarka) to tylko dodatkowa pojemność: układy używające takich typów są osobno
+        // oznaczone jako specjalne (`Layout::special`) i idą synchronicznie, więc nie wyłączają spekulacji dla reszty puli.
+        let special = pnext != 0 || flags & !0x2 != 0;
+        if special && std::env::var_os("GPU_ICD_DEBUG").is_some() {
+            eprintln!("[gpu-icd] pula deskryptorów {id:#x}: flagi {flags:#x}, maxSets {max_sets}, rozmiary {sizes:?}, pNext {pnext:#x}: alokacje tylko synchronicznie");
+        }
         let left = sizes.iter().copied().collect();
         self.pools.insert(id, Pool { max_sets, sizes, sets_left: max_sets, left, special, resets: 0, allocs_since_reset: 0, refused_since_reset: 0 });
     }
@@ -309,6 +314,17 @@ mod tests {
         }
         assert_eq!(n, 6, "10 zestawów minus zapas 4 = 6 spekulatywnych alokacji; ostatnie 4 idą do serwera");
         assert!(!a.would_fit(7, &[10], false));
+    }
+
+    #[test]
+    fn extension_descriptor_types_in_the_pool_sizes_do_not_disable_speculation_for_ordinary_layouts() {
+        // Pula jak w GravityMarku: zwykłe typy plus struktura przyspieszenia (1000150000); układ używa tylko zwykłych typów.
+        let mut a = setup(0, 1000, &[(1, 5000), (6, 5000), (1_000_150_000, 2048)]);
+        assert!(a.try_allocate(7, &[10], false), "zwykły układ jest spekulowany mimo typu z rozszerzenia w puli");
+        // Układ używający typu z rozszerzenia zostaje synchroniczny.
+        let (li, _lb) = layout_info(&[(1_000_150_000, 1)], 0);
+        unsafe { a.layout_created(11, li.as_ptr()) };
+        assert!(!a.try_allocate(7, &[11], false));
     }
 
 }
