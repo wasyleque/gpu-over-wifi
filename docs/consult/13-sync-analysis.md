@@ -113,3 +113,14 @@ Stoper przypisujący czas do polecenia w `rt_by_cmd` (`obiegi wg poleceń`) star
    - Dodać licznik top-10 poleceń wchodzących w `lock_state` w [`fwd.rs:927`](file:///home/wasyl/Projects/gpu-hub/crates/gpu-icd/src/fwd.rs#L927), żeby widzieć dokładny udział `vkBeginCommandBuffer`, `vkEndCommandBuffer`, `vkQueueSubmit` i `fast_record` (próg 256 KB w [`fwd.rs:874`](file:///home/wasyl/Projects/gpu-hub/crates/gpu-icd/src/fwd.rs#L874)) w 259 900 wejściach.
 4. **Sprawdzenie liczby unikalnych `VkFormat` dla `UNIFORM_TEXEL_BUFFER` (typ 4) w `vkGetDescriptorEXT`:**
    - Wypisać w `descsynth::input_of` wartości pola `format` (`*(info_ptr.add(24) as *const u32)` w `VkDescriptorAddressInfoEXT`) dla `ty == 4` i `ty == 5`, aby potwierdzić, że kilka formatów pokrywa wszystkie 2 652 chybienia.
+
+## Dopisek (Claude, 2026-11-06): sonda deskryptorów texel-buffer (UNIFORM/STORAGE_TEXEL_BUFFER, 16 B)
+
+`descriptor_probe` rozszerzony o typy 4 i 5 (18 formatów x 7 zakresów x 4 adresy, 1008 próbek, RTX 3090 Ti, sterownik 580). Wyniki:
+- bajty typu 4 i 5 są identyczne dla tych samych (adres, zakres, format);
+- słowo 0 (u64) = `adres >> k`, gdzie k zależy od rozmiaru teksela (R8: 0, RGBA8/R32F: 2, RGBA32F: 4);
+- słowo 1 (u32) = liczba elementów = `zakres / rozmiar_teksela` (w dół; dla R32G32B32 `4096 -> 341`);
+- słowo 2 (u32) = stała zależna od formatu, ALE dla niektórych formatów (np. 106) także od wyrównania adresu (2081 vs 2104);
+- słowo 3 (u32) = stała zależna od formatu (np. 0x0a98).
+Wniosek: lokalne liczenie jest możliwe, ale wymaga tablicy per format z zależnością od wyrównania, uczonej i audytowanej tak jak wzór buforów
+(`descsynth`). Zysk szacowany na ok. 10% czekania (2,6 tys. chybień x 3,3 ms), więc po zmianach w szeregowaniu serwera, nie przed nimi.

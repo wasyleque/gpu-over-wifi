@@ -137,6 +137,18 @@ fn probe_buffer_descriptor_encoding() {
         let d = get_descriptor(&mut b, dev, 6, 0x7000_0000_1000 + k, 0x1000, 0, 8);
         println!("SWEEPA {k} {}", hex(&d));
     }
+    // Teksele (UNIFORM/STORAGE_TEXEL_BUFFER, 16 B): wzór zależy od formatu, więc sondujemy formaty x zakresy x adresy (diagnostyka do `descsynth`).
+    let formats = [9u32, 13, 37, 43, 44, 50, 64, 70, 74, 76, 81, 83, 97, 100, 103, 106, 109, 122];
+    for ty in [4u32, 5] {
+        for &f in &formats {
+            for &r in &[4u64, 16, 64, 256, 4096, 65536, 1 << 20] {
+                for &a in &[0x1000u64, 0x1010, 0x2000, 0x7000_0000_1000] {
+                    let d = get_descriptor(&mut b, dev, ty, a, r, f, 16);
+                    println!("TEXEL {ty} {a:#x} {r:#x} {f} {}", hex(&d));
+                }
+            }
+        }
+    }
     for ty in [6u32, 7] {
         for &(a, r, f) in &cases {
             let d = get_descriptor(&mut b, dev, ty, a, r, f, size_of_type(ty));
