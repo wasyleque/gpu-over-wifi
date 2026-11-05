@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/hub-proto", "crates/hub-server", "crates/hub-client", "crates/gpu-vkgen", "crates/gpu-wire", "crates/gpu-proto", "crates/gpu-renderd", "crates/gpu-icd", "crates/gpu-vkcodec", "crates/gpu-h264", "crates/gpu-nvenc", "crates/gpu-vaapi"]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/wasyleque/gpu-over-wifi"
 edition = "2021"
