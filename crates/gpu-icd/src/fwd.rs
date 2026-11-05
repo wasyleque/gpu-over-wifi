@@ -1609,7 +1609,17 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
     };
     let result = d.get(..4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(VK_ERROR_DEVICE_LOST);
     let mut dec = Decoder::new(d.get(4..).unwrap_or(&[]));
+    if result < 0 {
+        // Raz na parę (polecenie, kod): serwer odmówił, a aplikacja widzi tylko kod wyniku (tak "Failed to create Vulkan device" nie miało przyczyny w logu).
+        static SEEN: std::sync::Mutex<Vec<(&'static str, i32)>> = std::sync::Mutex::new(Vec::new());
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.contains(&(cmd.name, result)) && seen.len() < 64 {
+            seen.push((cmd.name, result));
+            eprintln!("gpu-icd: serwer odpowiedział na {} kodem {result}", cmd.name);
+        }
+    }
     if result >= 0 && decode_out_params(cmd, args, &mut dec).is_err() {
+        eprintln!("gpu-icd: nie umiem odczytać odpowiedzi na {}", cmd.name);
         return fail(VK_ERROR_INITIALIZATION_FAILED);
     }
     if cmd.ret == Ret::U64 {
