@@ -863,6 +863,16 @@ pub(crate) fn lock_state(inst: &InstanceObj) -> std::sync::MutexGuard<'_, InstSt
 }
 
 unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
+    // Tworzenie urządzenia jest rzadkie, a jego niepowodzenie bez śladu w logu zatrzymało Rise of the Tomb Raider: zapisujemy każdy wynik.
+    if COMMANDS.get(op as usize).is_some_and(|c| c.name == "vkCreateDevice") {
+        let r = forward_inner(op, ints, floats);
+        eprintln!("gpu-icd: vkCreateDevice -> {} (wątek {:?})", r as u32 as i32, std::thread::current().id());
+        return r;
+    }
+    forward_inner(op, ints, floats)
+}
+
+unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let Some(cmd) = COMMANDS.get(op as usize) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
     if op == descriptor_op() && descriptor_lockfree(op, cmd, &ints, &floats) {
         return 0;
