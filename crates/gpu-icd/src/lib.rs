@@ -419,6 +419,16 @@ unsafe extern "C" fn destroy_instance(inst: *mut InstanceObj, _alloc: *const c_v
 /// `vkEnumeratePhysicalDeviceGroups` (Vulkan 1.1; silniki jak Tellusim w GravityMarku zwracają "Initialization error", gdy go brak): każda
 /// zdalna karta to osobna grupa z jednym urządzeniem (bez wielu GPU w jednej grupie, `subsetAllocation = false`).
 /// `VkPhysicalDeviceGroupProperties` (288 B): sType @0, pNext @8, physicalDeviceCount @16, physicalDevices[32] @24, subsetAllocation @280.
+/// `vkGetPipelineCacheData`: kodek nie umie zakodować tablicy bajtów o zmiennej długości, a dane pamięci podręcznej potoków zależą od sterownika
+/// serwera i nie nadają się do zapisu po stronie klienta, więc odpowiadamy "pusta pamięć" (rozmiar 0): aplikacje (np. Tellusim w GravityMarku)
+/// zapisują wtedy pusty plik, a przy następnym starcie tworzą potoki od zera.
+unsafe extern "C" fn get_pipeline_cache_data(_dev: u64, _cache: u64, size: *mut usize, _data: *mut u8) -> VkResult {
+    if let Some(sz) = size.as_mut() {
+        *sz = 0;
+    }
+    VK_SUCCESS
+}
+
 unsafe extern "C" fn enumerate_physical_device_groups(inst: *mut InstanceObj, count: *mut u32, out: *mut u8) -> VkResult {
     let (Some(inst), Some(count)) = (inst.as_ref(), count.as_mut()) else { return VK_ERROR_INITIALIZATION_FAILED };
     let st = crate::fwd::lock_state(inst);
@@ -814,7 +824,7 @@ fn proc_addr_lookup(name: &str) -> *const c_void {
 }
 
 /// Polecenia, które ICD obsługuje wyłącznie lokalnie (nie przekazuje generycznie).
-const LOCAL_ONLY: &[&str] = &["vkEnumeratePhysicalDeviceGroups", "vkEnumeratePhysicalDeviceGroupsKHR", "vkCreateWaylandSurfaceKHR", "vkCreateXcbSurfaceKHR", "vkCreateXlibSurfaceKHR", "vkCreateHeadlessSurfaceEXT", "vkDestroySurfaceKHR", "vkGetPhysicalDeviceWaylandPresentationSupportKHR", "vkGetPhysicalDeviceXcbPresentationSupportKHR", "vkGetPhysicalDeviceXlibPresentationSupportKHR", "vkCreateInstance", "vkDestroyInstance", "vkEnumeratePhysicalDevices", "vkEnumerateInstanceVersion", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties"];
+const LOCAL_ONLY: &[&str] = &["vkGetPipelineCacheData", "vkEnumeratePhysicalDeviceGroups", "vkEnumeratePhysicalDeviceGroupsKHR", "vkCreateWaylandSurfaceKHR", "vkCreateXcbSurfaceKHR", "vkCreateXlibSurfaceKHR", "vkCreateHeadlessSurfaceEXT", "vkDestroySurfaceKHR", "vkGetPhysicalDeviceWaylandPresentationSupportKHR", "vkGetPhysicalDeviceXcbPresentationSupportKHR", "vkGetPhysicalDeviceXlibPresentationSupportKHR", "vkCreateInstance", "vkDestroyInstance", "vkEnumeratePhysicalDevices", "vkEnumerateInstanceVersion", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties"];
 
 fn local_proc_addr(name: &str) -> *const c_void {
     table!(name,
@@ -823,6 +833,7 @@ fn local_proc_addr(name: &str) -> *const c_void {
         "vkCreateInstance" => create_instance as unsafe extern "C" fn(*const u8, *const c_void, *mut *mut InstanceObj) -> VkResult,
         "vkDestroyInstance" => destroy_instance as unsafe extern "C" fn(*mut InstanceObj, *const c_void),
         "vkEnumeratePhysicalDevices" => enumerate_physical_devices as unsafe extern "C" fn(*mut InstanceObj, *mut u32, *mut *mut PdevObj) -> VkResult,
+        "vkGetPipelineCacheData" => get_pipeline_cache_data as unsafe extern "C" fn(u64, u64, *mut usize, *mut u8) -> VkResult,
         "vkEnumeratePhysicalDeviceGroups" => enumerate_physical_device_groups as unsafe extern "C" fn(*mut InstanceObj, *mut u32, *mut u8) -> VkResult,
         "vkEnumeratePhysicalDeviceGroupsKHR" => enumerate_physical_device_groups as unsafe extern "C" fn(*mut InstanceObj, *mut u32, *mut u8) -> VkResult,
         "vkGetPhysicalDeviceProperties" => get_properties as unsafe extern "C" fn(*mut c_void, *mut u8),
