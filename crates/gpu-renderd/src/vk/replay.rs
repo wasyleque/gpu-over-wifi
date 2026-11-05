@@ -310,6 +310,10 @@ impl Replayer {
         let size = if cmd.name == "vkAllocateMemory" { unsafe { arg_uint(cmd, args, "pAllocateInfo->allocationSize") }.unwrap_or(0) } else { 0 };
         self.last_name = cmd.name;
         trace_command(cmd.name);
+        // Rozmiary rysowań i dispatchy w śladzie: zawieszenie GPU (pętla albo gigantyczny dispatch z nieaktualnych danych) widać po absurdalnych liczbach.
+        if matches!(cmd.name, "vkCmdDispatch" | "vkCmdDraw" | "vkCmdDrawIndexed" | "vkCmdDispatchIndirect" | "vkCmdDrawIndirect" | "vkCmdDrawIndexedIndirect" | "vkCmdDispatchBase") && std::env::var_os("GPU_RENDERD_TRACE").is_some() {
+            trace_text(&format!("  args {} {:?}", cmd.name, &ints[1.min(ints.len())..ints.len().min(8)]));
+        }
         if std::env::var("GPU_RENDERD_TRACE").is_ok() && (cmd.name == "vkCreateDescriptorPool" || cmd.name == "vkAllocateDescriptorSets") {
             // SAFETY: parametr 1 to wskaźnik na zdekodowaną strukturę w arenie.
             unsafe {
