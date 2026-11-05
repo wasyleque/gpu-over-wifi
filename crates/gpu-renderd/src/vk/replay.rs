@@ -501,6 +501,21 @@ impl Replayer {
                 // SAFETY: uchwyt urządzenia jest ważny do chwili zniszczenia; po nim wpis znika z rejestru.
                 unsafe {
                     call_thunk(wait, &[e.real], &[]);
+                    // Sterownik NVIDIA nie zwalnia pamięci urządzenia przy `vkDestroyDevice`, gdy sesja kończy się bez zwolnienia obiektów (zerwane
+                    // połączenie, zabita gra): po jednym przebiegu GravityMarka zostawało 2 GB VRAM, po awarii Cyberpunka 15 GB. Zwalniamy więc
+                    // wszystkie alokacje tego urządzenia sami (po `vkDeviceWaitIdle` nic z nich nie korzysta).
+                    if let (Ok(unmap), Ok(free)) = (self.func_by_name("vkUnmapMemory"), self.func_by_name("vkFreeMemory")) {
+                        for (mid, m) in self.registry.entries_of_kind("VkDeviceMemory") {
+                            if m.parent != e.real {
+                                continue;
+                            }
+                            if self.maps.remove(&mid).is_some() {
+                                call_thunk(unmap, &[e.real, m.real], &[]);
+                            }
+                            call_thunk(free, &[e.real, m.real, 0], &[]);
+                            self.registry.unregister(mid);
+                        }
+                    }
                     call_thunk(destroy, &[e.real, 0], &[]);
                 }
             }
