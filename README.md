@@ -12,6 +12,10 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 *American Truck Simulator (native Linux Vulkan game) in the cab on the Ryzen 5 4500U laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable: **68-72 FPS** in light scenes (it was 3-45 FPS a day earlier). In a busy cockpit scene with mirrors it drops to about 6 FPS because the game rewrites ~17 MB of mapped memory per frame. The frame-rate overlay was not enabled in this screenshot; the numbers come from the driver's own statistics ([`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md)).*
 
+![Black Book running on a Ryzen laptop, rendered on a remote RTX 3090 Ti: 59.7 FPS](docs/images/blackbook-remote-rtx3090ti.png)
+
+*Black Book (Proton, DXVK) on the Ryzen laptop, drawn by the RTX 3090 Ti in another machine: **40-60 FPS** with the game's own counter ([`docs/measurements/2026-11-05-blackbook`](docs/measurements/2026-11-05-blackbook/README.md)).*
+
 ![GravityMark 1.89 (Vulkan) running on a Ryzen laptop, rendered on a remote RTX 3090 Ti: 35.9 FPS](docs/images/gravitymark-remote-rtx3090ti.png)
 
 *GravityMark 1.89 (Vulkan, 20 000 asteroids, 1280x720) on the Ryzen laptop, drawn by the RTX 3090 Ti in another machine: **30-36 FPS** with the benchmark's own overlay (FPS, score 3 993). It did not start at all that morning; five missing or broken Vulkan entry points were fixed, and the frame rate went 8 -> 17 -> 31 -> 36 FPS over one hour as lazy read-back and descriptor allocation shortcuts were extended to its memory and pools ([`docs/measurements/2026-11-05-gravitymark`](docs/measurements/2026-11-05-gravitymark/README.md)).*
@@ -87,6 +91,7 @@ Building blocks:
 | FurMark 2.11 (Vulkan, 1280x720) | native Vulkan | ~98 FPS, frame latency ~29 ms | first run was 11 FPS: server compared the whole mapped memory after every GPU wait (fixed: ranges + streaming loads) |
 | Hamster Hunter (Unity, IL2CPP) | native Vulkan, `-force-vulkan` | 21-34 FPS, frame latency ~20 ms | memory read-back from slow (write-combined) memory: 6.9 -> 1.2 ms per request after the fix |
 | American Truck Simulator (native Linux, `-rdevice vk`) | native Vulkan | **68-72 FPS** (was 3-45) | 1.8 M descriptor-set allocations per run were synchronous round trips (125 us each, ~18 ms of a 22 ms frame): now answered locally from pool bookkeeping with a safety margin and a periodic synchronous audit; a server handle-registry limit (2^20) that killed the game after ~1 M sets is fixed |
+| Black Book (Heroic, Proton, DXVK) | DX11 via DXVK | **40-60 FPS** (5-10 FPS before the GPU-copy read-back) | non-cached mapped memory is now read through a GPU copy into RAM instead of slow BAR reads; [`docs/measurements/2026-11-05-blackbook`](docs/measurements/2026-11-05-blackbook/README.md) |
 | GravityMark 1.89 (Vulkan, 1280x720) | native Vulkan | **30-33 FPS** (did not start before; 7-8 FPS at first start) | a fixed ~31 ms per frame on the client side, independent of scene weight and frames in flight; details in [`docs/measurements/2026-11-05-gravitymark`](docs/measurements/2026-11-05-gravitymark/README.md) |
 | Cyberpunk 2077 | DirectX 12 -> vkd3d-proton -> `VK_EXT_descriptor_buffer` | **7.6 FPS median (p10 7.2, p90 10.6, up to 38 in quiet scenes), frame latency ~18 ms; tester's verdict: playable** (was 4-5 FPS a day earlier, 2-4 before that) | 76 round trips per frame (43 are semaphore waits), instance-lock contention, 5 MB of memory writes per frame; details in [`docs/measurements/2026-11-05-cyberpunk`](docs/measurements/2026-11-05-cyberpunk/README.md) |
 
