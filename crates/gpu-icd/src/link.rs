@@ -94,8 +94,55 @@ struct Out {
     space: Condvar,
 }
 
+/// Element kolejki nadawczej: gotowe bajty albo zapis pamięci, który wątek nadawczy sam kompresuje i opakowuje w ramkę (LZ4 i CRC pod blokadą
+/// instancji kosztowały 42 z 57 s jej trzymania na 3 429 klatek Rise of the Tomb Raider).
+enum Item {
+    Bytes(Vec<u8>),
+    Mem { seq: u16, memory: u64, offset: u64, raw: Vec<u8> },
+}
+
+impl Item {
+    fn queued_len(&self) -> usize {
+        match self {
+            Item::Bytes(b) => b.len(),
+            Item::Mem { raw, .. } => raw.len(),
+        }
+    }
+}
+
+static WIRE_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WIRE_BY_MEM: Mutex<Option<std::collections::HashMap<u64, u64>>> = Mutex::new(None);
+
+/// Bajty zapisów pamięci faktycznie wysłane łączem (po kompresji), łącznie i dla jednej pamięci (diagnostyka).
+pub fn wire_total() -> u64 {
+    WIRE_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn wire_of(memory: u64) -> u64 {
+    WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&memory).copied()).unwrap_or(0)
+}
+
+/// Zapis pamięci jako ramka: LZ4 tylko gdy oszczędza co najmniej 10% (małe i źle kompresowalne, np. tekstury BCn, idą surowo).
+fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>, ClientError> {
+    let packed = (raw.len() >= 4096).then(|| gpu_proto::video::compress_lz4(&raw)).filter(|c| c.len() * 10 <= raw.len() * 9);
+    let (req, wire) = match packed {
+        Some(c) => {
+            let n = c.len() as u64;
+            (Request::MemWriteLz4 { memory, offset, raw_len: raw.len() as u32, data: c }, n)
+        }
+        None => {
+            let n = raw.len() as u64;
+            (Request::MemWrite { memory, offset, data: raw }, n)
+        }
+    };
+    WIRE_TOTAL.fetch_add(wire, std::sync::atomic::Ordering::Relaxed);
+    *WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry(memory).or_insert(0) += wire;
+    let frame = Frame::new(0, flags::CRC, seq, 0, req.encode()).map_err(ClientError::Frame)?;
+    Ok(frame.encode())
+}
+
 struct OutState {
-    queue: VecDeque<Vec<u8>>,
+    queue: VecDeque<Item>,
     bytes: usize,
     closed: bool,
     broken: bool,
@@ -141,7 +188,7 @@ impl Link {
                     let mut g = o.q.lock().unwrap_or_else(|e| e.into_inner());
                     loop {
                         if let Some(b) = g.queue.pop_front() {
-                            g.bytes -= b.len();
+                            g.bytes -= b.queued_len();
                             o.space.notify_all();
                             break Some(b);
                         }
@@ -151,7 +198,14 @@ impl Link {
                         g = o.data.wait(g).unwrap_or_else(|e| e.into_inner());
                     }
                 };
-                let Some(buf) = buf else { return };
+                let Some(item) = buf else { return };
+                let buf = match item {
+                    Item::Bytes(b) => b,
+                    Item::Mem { seq, memory, offset, raw } => match mem_frame(seq, memory, offset, raw) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    },
+                };
                 if writer.write_all(&buf).is_err() {
                     // Zerwane połączenie: producenci i oczekujący na odpowiedzi dostają błąd zamiast czekać w nieskończoność.
                     o.q.lock().unwrap_or_else(|e| e.into_inner()).broken = true;
@@ -192,21 +246,37 @@ impl Link {
     }
 
     fn enqueue(&self, bytes: Vec<u8>) -> Result<(), ClientError> {
+        self.enqueue_item(Item::Bytes(bytes))
+    }
+
+    /// Zapis pamięci: numer ramki nadajemy tu (pod blokadą instancji, więc kolejność w strumieniu jest zachowana), a kompresję, CRC i kodowanie
+    /// robi wątek nadawczy. Wołający oddaje własną kopię bajtów.
+    pub fn send_mem(&mut self, memory: u64, offset: u64, raw: Vec<u8>) -> Result<(), ClientError> {
+        self.seq = self.seq.wrapping_add(1);
+        self.enqueue_item(Item::Mem { seq: self.seq, memory, offset, raw })
+    }
+
+    fn enqueue_item(&self, item: Item) -> Result<(), ClientError> {
+        let len = item.queued_len();
         if let Some(w) = &self.direct {
             // `GPU_ICD_SYNC_SEND=1`: zapis w wątku wołającego (dawne zachowanie), do porównań przy szukaniu przyczyn zawieszeń.
             let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
+            let bytes = match item {
+                Item::Bytes(b) => b,
+                Item::Mem { seq, memory, offset, raw } => mem_frame(seq, memory, offset, raw)?,
+            };
             return w.write_all(&bytes).map_err(ClientError::Io);
         }
         let mut g = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
         // Producent czeka tylko przy przepełnieniu (i pusta kolejka zawsze przyjmuje jedną, nawet większą partię).
-        while g.bytes + bytes.len() > MAX_QUEUED_BYTES && !g.queue.is_empty() && !g.broken {
+        while g.bytes + len > MAX_QUEUED_BYTES && !g.queue.is_empty() && !g.broken {
             g = self.out.space.wait(g).unwrap_or_else(|e| e.into_inner());
         }
         if g.broken {
             return Err(ClientError::Closed);
         }
-        g.bytes += bytes.len();
-        g.queue.push_back(bytes);
+        g.bytes += len;
+        g.queue.push_back(item);
         self.out.data.notify_one();
         Ok(())
     }

@@ -26,9 +26,6 @@ const BATCH_FLUSH: usize = 64 * 1024;
 const DESC_CACHE_MAX_BYTES: u64 = 1024;
 const DESC_CACHE_MAX_ENTRIES: usize = 200_000;
 const MEM_CHUNK: usize = 4 * 1024 * 1024;
-/// Najmniejszy zapis, dla którego warto próbować LZ4 (mniejsze idą surowo: narzut przewyższa zysk).
-const LZ4_MIN_WRITE: usize = 4096;
-
 const DISPATCHABLE: &[&str] = &["VkInstance", "VkPhysicalDevice", "VkDevice", "VkQueue", "VkCommandBuffer"];
 
 /// Obiekt dyspozycyjny ICD (urządzenie, kolejka, bufor poleceń): wskaźnik loadera i identyfikator protokołu.
@@ -69,7 +66,6 @@ pub struct Stats {
     pub cmd_batches: u64,
     pub memw_bytes: u64,
     /// Bajty zapisów pamięci faktycznie wysłane łączem (po kompresji LZ4).
-    pub memw_wire_bytes: u64,
     /// Odświeżenia pamięci według planu: całe / tylko zakresy (i ile bajtów obejmowały zakresy łącznie).
     pub refresh_whole: u64,
     pub refresh_ranged: u64,
@@ -126,9 +122,9 @@ impl Stats {
         v.sort_by_key(|(_, (_, raw, _))| std::cmp::Reverse(*raw));
         v.iter()
             .take(6)
-            .map(|(id, (n, raw, wire))| {
+            .map(|(id, (n, raw, _))| {
                 let (size, fl) = self.mem_flags.get(id).copied().unwrap_or((0, 0));
-                format!("{:#x} ({} MB, flagi {:#x}) {}x {} MB surowo / {} MB łącze", id, size >> 20, fl, n, raw >> 20, wire >> 20)
+                format!("{:#x} ({} MB, flagi {:#x}) {}x {} MB surowo / {} MB łącze", id, size >> 20, fl, n, raw >> 20, crate::link::wire_of(**id) >> 20)
             })
             .collect::<Vec<_>>()
             .join("; ")
@@ -145,7 +141,7 @@ impl Stats {
         let per = |v: u64| if self.frames == 0 { 0.0 } else { v as f64 / self.frames as f64 / 1e6 };
         format!(
             "gpu-icd statystyki: strony pamięci nowe/powtórzone {}/{}, LZ4 próbka {}→{} B; skan: śledzone {} razy ({:.0} ms), haszowane {} razy ({:.0} ms, {} MB), pamięci odwzorowanych maks. {}; deskryptory (lokalnie/cache/serwer) {}/{}/{}, chybienia wg typu {:?}; odświeżenia pamięci {} ({:.0} ms; całe {}, zakresy {} po średnio {} KB), oczekiwanie na odpowiedzi serwera {:.0} ms, skan pamięci {:.0} ms ({} MB), wysyłka różnic {:.0} ms; poleceń {}, partii {}, bajty poleceń {}, zapisy pamięci {} B (na łączu {} B), odczyty pamięci {} B, zapytania {} B, obiegi po sieci {}; klatek {}: na klatkę czekanie na GPU {:.1} ms, odczyt {:.1} ms, wyświetlenie lokalne {:.1} ms",
-            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.scan_tracked_n, self.scan_tracked_ns as f64 / 1e6, self.scan_hashed_n, self.scan_hashed_ns as f64 / 1e6, self.scan_hashed_bytes / 1_000_000, self.mapped_count_max, self.desc_synth, self.desc_hits, self.desc_misses, self.desc_miss_by_type, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, self.memw_wire_bytes, self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
+            self.pages_new, self.pages_dup, self.lz4_in, self.lz4_out, self.scan_tracked_n, self.scan_tracked_ns as f64 / 1e6, self.scan_hashed_n, self.scan_hashed_ns as f64 / 1e6, self.scan_hashed_bytes / 1_000_000, self.mapped_count_max, self.desc_synth, self.desc_hits, self.desc_misses, self.desc_miss_by_type, self.refreshes, self.t_refresh_ns as f64 / 1e6, self.refresh_whole, self.refresh_ranged, self.refresh_ranged_bytes / self.refresh_ranged.max(1) / 1024, self.t_syncrecv_ns as f64 / 1e6, self.t_scan_ns as f64 / 1e6, self.scan_bytes / 1_000_000, self.t_memsend_ns as f64 / 1e6, self.commands, self.cmd_batches, self.cmd_bytes, self.memw_bytes, crate::link::wire_total(), self.memr_bytes, self.query_bytes, self.roundtrips, self.frames, per(self.t_wait_ns), per(self.t_read_ns), per(self.t_local_ns)
         )
     }
 }
@@ -389,31 +385,15 @@ impl InstState {
             self.survey_write(data);
         }
         self.stats.memw_bytes += data.len() as u64;
-        let wire_before = self.stats.memw_wire_bytes;
         let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
         acct.0 += 1;
         acct.1 += data.len() as u64;
         for (i, chunk) in data.chunks(MEM_CHUNK.min(MAX_BATCH)).enumerate() {
             let at = offset + (i * MEM_CHUNK) as u64;
-            // Strony małe albo źle kompresowalne (np. tekstury BCn) idą surowo: LZ4 wysyłamy tylko, gdy oszczędza co najmniej 10%.
-            let packed = (chunk.len() >= LZ4_MIN_WRITE).then(|| gpu_proto::video::compress_lz4(chunk)).filter(|c| c.len() * 10 <= chunk.len() * 9);
-            let req = match packed {
-                Some(c) => {
-                    self.stats.memw_wire_bytes += c.len() as u64;
-                    Request::MemWriteLz4 { memory, offset: at, raw_len: chunk.len() as u32, data: c }
-                }
-                None => {
-                    self.stats.memw_wire_bytes += chunk.len() as u64;
-                    Request::MemWrite { memory, offset: at, data: chunk.to_vec() }
-                }
-            };
-            if self.client.send(&req).is_err() {
+            // Kompresję LZ4, CRC i kodowanie ramki robi wątek nadawczy (poza blokadą instancji); tu tylko kopia bajtów.
+            if self.client.send_mem(memory, at, chunk.to_vec()).is_err() {
                 self.lose();
             }
-        }
-        let wire = self.stats.memw_wire_bytes - wire_before;
-        if let Some(a) = self.stats.send_by_mem.get_mut(&memory) {
-            a.2 += wire;
         }
     }
 
