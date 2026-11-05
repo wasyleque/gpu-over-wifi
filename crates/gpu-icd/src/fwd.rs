@@ -215,6 +215,11 @@ static DESC_SPEC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 static DESC_SPEC_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Zakres rozmiarów pamięci z odczytem leniwym (GravityMark: 8 MB pamięć bez cache odświeżana po każdym oczekiwaniu = 21 ms na żądanie): mniejsze są tanie do odświeżenia, większe zajęłyby za dużo pamięci na kopię.
+fn lazy_all() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_LAZY_ALL").is_some())
+}
+
 const LAZY_MIN: usize = 64 * 1024;
 const LAZY_MAX: usize = 256 * 1024 * 1024;
 
@@ -1741,7 +1746,9 @@ pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64,
     }
     if !st.mems.contains_key(&mem) {
         // Każda pamięć, która po oczekiwaniu byłaby odświeżana z serwera (HOST_CACHED albo mała), ma odczyt leniwy; pamięci bez odświeżania (duże, bez cache) nie.
-        let eligible = flags().lazy && st.mem_refresh.get(&mem).copied().unwrap_or(false) && (LAZY_MIN..=LAZY_MAX).contains(&(total as usize));
+        // Pamięć bez HOST_CACHED dostaje odczyt leniwy tylko na życzenie (`GPU_ICD_LAZY_ALL=1`): w Black Book (DXVK) zawieszał GPU serwera.
+        let cached = st.stats.mem_flags.get(&mem).is_some_and(|&(_, fl)| fl & 0x8 != 0);
+        let eligible = flags().lazy && (cached || lazy_all()) && st.mem_refresh.get(&mem).copied().unwrap_or(false) && (LAZY_MIN..=LAZY_MAX).contains(&(total as usize));
         let lazy = if eligible { Shadow::new_lazy(total as usize, mem) } else { None };
         if lazy.is_some() {
             st.stats.lazy_memories += 1;
