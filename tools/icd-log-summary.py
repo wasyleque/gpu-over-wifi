@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # Podsumowanie logu klienta gpu-icd (FPS, obiegi wg poleceń, blokada, czas serwera). Wygenerowany przez model na .11, sprawdzony na logu Rise of the Tomb Raider.
-#!/usr/bin/env python3
 import re
 import sys
 
