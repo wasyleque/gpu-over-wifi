@@ -19,6 +19,9 @@ const DENY: &[&str] = &[
     "deferred_host_operations", "graphics_pipeline_library", "frame_boundary", "low_latency", "anti_lag", "debug_report", "validation",
     // Rozszerzenia z poleceniami, których kodek nie umie zakodować (unia ze wskaźnikiem): patrz test `no_advertised_extension_has_an_unencodable_command`.
     "descriptor_heap", "cooperative_vector", "shader_enqueue",
+    // `vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR` ma tablicę struktur z sType, której kodek nie umie zakodować; silnik GravityMark (Tellusim)
+    // kończy bez niego "Initialization error". Nie ogłaszamy rozszerzenia, więc aplikacje w ogóle o to polecenie nie pytają.
+    "cooperative_matrix",
 ];
 
 /// Czy polecenie jest wykonywane lokalnie przez ICD, a nie przekazywane (te nazwy zwracają null w `proc_addr_by_name`).
