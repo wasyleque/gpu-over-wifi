@@ -92,20 +92,54 @@ struct Out {
     data: Condvar,
     /// Sygnał dla producentów: kolejka się zmniejszyła.
     space: Condvar,
+    /// Zapisy pamięci czekające na kompresję przez wątki robocze (kolejność w strumieniu wyznacza `q`, nie ta kolejka).
+    work: Mutex<VecDeque<Arc<Job>>>,
+    work_cv: Condvar,
+    work_closed: std::sync::atomic::AtomicBool,
 }
 
-/// Element kolejki nadawczej: gotowe bajty albo zapis pamięci, który wątek nadawczy sam kompresuje i opakowuje w ramkę (LZ4 i CRC pod blokadą
-/// instancji kosztowały 42 z 57 s jej trzymania na 3 429 klatek Rise of the Tomb Raider).
+/// Zapis pamięci do skompresowania i opakowania w ramkę. Robi to wątek roboczy albo, gdy żaden jeszcze go nie wziął, wątek nadawczy w swojej kolei.
+struct Job {
+    input: Mutex<Option<(u16, u64, u64, Vec<u8>)>>,
+    output: Mutex<Option<Result<Vec<u8>, ()>>>,
+    done: Condvar,
+    len: usize,
+}
+
+impl Job {
+    fn run(&self) {
+        let taken = self.input.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some((seq, memory, offset, raw)) = taken {
+            let r = mem_frame(seq, memory, offset, raw).map_err(|_| ());
+            *self.output.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+            self.done.notify_all();
+        }
+    }
+
+    /// Wynik w kolejności strumienia: jeśli nikt jeszcze nie zaczął, robimy to sami; w przeciwnym razie czekamy na wątek roboczy.
+    fn wait(&self) -> Result<Vec<u8>, ()> {
+        self.run();
+        let mut g = self.output.lock().unwrap_or_else(|e| e.into_inner());
+        while g.is_none() {
+            g = self.done.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g.take().unwrap_or(Err(()))
+    }
+}
+
+/// Element kolejki nadawczej: gotowe bajty albo zapis pamięci kompresowany poza blokadą instancji (LZ4 i CRC pod nią kosztowały 42 z 57 s jej
+/// trzymania na 3 429 klatek Rise of the Tomb Raider). Kompresję robi kilka wątków roboczych równolegle, a wątek nadawczy wysyła w kolejności
+/// kolejki (jeden wątek na kompresję i zapis naraz wydłużył czekanie na odpowiedzi serwera 2x w Black Book).
 enum Item {
     Bytes(Vec<u8>),
-    Mem { seq: u16, memory: u64, offset: u64, raw: Vec<u8> },
+    Job(Arc<Job>),
 }
 
 impl Item {
     fn queued_len(&self) -> usize {
         match self {
             Item::Bytes(b) => b.len(),
-            Item::Mem { raw, .. } => raw.len(),
+            Item::Job(j) => j.len,
         }
     }
 }
@@ -159,6 +193,7 @@ pub struct Link {
     out: Arc<Out>,
     shared: Arc<Shared>,
     sender: Option<std::thread::JoinHandle<()>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
     seq: u16,
     direct: Option<Mutex<TcpStream>>,
     /// Ile żądań z odpowiedzią wysłano (numer biletu następnego takiego żądania). Zmieniany tylko pod blokadą instancji.
@@ -179,7 +214,7 @@ impl Link {
         let direct_stream = stream.try_clone()?;
         let mut writer = stream;
         let shared = Arc::new(Shared { turn: Mutex::new(Turn { served: 0, broken: false }), cv: Condvar::new(), reader: Mutex::new(Reader { stream: reader, frames: FrameReader::new() }) });
-        let out = Arc::new(Out { q: Mutex::new(OutState { queue: VecDeque::new(), bytes: 0, closed: false, broken: false }), data: Condvar::new(), space: Condvar::new() });
+        let out = Arc::new(Out { q: Mutex::new(OutState { queue: VecDeque::new(), bytes: 0, closed: false, broken: false }), data: Condvar::new(), space: Condvar::new(), work: Mutex::new(VecDeque::new()), work_cv: Condvar::new(), work_closed: std::sync::atomic::AtomicBool::new(false) });
         let (o, sh) = (out.clone(), shared.clone());
         let sender = std::thread::Builder::new()
             .name("gpu-icd-send".into())
@@ -201,7 +236,7 @@ impl Link {
                 let Some(item) = buf else { return };
                 let buf = match item {
                     Item::Bytes(b) => b,
-                    Item::Mem { seq, memory, offset, raw } => match mem_frame(seq, memory, offset, raw) {
+                    Item::Job(j) => match j.wait() {
                         Ok(b) => b,
                         Err(_) => continue,
                     },
@@ -217,8 +252,35 @@ impl Link {
                 }
             })
             .map_err(ClientError::Io)?;
+        let nworkers = std::env::var("GPU_ICD_FRAMERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2).min(8);
+        let mut workers = Vec::new();
+        for i in 0..nworkers {
+            let o = out.clone();
+            let h = std::thread::Builder::new()
+                .name(format!("gpu-icd-frame{i}"))
+                .spawn(move || loop {
+                    let job = {
+                        let mut g = o.work.lock().unwrap_or_else(|e| e.into_inner());
+                        loop {
+                            if let Some(j) = g.pop_front() {
+                                break Some(j);
+                            }
+                            if o.work_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                                break None;
+                            }
+                            g = o.work_cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                        }
+                    };
+                    match job {
+                        Some(j) => j.run(),
+                        None => return,
+                    }
+                })
+                .map_err(ClientError::Io)?;
+            workers.push(h);
+        }
         let direct = if std::env::var_os("GPU_ICD_SYNC_SEND").is_some() { Some(Mutex::new(direct_stream)) } else { None };
-        Ok(Link { out, shared, sender: Some(sender), seq, direct, sent: 0 })
+        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0 })
     }
 
     /// Opis stanu kolejki odpowiedzi (do diagnostyki zawieszeń).
@@ -253,7 +315,12 @@ impl Link {
     /// robi wątek nadawczy. Wołający oddaje własną kopię bajtów.
     pub fn send_mem(&mut self, memory: u64, offset: u64, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
-        self.enqueue_item(Item::Mem { seq: self.seq, memory, offset, raw })
+        let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some((self.seq, memory, offset, raw))), output: Mutex::new(None), done: Condvar::new() });
+        if self.direct.is_none() && !self.workers.is_empty() {
+            self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
+            self.out.work_cv.notify_one();
+        }
+        self.enqueue_item(Item::Job(job))
     }
 
     fn enqueue_item(&self, item: Item) -> Result<(), ClientError> {
@@ -263,7 +330,7 @@ impl Link {
             let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
             let bytes = match item {
                 Item::Bytes(b) => b,
-                Item::Mem { seq, memory, offset, raw } => mem_frame(seq, memory, offset, raw)?,
+                Item::Job(j) => j.wait().map_err(|_| ClientError::Closed)?,
             };
             return w.write_all(&bytes).map_err(ClientError::Io);
         }
@@ -326,6 +393,11 @@ impl Drop for Link {
         self.out.q.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         self.out.data.notify_all();
         if let Some(h) = self.sender.take() {
+            let _ = h.join();
+        }
+        self.out.work_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.out.work_cv.notify_all();
+        for h in self.workers.drain(..) {
             let _ = h.join();
         }
     }
@@ -421,4 +493,72 @@ mod tests {
         assert!(shared.recv_at(t0).is_err());
         assert!(w.join().unwrap().is_err(), "drugi oczekujący nie zawisa po zerwaniu połączenia");
     }
+    /// Zapisy pamięci kompresowane równolegle przez wątki robocze docierają do serwera w kolejności wysłania i z tą samą zawartością.
+    #[test]
+    fn parallel_framing_keeps_memory_writes_in_order_and_intact() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<(u64, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let srv = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut fr = FrameReader::new();
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                let n = match s.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                fr.push(&buf[..n]);
+                while let Some(f) = fr.next_frame().unwrap() {
+                    match Request::decode(&f.payload).unwrap() {
+                        Request::Hello { .. } => {
+                            let r = Frame::new(0, flags::CRC, f.header.seq, 0, Response::HelloOk { version: gpu_proto::msg::PROTOCOL_VERSION }.encode()).unwrap();
+                            s.write_all(&r.encode()).unwrap();
+                        }
+                        Request::MemWrite { offset, data, .. } => seen2.lock().unwrap().push((offset, data)),
+                        Request::MemWriteLz4 { offset, raw_len, data, .. } => {
+                            let raw = gpu_proto::video::decompress_lz4(&data, raw_len as usize).unwrap();
+                            seen2.lock().unwrap().push((offset, raw));
+                        }
+                        Request::MemRead { .. } => {
+                            let r = Frame::new(0, flags::CRC, f.header.seq, 0, Response::Data(vec![1]).encode()).unwrap();
+                            s.write_all(&r.encode()).unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+        let mut link = Link::connect(addr, b"t").unwrap();
+        let mut sent = Vec::new();
+        let mut x = 0x1234_5678u32;
+        for i in 0..200u64 {
+            // Na przemian dobrze kompresowalne (zera), słabo (pseudolosowe) i małe (poniżej progu LZ4).
+            let len = [64 * 1024, 8 * 1024, 100, 256 * 1024][(i % 4) as usize];
+            let data: Vec<u8> = (0..len)
+                .map(|k| match i % 3 {
+                    0 => 0,
+                    1 => {
+                        x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                        (x >> 24) as u8
+                    }
+                    _ => (k % 7) as u8,
+                })
+                .collect();
+            link.send_mem(7, i * 4096, data.clone()).unwrap();
+            sent.push((i * 4096, data));
+        }
+        // Odczyt po zapisach: odpowiedź przychodzi dopiero po wszystkich wcześniejszych ramkach (jedno połączenie, kolejność strumienia).
+        assert_eq!(link.call(&Request::MemRead { memory: 7, offset: 0, len: 1 }).unwrap(), Response::Data(vec![1]));
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), sent.len());
+        for (g, e) in got.iter().zip(&sent) {
+            assert_eq!(g.0, e.0, "kolejność zapisów");
+            assert_eq!(g.1, e.1, "zawartość zapisu pod {}", e.0);
+        }
+        drop(link);
+        srv.join().unwrap();
+    }
+
 }
