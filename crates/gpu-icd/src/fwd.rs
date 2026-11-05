@@ -508,6 +508,11 @@ impl InstState {
 
     /// Czyta zakres pamięci z serwera prosto do jej lokalnej kopii (z wersjonowaniem stron po biletach odpowiedzi); `false` przy błędzie.
     pub(crate) fn read_mem_into_shadow(&mut self, memory: u64, offset: u64, len: usize) -> bool {
+        // Zapisy aplikacji, jeszcze nieprzeskanowane (odroczony skan), leżą w tej samej kopii, do której zaraz wpiszemy dane z serwera: najpierw je
+        // wysyłamy, inaczej pobranie okna nadpisałoby je starą zawartością (GPU czytałoby stare argumenty rysowania i zawieszało się).
+        if self.mems.get(&memory).is_some_and(|s| s.lazy.is_some()) {
+            self.settle_memory();
+        }
         self.flush();
         let mut done = 0usize;
         while done < len {
