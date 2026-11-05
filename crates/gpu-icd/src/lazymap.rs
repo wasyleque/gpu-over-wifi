@@ -105,6 +105,10 @@ struct State {
     /// Rozmiar następnego okna pobierania (strony, potęga dwójki) i koniec poprzedniego: odczyt sekwencyjny podwaja okno, skok je zeruje.
     window: usize,
     last_end: usize,
+    /// Strony zrzucone z widoku aplikacji przez `invalidate`: stan "zapisane" (flaga jądra) znika razem z wpisem tablicy stron, więc zapis aplikacji
+    /// do takiej strony tuż przed zrzutem nie byłby widoczny w skanie i nigdy nie dotarłby na serwer (GPU czytałoby stare argumenty rysowania pośredniego
+    /// i wieszało się). Te strony skan musi więc zawsze zweryfikować porównaniem skrótów (patrz `take_recheck`).
+    recheck: Vec<(usize, usize)>,
 }
 
 pub struct LazyRegion {
@@ -186,7 +190,7 @@ impl LazyRegion {
             return None;
         }
         let pages = len / PAGE;
-        let region = Arc::new(LazyRegion { memory, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: FETCH_WINDOW_MIN, last_end: usize::MAX }) });
+        let region = Arc::new(LazyRegion { memory, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: FETCH_WINDOW_MIN, last_end: usize::MAX, recheck: Vec::new() }) });
         h.regions.write().unwrap_or_else(|e| e.into_inner()).insert(a, region.clone());
         Some(region)
     }
@@ -242,8 +246,15 @@ impl LazyRegion {
                 }
                 // SAFETY: zakres leży w widoku aplikacji; `MADV_DONTNEED` na `MAP_SHARED` zostawia dane w pliku `memfd`.
                 unsafe { madvise((self.app + start * PAGE) as *mut u8, (p - start) * PAGE, 4) };
+                st.recheck.push((start * PAGE, p * PAGE));
             }
         }
+    }
+
+    /// Zakresy (bajty względem początku regionu) zrzucone od ostatniego wywołania: skan zapisów aplikacji musi je zweryfikować skrótami, bo flaga
+    /// "zapisane" po zrzucie jest utracona. Opróżnia listę.
+    pub fn take_recheck(&self) -> Vec<(usize, usize)> {
+        std::mem::take(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()).recheck)
     }
 
     /// Dane `[from, to)` są aktualne (np. po jawnym `vkInvalidateMappedMemoryRanges`).
@@ -451,6 +462,20 @@ mod tests {
         }
         let n = FAULTS_FETCHED.load(Ordering::Relaxed) - before;
         assert!(n < 20, "okno rośnie przy odczycie sekwencyjnym: {n} pobrań");
+        r.unregister();
+    }
+
+    #[test]
+    fn invalidated_pages_are_reported_for_recheck_once() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((dm, r)) = setup(16) else { return };
+        r.invalidate(&[(0, (16 * PAGE) as u64)]);
+        assert!(r.take_recheck().is_empty(), "nic jeszcze nie było odwzorowane w widoku aplikacji, więc nic nie zrzucono");
+        assert_eq!(unsafe { *dm.app_ptr().add(2 * PAGE) }, 3); // pobranie okna: strony 0..16 odwzorowane
+        r.invalidate(&[(0, (16 * PAGE) as u64)]);
+        let v = r.take_recheck();
+        assert_eq!(v, vec![(0, 16 * PAGE)], "zrzucone strony (te, które były odwzorowane) czekają na weryfikację");
+        assert!(r.take_recheck().is_empty(), "lista jest opróżniana");
         r.unregister();
     }
 

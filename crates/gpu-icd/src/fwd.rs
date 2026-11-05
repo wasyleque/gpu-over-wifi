@@ -264,7 +264,13 @@ impl Shadow {
         }
         if let Some(t) = &self.tracker {
             match t.take_dirty(0, self.data.capacity()) {
-                Some(cand) => return (self.pages.changed_within(&self.data, &cand), true, 0),
+                Some(mut cand) => {
+                    // Pamięć z odczytem leniwym: strony zrzucone przez `invalidate` straciły flagę "zapisane", więc zawsze je weryfikujemy skrótami.
+                    if let Some(r) = &self.lazy {
+                        cand.extend(r.take_recheck());
+                    }
+                    return (self.pages.changed_within(&self.data, &cand), true, 0);
+                }
                 None => self.tracker = None, // śledzenie przestało działać: wracamy do pełnego skanowania
             }
         }
