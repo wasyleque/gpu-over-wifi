@@ -214,7 +214,7 @@ const DESC_SPEC_AUDIT_EVERY: u64 = 1024;
 static DESC_SPEC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DESC_SPEC_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Zakres rozmiarów pamięci z odczytem leniwym: mniejsze są tanie do odświeżenia, większe zajęłyby za dużo pamięci na kopię.
+/// Zakres rozmiarów pamięci z odczytem leniwym (GravityMark: 8 MB pamięć bez cache odświeżana po każdym oczekiwaniu = 21 ms na żądanie): mniejsze są tanie do odświeżenia, większe zajęłyby za dużo pamięci na kopię.
 const LAZY_MIN: usize = 64 * 1024;
 const LAZY_MAX: usize = 256 * 1024 * 1024;
 
@@ -1734,7 +1734,8 @@ pub unsafe extern "C" fn map_memory(_dev: u64, mem: u64, offset: u64, size: u64,
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
     if !st.mems.contains_key(&mem) {
-        let eligible = flags().lazy && st.mem_cached.get(&mem).copied().unwrap_or(false) && st.mem_refresh.get(&mem).copied().unwrap_or(false) && (LAZY_MIN..=LAZY_MAX).contains(&(total as usize));
+        // Każda pamięć, która po oczekiwaniu byłaby odświeżana z serwera (HOST_CACHED albo mała), ma odczyt leniwy; pamięci bez odświeżania (duże, bez cache) nie.
+        let eligible = flags().lazy && st.mem_refresh.get(&mem).copied().unwrap_or(false) && (LAZY_MIN..=LAZY_MAX).contains(&(total as usize));
         let lazy = if eligible { Shadow::new_lazy(total as usize, mem) } else { None };
         if lazy.is_some() {
             st.stats.lazy_memories += 1;
