@@ -103,6 +103,12 @@ with a strong NVIDIA GPU and another Linux machine on a 1 Gb/s cable, you can tr
 at once", which is useful too). What you need, how to run it, what the report contains and where to send it: [`docs/CALL-FOR-TESTERS.md`](docs/CALL-FOR-TESTERS.md);
 the report is collected by [`tools/collect-report.sh`](tools/collect-report.sh) (hardware, link, driver statistics; no tokens) and goes into a new issue using the *Test report* template.
 
+## Support the project
+
+If this is useful to you and you want to help it along (a faster test machine, more hardware to test on), you can donate through PayPal to **wasyl@o2.pl**:
+[**Donate with PayPal**](https://www.paypal.com/donate?business=wasyl%40o2.pl&no_recurring=0&item_name=gpu-over-wifi&currency_code=PLN).
+Donations do not change the license terms (see below) and are not required to use or test the project.
+
 ## Security
 
 The remote GPU daemon is **not hardened for untrusted networks**. A client with the token can run arbitrary Vulkan commands on the server's GPU, and a malformed command stream can crash the vendor driver. Use it only on a trusted link (e.g. a direct cable or a VPN), bind it to that interface only, and keep the token file private (`chmod 600`).
