@@ -1,7 +1,7 @@
 # Rise of the Tomb Raider (Epic, Proton, DX11 via DXVK) on the remote RTX 3090 Ti, 2026-11-05/06
 
 Ryzen 5 4500U laptop, 1 Gb/s cable, H.264, built-in benchmark of the game, everything on high, DX12 off.
-Screenshots `tr1.png`-`tr3.png` (taken during the Full HD run, game FPS counter top-left: 18.6 and 8.5 in two scenes).
+Screenshots `tr1.png`-`tr3.png` were taken around the end of the benchmark runs (23:53-23:58) and are not attributed to a particular run; game FPS counter top-left: 18.6 and 8.5 in two scenes. Their size is the size of the desktop, not the render resolution.
 
 | Run | Build | Frames | Server wait | FPS (5 s samples) |
 |---|---|---|---|---|
@@ -26,3 +26,14 @@ Full HD at high settings gave **1-2 FPS** in the very first attempt (before this
 The mean frame rate is the same at 1280x720 and 1920x1080 (about 20 FPS): the limit is not rendering or the link but synchronisation.
 Remaining costs (Full HD run): `vkWaitSemaphores` 16 901 x 5 ms, queueing for the instance lock 90 s, `vkGetDescriptorEXT` 5 478 misses x 3.3 ms.
 The GPU stays below 5 % busy.
+
+## Run 3: compression moved off the instance lock (same Full HD high settings, shorter run, 1 854 frames)
+
+| | before | after |
+|---|---|---|
+| instance lock held | 57.0 s / 3 429 frames = 16.6 ms per frame | 19.4 s / 1 854 frames = **10.4 ms per frame** |
+| waiting for the instance lock | 89.6 s = 26.1 ms per frame | 29.2 s = **15.7 ms per frame** |
+| mean FPS | 20.8 | 20.6 |
+
+The lock is clearly shorter, but the mean frame rate did not move: the remaining wait (about 45 ms per frame in this run, mostly
+`vkWaitSemaphores` 11 744 x 5.0 ms) comes from queueing behind memory reads and command batches on the single-threaded server connection.
