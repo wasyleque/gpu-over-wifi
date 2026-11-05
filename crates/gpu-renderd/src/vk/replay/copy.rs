@@ -270,6 +270,19 @@ impl Replayer {
         r
     }
 
+    /// Czy pamięć (identyfikator klienta) ma typ z HOST_CACHED: taką procesor czyta szybko, więc kopia przez GPU się nie opłaca.
+    pub(super) fn mem_is_host_cached(&mut self, memory: u64) -> bool {
+        let Some(&ty) = self.copy.mem_types.get(&memory) else { return true };
+        let Some(e) = self.registry.get(memory).copied() else { return true };
+        let Some(physical) = self.registry.entries_of_kind("VkDevice").into_iter().find(|(_, d)| d.real == e.parent).map(|(_, d)| d.parent) else { return true };
+        let mut props = [0u8; 520];
+        if self.vk("vkGetPhysicalDeviceMemoryProperties", &[physical, props.as_mut_ptr() as u64]).is_err() {
+            return true;
+        }
+        let n = u32::from_le_bytes(props[0..4].try_into().unwrap()).min(32) as usize;
+        (ty as usize) >= n || u32::from_le_bytes(props[4 + 8 * ty as usize..8 + 8 * ty as usize].try_into().unwrap()) & MEM_HOST_CACHED != 0
+    }
+
     /// Dane do porównania stron `spans` z pamięci `memory`: kopia GPU, gdy się opłaca i się da; `None` = czytaj procesorem.
     pub(super) fn gpu_staged(&mut self, memory: u64, spans: &[(usize, usize)]) -> Option<Staged> {
         let total: usize = spans.iter().map(|(a, b)| b - a).sum();

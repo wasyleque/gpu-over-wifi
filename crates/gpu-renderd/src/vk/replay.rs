@@ -482,8 +482,13 @@ impl Replayer {
         self.range_call("vkInvalidateMappedMemoryRanges", device, e.real)?;
         let size = e.size as usize;
         let spans = [(0usize, size)];
+        // Cała pamięć bez cache (okno BAR) czytana procesorem to ok. 380 MB/s: kopia przez GPU (patrz `copy`).
+        let gpu = if self.mem_is_host_cached(memory) { None } else { self.gpu_staged(memory, &spans) };
         // SAFETY: odwzorowanie ma `e.size` bajtów.
-        let (data, scratch) = unsafe { stage(ptr, size, &spans, std::mem::take(&mut self.scratch)) };
+        let (data, scratch) = match gpu {
+            Some(d) => (d, std::mem::take(&mut self.scratch)),
+            None => unsafe { stage(ptr, size, &spans, std::mem::take(&mut self.scratch)) },
+        };
         let tracker = self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(size));
         let (ranges, more) = tracker.changed(data.get(&scratch), max_bytes);
         let out = gpu_proto::pagediff::encode_segments(data.get(&scratch), &ranges, more);

@@ -686,6 +686,17 @@ static DESC_LOCKFREE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 pub(crate) fn desc_cache_clear() {
     *DESC_CACHE.write().unwrap_or_else(|e| e.into_inner()) = None;
+    *QUERY_CACHE.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Zapytania o możliwości karty, które są czystą funkcją żądania (karta serwera się nie zmienia): `vkGetPhysicalDeviceImageFormatProperties2`.
+/// Klucz = instancja + zakodowane żądanie, wartość = surowa odpowiedź serwera (kod wyniku i parametry wyjściowe). Rise of the Tomb Raider pytało
+/// o formaty 15 tys. razy, po 13 ms czekania w kolejce za odczytami pamięci (205 s na 4 tys. klatek).
+static QUERY_CACHE: std::sync::RwLock<Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>> = std::sync::RwLock::new(None);
+static QUERY_CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn query_cacheable(name: &str) -> bool {
+    matches!(name, "vkGetPhysicalDeviceImageFormatProperties2" | "vkGetPhysicalDeviceImageFormatProperties2KHR")
 }
 
 /// Kopiuje zapamiętany deskryptor pod `out`, jeśli jest w cache i ma dokładnie `size` bajtów.
@@ -1425,6 +1436,25 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         let ty = if slots[1] != 0 { std::ptr::read_unaligned((slots[1] as *const u8).add(16) as *const u32) } else { u32::MAX };
         st.stats.desc_miss_by_type[(ty as usize).min(11)] += 1;
     }
+    let query_key = query_cacheable(cmd.name).then(|| {
+        let mut k = st.owner.to_le_bytes().to_vec();
+        k.extend_from_slice(&bytes);
+        k
+    });
+    if let Some(key) = &query_key {
+        let hit = QUERY_CACHE.read().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(key)).cloned();
+        if let Some(reply) = hit {
+            let result = reply.get(..4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(VK_ERROR_INITIALIZATION_FAILED);
+            let mut dec = Decoder::new(reply.get(4..).unwrap_or(&[]));
+            if result < 0 || decode_out_params(cmd, args, &mut dec).is_ok() {
+                let n = QUERY_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n % 5000 == 1 {
+                    eprintln!("gpu-icd: zapytania o formaty obrazów z cache: {n} trafień");
+                }
+                return Step::Done(fail(result));
+            }
+        }
+    }
     if cmd.name == "vkAllocateMemory" {
         if let Some(size) = gpu_vkcodec::codec::arg_uint(cmd, args, "pAllocateInfo->allocationSize") {
             let id = disp_outs.first().map(|x| x.1).unwrap_or(0);
@@ -1548,6 +1578,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         speculated,
         audited,
         desc_key,
+        query_key,
         base: ticket.unwrap_or(0),
         sent_ok: ticket.is_some(),
         t_recv: std::time::Instant::now(),
@@ -1567,6 +1598,7 @@ pub(crate) struct Pending {
     speculated: bool,
     audited: bool,
     desc_key: Option<Vec<u8>>,
+    query_key: Option<Vec<u8>>,
     base: u64,
     sent_ok: bool,
     t_recv: std::time::Instant,
@@ -1668,6 +1700,14 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
     if result >= 0 && decode_out_params(cmd, args, &mut dec).is_err() {
         eprintln!("gpu-icd: nie umiem odczytać odpowiedzi na {}", cmd.name);
         return fail(VK_ERROR_INITIALIZATION_FAILED);
+    }
+    if let Some(key) = p.query_key.clone() {
+        let mut g = QUERY_CACHE.write().unwrap_or_else(|e| e.into_inner());
+        let m = g.get_or_insert_with(Default::default);
+        if m.len() >= 50_000 {
+            m.clear();
+        }
+        m.insert(key, d.to_vec());
     }
     if cmd.ret == Ret::U64 {
         // Wartość zwracana (np. adres bufora) idzie na końcu odpowiedzi; brak = 0, czyli adres nieprawidłowy.
