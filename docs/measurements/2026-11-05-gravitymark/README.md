@@ -4,6 +4,12 @@ Tellusim's GravityMark in windowed Vulkan mode (`-vk -benchmark 1`, 1280x720, vs
 server and returned as H.264. GravityMark draws a field of asteroids with little API traffic (the opposite of Cyberpunk's chatty command streams),
 so it exercises the video path and the GPU instead.
 
+![GravityMark 1.89 Vulkan on the remote RTX 3090 Ti: 35.9 FPS, score 3993](Gravity_35_fps.png)
+
+*The tester's screenshots of the same session, taken at 18:34, 18:35, 18:40 and 18:42 while the fixes below went in one after another (GravityMark's own overlay, 1280x720, 20 000 asteroids):
+[8.1 FPS](Gravity_8_fps.png) after it first started, [17.5 FPS](Gravity_17_5_fps.png) after lazy read-back for uncached memory,
+[31 FPS](Gravity_31_fps.png) after allocation speculation, and 35.9 FPS (score 3 993) above. The in-game overlay shows slightly higher numbers than the driver's 5 s averages (30-33), which include the first seconds of each run.*
+
 ## Result
 
 | | Before the fixes below | After |
