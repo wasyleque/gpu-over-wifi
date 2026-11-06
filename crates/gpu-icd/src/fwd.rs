@@ -206,6 +206,9 @@ pub struct Shadow {
     /// Kopia treści, którą serwer ma po ostatnim zapisie lub odczycie (`None`: pamięć za duża albo wyłączone `GPU_ICD_NO_RUNS`): pozwala wysyłać tylko linie
     /// 64 B różniące się od niej, bo ok. 60% bajtów w zmienionych stronach buforów dynamicznych DXVK jest identyczne z poprzednio wysłanymi.
     prev: Option<Vec<u8>>,
+    /// Strony 4 KiB, których treść serwera jest znana (cała strona była wysłana albo odebrana): linie niezmienione względem `prev` pomijamy tylko na takich
+    /// stronach. Pierwszy zapis strony idzie w całości, bo pamięć serwera na początku nie jest zerowa (pominięcie zerowych linii zostawiłoby tam śmieci).
+    prev_ok: Vec<bool>,
 }
 
 /// Największa pamięć, dla której trzymamy kopię poprzedniej treści (RAM laptopa jest ciasny: 6,6 GB).
@@ -215,12 +218,14 @@ const RUN_LINE: usize = 64;
 const RUN_MERGE_GAP: usize = 128;
 
 /// Fragmenty `chunk`, które różnią się od `prev` (tej samej długości): linie `RUN_LINE` bajtów, luki do `RUN_MERGE_GAP` scalone; `(początek, koniec)`.
-fn diff_runs(chunk: &[u8], prev: &[u8]) -> Vec<(usize, usize)> {
+fn diff_runs(chunk: &[u8], prev: &[u8], forced: &[(usize, usize)]) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut pos = 0usize;
     while pos < chunk.len() {
         let end = (pos + RUN_LINE).min(chunk.len());
-        if chunk[pos..end] != prev[pos..end] {
+        // `forced`: zakresy (posortowane, rozłączne), które idą zawsze w całości (strony bez znanej treści serwera).
+        let is_forced = forced.iter().any(|&(a, b)| a < end && pos < b);
+        if is_forced || chunk[pos..end] != prev[pos..end] {
             match runs.last_mut() {
                 Some(last) if pos - last.1 <= RUN_MERGE_GAP => last.1 = end,
                 _ => runs.push((pos, end)),
@@ -229,6 +234,23 @@ fn diff_runs(chunk: &[u8], prev: &[u8]) -> Vec<(usize, usize)> {
         pos = end;
     }
     runs
+}
+
+/// Plan zapisu kawałka `chunk` (leżącego pod `base` w pamięci): fragmenty `(przesunięcie w pamięci, długość)` i ich sklejone bajty. Strony bez znanej treści
+/// serwera (`prev_ok == false`) idą w całości; kopia `prev` i flagi są po planie aktualne (serwer po wykonaniu zapisu ma w nich to samo co klient).
+fn plan_runs(chunk: &[u8], base: usize, prev: &mut [u8], prev_ok: &mut [bool]) -> (Vec<(u64, u32)>, Vec<u8>) {
+    let pages = base / 4096..(base + chunk.len()).div_ceil(4096);
+    let forced: Vec<(usize, usize)> = pages.clone().filter(|&p| !prev_ok[p]).map(|p| ((p * 4096).saturating_sub(base), ((p + 1) * 4096).min(base + chunk.len()) - base)).collect();
+    let (mut runs, mut raw) = (Vec::new(), Vec::new());
+    for (a, b) in diff_runs(chunk, &prev[base..base + chunk.len()], &forced) {
+        runs.push(((base + a) as u64, (b - a) as u32));
+        raw.extend_from_slice(&chunk[a..b]);
+        prev[base + a..base + b].copy_from_slice(&chunk[a..b]);
+    }
+    for p in pages {
+        prev_ok[p] = true;
+    }
+    (runs, raw)
 }
 
 fn runs_enabled() -> bool {
@@ -261,11 +283,11 @@ impl Shadow {
         // Preferowana jest wspólna arena (jedno wywołanie skanu dla wszystkich pamięci, także małych); przy jej braku osobny bufor z własnym
         // śledzeniem (duże pamięci) albo pełnym skanem skrótów (małe).
         if let Some(data) = crate::memtrack::PageAlignedBuf::new_in_arena(len) {
-            return Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: None, lazy: None, prev: None };
+            return Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: None, lazy: None, prev: None, prev_ok: Vec::new() };
         }
         let data = crate::memtrack::PageAlignedBuf::new(len);
         let tracker = if len >= TRACK_FROM && std::env::var("GPU_ICD_NO_MEMTRACK").is_err() { crate::memtrack::Tracker::new(data.as_ptr(), data.capacity()) } else { None };
-        Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None, prev: None }
+        Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None, prev: None, prev_ok: Vec::new() }
     }
 
     /// Pamięć z odczytem leniwym (podwójne odwzorowanie `memfd` zarejestrowane w `userfaultfd`); `None`, gdy jądro tego nie obsługuje.
@@ -276,7 +298,7 @@ impl Shadow {
             region.unregister();
             return None;
         };
-        Some(Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: Some(tracker), lazy: Some(region), prev: None })
+        Some(Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: Some(tracker), lazy: Some(region), prev: None, prev_ok: Vec::new() })
     }
 
     /// Wskaźnik dla aplikacji (`vkMapMemory`): widok objęty obsługą błędów stron albo zwykły bufor.
@@ -328,6 +350,9 @@ impl Shadow {
                 // Kopia poprzedniej treści śledzi to, co serwer ma po odczycie: inaczej linia, którą GPU zmieniło, a aplikacja zapisała z powrotem, wyglądałaby na niezmienioną.
                 if let Some(prev) = self.prev.as_mut() {
                     prev[ps..pe].copy_from_slice(&body[ps - a..pe - a]);
+                    if ps == p * P && (pe == (p + 1) * P || pe == self.data.len()) {
+                        self.prev_ok[p] = true;
+                    }
                 }
                 self.ver[p] = ticket + 1;
             }
@@ -428,6 +453,7 @@ impl InstState {
         if s.prev.is_none() {
             // Serwer i klient zakładają, że pamięć na początku jest wyzerowana (jak `PageTracker::new`).
             s.prev = Some(vec![0u8; s.data.len()]);
+            s.prev_ok = vec![false; s.data.len().div_ceil(4096)];
         }
         self.flush();
         self.stats.memw_bytes += data.len() as u64;
@@ -438,16 +464,7 @@ impl InstState {
             let Some(s) = self.mems.get_mut(&memory) else { return true };
             let Some(prev) = s.prev.as_mut() else { return false };
             let chunk = &data[chunk_start..chunk_end];
-            let mut runs: Vec<(u64, u32)> = Vec::new();
-            let mut raw: Vec<u8> = Vec::new();
-            for (a, b) in diff_runs(chunk, &prev[base..base + chunk.len()]) {
-                runs.push(((base + a) as u64, (b - a) as u32));
-                raw.extend_from_slice(&chunk[a..b]);
-            }
-            for &(o, l) in &runs {
-                let (o, l) = (o as usize, l as usize);
-                prev[o..o + l].copy_from_slice(&chunk[o - base..o - base + l]);
-            }
+            let (runs, raw) = plan_runs(chunk, base, prev, &mut s.prev_ok);
             // Skróty całych stron dotkniętych zapisem (po zapisie): serwer ustawia je w swoim śledzeniu, bo stron nie dostał w całości.
             let first_page = base / 4096;
             let last_page = (base + chunk.len()).div_ceil(4096);
@@ -467,9 +484,17 @@ impl InstState {
 
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
         // Zapis w całości (np. `vkFlushMappedMemoryRanges`, `vkUnmapMemory`) zmienia to, co serwer ma: kopia poprzedniej treści musi to odzwierciedlać.
-        if let Some(prev) = self.mems.get_mut(&memory).and_then(|s| s.prev.as_mut()) {
-            if let Some(dst) = prev.get_mut(offset as usize..offset as usize + data.len()) {
+        if let Some(s) = self.mems.get_mut(&memory) {
+            let (off, total) = (offset as usize, s.data.len());
+            if let Some(dst) = s.prev.as_mut().and_then(|prev| prev.get_mut(off..off + data.len())) {
                 dst.copy_from_slice(data);
+                // Strony objęte zapisem w całości mają znaną treść na serwerze.
+                for p in off.div_ceil(4096)..(off + data.len()) / 4096 {
+                    s.prev_ok[p] = true;
+                }
+                if off + data.len() == total && !total.is_multiple_of(4096) {
+                    s.prev_ok[total / 4096] = true;
+                }
             }
         }
         self.flush();
@@ -2460,17 +2485,95 @@ mod memreq_target_tests {
     fn diff_runs_finds_changed_lines_merges_small_gaps_and_handles_a_short_tail() {
         let prev = vec![0u8; 64 * 10 + 20];
         let mut cur = prev.clone();
-        assert!(diff_runs(&cur, &prev).is_empty(), "identyczne: nic do wysłania");
+        assert!(diff_runs(&cur, &prev, &[]).is_empty(), "identyczne: nic do wysłania");
         cur[0] = 1; // linia 0
         cur[64 * 2 + 5] = 1; // linia 2 (luka 1 linia = 64 B <= 128: scalone z linią 0)
         cur[64 * 9] = 1; // linia 9 (daleko: osobny fragment)
         cur[64 * 10 + 19] = 1; // niepełna linia na końcu (20 B)
-        assert_eq!(diff_runs(&cur, &prev), vec![(0, 64 * 3), (64 * 9, 64 * 10 + 20)]);
+        assert_eq!(diff_runs(&cur, &prev, &[]), vec![(0, 64 * 3), (64 * 9, 64 * 10 + 20)]);
         // Luka większa niż RUN_MERGE_GAP rozdziela fragmenty.
         let mut far = prev.clone();
         far[0] = 1;
         far[64 * 4] = 1; // luka 3 linie = 192 B > 128
-        assert_eq!(diff_runs(&far, &prev), vec![(0, 64), (64 * 4, 64 * 5)]);
+        assert_eq!(diff_runs(&far, &prev, &[]), vec![(0, 64), (64 * 4, 64 * 5)]);
+        // Zakres wymuszony (strona bez znanej treści serwera) idzie w całości, także gdy jest identyczny z kopią (np. same zera).
+        assert_eq!(diff_runs(&prev, &prev, &[(64, 64 * 3)]), vec![(64, 64 * 3)]);
+        assert_eq!(diff_runs(&far, &prev, &[(64 * 8, 64 * 9)]), vec![(0, 64), (64 * 4, 64 * 5), (64 * 8, 64 * 9)]);
+    }
+
+    /// Model serwera i klienta: pamięć serwera zaczyna od śmieci, klient od zer; losowe zapisy aplikacji, zmiany po stronie GPU (odczyt wpisuje je klientowi)
+    /// i wysyłki fragmentów. Po każdej wysyłce serwer musi mieć dokładnie to, co klient, na wszystkich wysłanych stronach.
+    #[test]
+    fn runs_keep_the_server_identical_to_the_client_under_random_writes_and_gpu_changes() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = move |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        const PAGES: usize = 24;
+        let len = PAGES * 4096 - 700; // niepełna ostatnia strona
+        let mut server: Vec<u8> = (0..len).map(|_| rnd(256) as u8).collect(); // śmieci
+        let mut shadow = vec![0u8; len];
+        let mut prev = vec![0u8; len];
+        let mut prev_ok = vec![false; len.div_ceil(4096)];
+        let mut sent_pages = vec![false; len.div_ceil(4096)];
+        for _ in 0..400 {
+            match rnd(3) {
+                0 => {
+                    // aplikacja zapisuje kilka bajtów (często zera) w losowych miejscach
+                    for _ in 0..rnd(6) + 1 {
+                        let (a, n) = (rnd(len), rnd(300) + 1);
+                        let zero = rnd(2) == 0;
+                        for v in &mut shadow[a..(a + n).min(len)] {
+                            *v = if zero { 0 } else { rnd(256) as u8 };
+                        }
+                    }
+                }
+                1 => {
+                    // GPU zmienia stronę, klient ją odczytuje (apply_at): kopia i flaga nadążają
+                    let p = rnd(PAGES);
+                    let (a, b) = (p * 4096, ((p + 1) * 4096).min(len));
+                    for v in &mut server[a..b] {
+                        if rnd(3) == 0 {
+                            *v = rnd(256) as u8;
+                        }
+                    }
+                    shadow[a..b].copy_from_slice(&server[a..b]);
+                    prev[a..b].copy_from_slice(&server[a..b]);
+                    prev_ok[p] = true;
+                    sent_pages[p] = true;
+                }
+                _ => {
+                    // wysyłka kawałka o losowych stronach
+                    let p0 = rnd(PAGES);
+                    let p1 = (p0 + 1 + rnd(6)).min(PAGES);
+                    let (base, end) = (p0 * 4096, (p1 * 4096).min(len));
+                    let chunk = shadow[base..end].to_vec();
+                    let (runs, raw) = plan_runs(&chunk, base, &mut prev, &mut prev_ok);
+                    let mut at = 0;
+                    for (o, l) in runs {
+                        server[o as usize..o as usize + l as usize].copy_from_slice(&raw[at..at + l as usize]);
+                        at += l as usize;
+                    }
+                    assert_eq!(at, raw.len());
+                    for p in p0..p1 {
+                        sent_pages[p] = true;
+                    }
+                    for p in p0..p1 {
+                        let (a, b) = (p * 4096, ((p + 1) * 4096).min(len));
+                        assert_eq!(server[a..b], shadow[a..b], "strona {p} po wysyłce różni się między serwerem a klientem");
+                    }
+                }
+            }
+        }
+        for (p, sent) in sent_pages.iter().enumerate() {
+            if *sent {
+                let (a, b) = (p * 4096, ((p + 1) * 4096).min(len));
+                assert_eq!(prev[a..b], server[a..b], "kopia poprzedniej treści strony {p} nie odpowiada serwerowi");
+            }
+        }
     }
 
 }
