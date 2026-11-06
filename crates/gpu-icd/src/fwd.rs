@@ -385,6 +385,10 @@ impl InstState {
             self.survey_write(data);
         }
         self.stats.memw_bytes += data.len() as u64;
+        if diffstat_enabled() {
+            let len = self.mems.get(&memory).map_or(0, |m| m.data.len());
+            diffstat_note(memory, len, offset as usize, data);
+        }
         let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
         acct.0 += 1;
         acct.1 += data.len() as u64;
@@ -782,6 +786,35 @@ static LOCK_HOLD_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 /// Liczba poleceń obsłużonych szybką ścieżką (bez blokady instancji).
 static FAST_COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Diagnostyka (`GPU_ICD_DIFFSTAT=1`): ile z wysyłanych zapisów pamięci naprawdę różni się od poprzednio wysłanej zawartości tych samych bajtów
+/// (potencjał kodowania różnic bajt po bajcie zamiast całych stron). Trzyma kopię poprzedniej zawartości, więc kosztuje pamięć; tylko do pomiarów.
+static DIFF_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIFF_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIFF_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIFF_PREV: std::sync::Mutex<Option<std::collections::HashMap<u64, Vec<u8>>>> = Mutex::new(None);
+
+fn diffstat_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_DIFFSTAT").is_some())
+}
+
+fn diffstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut g = DIFF_PREV.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = g.get_or_insert_with(Default::default).entry(memory).or_insert_with(|| vec![0u8; mem_len]);
+    let Some(old) = prev.get_mut(offset..offset + data.len()) else { return };
+    let (mut bytes, mut lines) = (0u64, 0u64);
+    for (o, n) in old.chunks(64).zip(data.chunks(64)) {
+        let d = o.iter().zip(n).filter(|(a, b)| a != b).count() as u64;
+        bytes += d;
+        lines += u64::from(d > 0) * n.len() as u64;
+    }
+    old.copy_from_slice(data);
+    DIFF_SENT.fetch_add(data.len() as u64, Relaxed);
+    DIFF_BYTES.fetch_add(bytes, Relaxed);
+    DIFF_LINES.fetch_add(lines, Relaxed);
+}
 
 static REFRESH_APPLY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REFRESH_DRAIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1213,6 +1246,11 @@ fn periodic_stats(stats: &Stats) {
         }
         eprintln!("[gpu-icd] {}", lock_report());
         eprintln!("[gpu-icd] blokada wg poleceń: {}", lock_top());
+        if diffstat_enabled() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (sent, bytes, lines) = (DIFF_SENT.load(Relaxed), DIFF_BYTES.load(Relaxed), DIFF_LINES.load(Relaxed));
+            eprintln!("[gpu-icd] różnice względem poprzednio wysłanego: wysłano {} MB, zmienione bajty {} MB ({:.0}%), zmienione linie 64 B {} MB ({:.0}%)", sent >> 20, bytes >> 20, 100.0 * bytes as f64 / sent.max(1) as f64, lines >> 20, 100.0 * lines as f64 / sent.max(1) as f64);
+        }
         {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] wpisywanie odświeżeń: różnice {} ms, doczytywanie {} ms w {} obiegach", REFRESH_APPLY_NS.load(Relaxed) / 1_000_000, REFRESH_DRAIN_NS.load(Relaxed) / 1_000_000, REFRESH_DRAINS.load(Relaxed));
