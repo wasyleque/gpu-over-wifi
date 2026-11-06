@@ -218,7 +218,7 @@ pub fn unencodable_reason(cmd: &CommandMeta) -> Option<String> {
         seen.push(name.to_string());
         let meta = find_struct(name)?;
         // `VkDescriptorDataEXT` ma własne kodowanie w kodeku (wariant wybiera pole `type` struktury nadrzędnej).
-        if meta.is_union && name != "VkDescriptorDataEXT" && meta.members().iter().any(|m| m.shape != Shape::Value) {
+        if meta.is_union && name != "VkDescriptorDataEXT" && !matches!(name, "VkDeviceOrHostAddressKHR" | "VkDeviceOrHostAddressConstKHR") && meta.members().iter().any(|m| m.shape != Shape::Value) {
             return Some(format!("unia {name} ze wskaźnikiem"));
         }
         for m in meta.members() {

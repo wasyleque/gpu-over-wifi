@@ -15,8 +15,7 @@ const DENY: &[&str] = &[
     "external_memory", "external_semaphore", "external_fence", "win32", "xlib", "xcb", "wayland", "android", "ggp", "fuchsia", "metal", "qnx",
     "display", "swapchain", "present", "surface", "full_screen", "drm", "video_", "device_group", "calibrated_timestamps",
     "performance_query", "acquire_xlib", "sci_sync", "ohos", "headless", "pipeline_binary", "cuda", "nvx_", "image_compression_control",
-    "device_generated_commands", "shader_object", "opacity_micromap", "ray_tracing", "acceleration_structure", "ray_query",
-    "deferred_host_operations", "graphics_pipeline_library", "frame_boundary", "low_latency", "anti_lag", "debug_report", "validation",
+    "device_generated_commands", "shader_object", "opacity_micromap", "graphics_pipeline_library", "frame_boundary", "low_latency", "anti_lag", "debug_report", "validation",
     // Rozszerzenia z poleceniami, których kodek nie umie zakodować (unia ze wskaźnikiem): patrz test `no_advertised_extension_has_an_unencodable_command`.
     "descriptor_heap", "cooperative_vector", "shader_enqueue",
     // `vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR` ma tablicę struktur z sType, której kodek nie umie zakodować; silnik GravityMark (Tellusim)
@@ -42,6 +41,14 @@ pub fn resolve_alias(name: &str) -> &str {
     cur
 }
 
+/// Rozszerzenia ray tracingu (budowa struktur przyspieszenia, potoki, zapytania promieni) i ich zależność od operacji odroczonych.
+const RAY_TRACING: &[&str] = &["ray_tracing", "acceleration_structure", "ray_query", "deferred_host_operations"];
+
+fn ray_tracing_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_RAYTRACING").is_some())
+}
+
 /// `true`, gdy rozszerzenie można ogłosić. `VK_KHR_swapchain` obsługuje ICD lokalnie (wirtualny swapchain).
 pub fn is_advertisable(ext: &str) -> bool {
     if ext == "VK_KHR_swapchain" {
@@ -49,6 +56,10 @@ pub fn is_advertisable(ext: &str) -> bool {
     }
     let lower = ext.to_ascii_lowercase();
     if DENY.iter().any(|d| lower.contains(d)) {
+        return false;
+    }
+    // Ray tracing jest nowy i niesprawdzony w grach: ogłaszany tylko na życzenie (`GPU_ICD_RAYTRACING=1`).
+    if RAY_TRACING.iter().any(|d| lower.contains(d)) && !ray_tracing_enabled() {
         return false;
     }
     let Ok(i) = DEVICE_EXTENSIONS.binary_search_by(|(n, _)| (*n).cmp(ext)) else { return false };
@@ -111,6 +122,26 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "ogłaszane rozszerzenia z niekodowalnymi poleceniami: {bad:?}");
+    }
+
+    /// Diagnostyka (ręcznie: `cargo test -p gpu-icd rt_audit -- --ignored --nocapture`): które polecenia rozszerzeń ray tracingu i grup urządzeń
+    /// kodek umie zakodować, a które nie i dlaczego. Podstawa planu włączenia ray tracingu.
+    #[test]
+    #[ignore = "diagnostyka"]
+    fn rt_audit() {
+        for ext in ["VK_KHR_deferred_host_operations", "VK_KHR_acceleration_structure", "VK_KHR_ray_tracing_pipeline", "VK_KHR_ray_query", "VK_KHR_ray_tracing_maintenance1", "VK_KHR_device_group"] {
+            let Some((_, cmds)) = DEVICE_EXTENSIONS.iter().find(|(m, _)| *m == ext) else {
+                println!("{ext}: brak w tabeli");
+                continue;
+            };
+            println!("== {ext}: {} poleceń", cmds.len());
+            for c in cmds.iter() {
+                match find_command(resolve_alias(c)) {
+                    None => println!("   {c}: BRAK W METADANYCH"),
+                    Some((_, m)) => println!("   {c}: {}", unencodable_reason(m).map_or("kodowalne".to_string(), |w| format!("NIEKODOWALNE: {w}"))),
+                }
+            }
+        }
     }
 
 }

@@ -76,6 +76,12 @@ fn unsupported(meta: &StructMeta, m: &MemberMeta, why: &str) -> CodecError {
 /// (`VkDescriptorGetInfoEXT`), więc ogólna obsługa unii jej nie obejmuje i kodujemy ją osobno (patrz `enc_descriptor_data`).
 pub const DESCRIPTOR_DATA_UNION: &str = "VkDescriptorDataEXT";
 
+/// Unie "adres urządzenia albo wskaźnik hosta" (ray tracing: budowa struktur przyspieszenia, kopie): przenosimy 8 bajtów bez wyłuskiwania. Wariant
+/// z adresem urządzenia jest zwykłą liczbą (serwer i klient widzą ten sam adres z `vkGetBufferDeviceAddress`); wariant hosta (polecenia
+/// `vk*AccelerationStructure*KHR` wykonywane przez procesor) przeniósłby bezsensowny wskaźnik, ale karta serwera nie zgłasza
+/// `accelerationStructureHostCommands`, więc aplikacja go nie użyje.
+pub const RAW_ADDRESS_UNIONS: &[&str] = &["VkDeviceOrHostAddressKHR", "VkDeviceOrHostAddressConstKHR"];
+
 /// Co wskazuje (albo zawiera) unia dla danego `VkDescriptorType`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DescData {
@@ -148,7 +154,7 @@ unsafe fn enc_struct(meta: &StructMeta, ptr: *const u8, enc: &mut Encoder, ctx: 
         return Err(CodecError::Limit("głębokość"));
     }
     if meta.is_union {
-        if meta.members().iter().any(|m| m.shape != Shape::Value) {
+        if meta.members().iter().any(|m| m.shape != Shape::Value) && !RAW_ADDRESS_UNIONS.contains(&meta.name) {
             return Err(CodecError::Unsupported(format!("unia {} ze wskaźnikiem", meta.name)));
         }
         enc.put_bytes(std::slice::from_raw_parts(ptr, meta.size as usize));
