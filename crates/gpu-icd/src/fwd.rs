@@ -792,7 +792,7 @@ static FAST_COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 static DIFF_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DIFF_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DIFF_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static DIFF_PREV: std::sync::Mutex<Option<std::collections::HashMap<u64, Vec<u8>>>> = Mutex::new(None);
+static DIFF_PREV: std::sync::Mutex<Option<std::collections::HashMap<u64, Vec<u8>>>> = std::sync::Mutex::new(None);
 
 fn diffstat_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
