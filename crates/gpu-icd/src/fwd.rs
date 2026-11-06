@@ -203,6 +203,37 @@ pub struct Shadow {
     /// Przy zwalnianiu blokady na czas oczekiwania odpowiedzi trafiają do pamięci w dowolnej kolejności, a serwer liczy różnice względem
     /// poprzedniej wysłanej: starsza różnica zastosowana po nowszej cofnęłaby strony do nieaktualnej treści (np. wartości fence'a).
     ver: Vec<u64>,
+    /// Kopia treści, którą serwer ma po ostatnim zapisie lub odczycie (`None`: pamięć za duża albo wyłączone `GPU_ICD_NO_RUNS`): pozwala wysyłać tylko linie
+    /// 64 B różniące się od niej, bo ok. 60% bajtów w zmienionych stronach buforów dynamicznych DXVK jest identyczne z poprzednio wysłanymi.
+    prev: Option<Vec<u8>>,
+}
+
+/// Największa pamięć, dla której trzymamy kopię poprzedniej treści (RAM laptopa jest ciasny: 6,6 GB).
+const PREV_MAX_BYTES: usize = 80 << 20;
+/// Granulacja różnic i największa luka między różniącymi się liniami, którą scalamy w jeden fragment (koszt nagłówka fragmentu to 12 B).
+const RUN_LINE: usize = 64;
+const RUN_MERGE_GAP: usize = 128;
+
+/// Fragmenty `chunk`, które różnią się od `prev` (tej samej długości): linie `RUN_LINE` bajtów, luki do `RUN_MERGE_GAP` scalone; `(początek, koniec)`.
+fn diff_runs(chunk: &[u8], prev: &[u8]) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut pos = 0usize;
+    while pos < chunk.len() {
+        let end = (pos + RUN_LINE).min(chunk.len());
+        if chunk[pos..end] != prev[pos..end] {
+            match runs.last_mut() {
+                Some(last) if pos - last.1 <= RUN_MERGE_GAP => last.1 = end,
+                _ => runs.push((pos, end)),
+            }
+        }
+        pos = end;
+    }
+    runs
+}
+
+fn runs_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_NO_RUNS").is_none())
 }
 
 /// Zapas puli (zestawy i deskryptory każdego typu), poniżej którego alokacje zestawów idą synchronicznie, oraz częstotliwość audytu.
@@ -229,11 +260,11 @@ impl Shadow {
         // Preferowana jest wspólna arena (jedno wywołanie skanu dla wszystkich pamięci, także małych); przy jej braku osobny bufor z własnym
         // śledzeniem (duże pamięci) albo pełnym skanem skrótów (małe).
         if let Some(data) = crate::memtrack::PageAlignedBuf::new_in_arena(len) {
-            return Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: None, lazy: None };
+            return Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: None, lazy: None, prev: None };
         }
         let data = crate::memtrack::PageAlignedBuf::new(len);
         let tracker = if len >= TRACK_FROM && std::env::var("GPU_ICD_NO_MEMTRACK").is_err() { crate::memtrack::Tracker::new(data.as_ptr(), data.capacity()) } else { None };
-        Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None }
+        Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker, lazy: None, prev: None }
     }
 
     /// Pamięć z odczytem leniwym (podwójne odwzorowanie `memfd` zarejestrowane w `userfaultfd`); `None`, gdy jądro tego nie obsługuje.
@@ -244,7 +275,7 @@ impl Shadow {
             region.unregister();
             return None;
         };
-        Some(Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: Some(tracker), lazy: Some(region) })
+        Some(Shadow { ver: vec![0; len.div_ceil(4096)], data, mapped: false, pages: gpu_proto::pagediff::PageTracker::new(len), tracker: Some(tracker), lazy: Some(region), prev: None })
     }
 
     /// Wskaźnik dla aplikacji (`vkMapMemory`): widok objęty obsługą błędów stron albo zwykły bufor.
@@ -293,6 +324,10 @@ impl Shadow {
             let (ps, pe) = ((p * P).max(a), ((p + 1) * P).min(end));
             if self.ver.get(p).is_some_and(|v| *v <= ticket) {
                 self.data[ps..pe].copy_from_slice(&body[ps - a..pe - a]);
+                // Kopia poprzedniej treści śledzi to, co serwer ma po odczycie: inaczej linia, którą GPU zmieniło, a aplikacja zapisała z powrotem, wyglądałaby na niezmienioną.
+                if let Some(prev) = self.prev.as_mut() {
+                    prev[ps..pe].copy_from_slice(&body[ps - a..pe - a]);
+                }
                 self.ver[p] = ticket + 1;
             }
             p += 1;
@@ -379,7 +414,63 @@ impl InstState {
         }
     }
 
+    /// Wysyła tylko linie 64 B różniące się od kopii poprzedniej treści (`Shadow::prev`), scalone w fragmenty, jednym żądaniem `MemWriteRuns` na kawałek
+    /// do `MEM_CHUNK`; zwraca `false`, gdy się nie da (brak kopii, wyłączone, zbyt duża pamięć) i trzeba wysłać zakres w całości.
+    fn send_runs(&mut self, memory: u64, offset: usize, data: &[u8]) -> bool {
+        if !runs_enabled() {
+            return false;
+        }
+        let Some(s) = self.mems.get_mut(&memory) else { return false };
+        if s.data.len() > PREV_MAX_BYTES {
+            return false;
+        }
+        if s.prev.is_none() {
+            // Serwer i klient zakładają, że pamięć na początku jest wyzerowana (jak `PageTracker::new`).
+            s.prev = Some(vec![0u8; s.data.len()]);
+        }
+        self.flush();
+        self.stats.memw_bytes += data.len() as u64;
+        let mut chunk_start = 0usize;
+        while chunk_start < data.len() {
+            let chunk_end = (chunk_start + MEM_CHUNK.min(MAX_BATCH)).min(data.len());
+            let base = offset + chunk_start;
+            let Some(s) = self.mems.get_mut(&memory) else { return true };
+            let Some(prev) = s.prev.as_mut() else { return false };
+            let chunk = &data[chunk_start..chunk_end];
+            let mut runs: Vec<(u64, u32)> = Vec::new();
+            let mut raw: Vec<u8> = Vec::new();
+            for (a, b) in diff_runs(chunk, &prev[base..base + chunk.len()]) {
+                runs.push(((base + a) as u64, (b - a) as u32));
+                raw.extend_from_slice(&chunk[a..b]);
+            }
+            for &(o, l) in &runs {
+                let (o, l) = (o as usize, l as usize);
+                prev[o..o + l].copy_from_slice(&chunk[o - base..o - base + l]);
+            }
+            // Skróty całych stron dotkniętych zapisem (po zapisie): serwer ustawia je w swoim śledzeniu, bo stron nie dostał w całości.
+            let first_page = base / 4096;
+            let last_page = (base + chunk.len()).div_ceil(4096);
+            let pages: Vec<(u32, u64)> = (first_page..last_page).filter_map(|i| s.pages.hash(i).map(|h| (i as u32, h))).collect();
+            if !runs.is_empty() {
+                let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
+                acct.0 += 1;
+                acct.1 += raw.len() as u64;
+                if self.client.send_mem_runs(memory, runs, pages, raw).is_err() {
+                    self.lose();
+                }
+            }
+            chunk_start = chunk_end;
+        }
+        true
+    }
+
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
+        // Zapis w całości (np. `vkFlushMappedMemoryRanges`, `vkUnmapMemory`) zmienia to, co serwer ma: kopia poprzedniej treści musi to odzwierciedlać.
+        if let Some(prev) = self.mems.get_mut(&memory).and_then(|s| s.prev.as_mut()) {
+            if let Some(dst) = prev.get_mut(offset as usize..offset as usize + data.len()) {
+                dst.copy_from_slice(data);
+            }
+        }
         self.flush();
         if flags().debug {
             self.survey_write(data);
@@ -468,7 +559,9 @@ impl InstState {
             for (a, b) in ranges {
                 // SAFETY: bufor kopii nie zmienia adresu ani rozmiaru po utworzeniu; zakres leży w jego granicach.
                 let data = unsafe { std::slice::from_raw_parts(p.add(a), b - a) };
-                self.send_mem(id, a as u64, data);
+                if !self.send_runs(id, a, data) {
+                    self.send_mem(id, a as u64, data);
+                }
             }
             self.stats.t_memsend_ns += t1.elapsed().as_nanos() as u64;
         }
@@ -2360,6 +2453,23 @@ mod memreq_target_tests {
         for n in ["vkEndCommandBuffer", "vkCmdExecuteCommands", "vkQueueSubmit", "vkAllocateCommandBuffers", "vkResetCommandPool"] {
             assert!(!on(n), "{n}");
         }
+    }
+
+    #[test]
+    fn diff_runs_finds_changed_lines_merges_small_gaps_and_handles_a_short_tail() {
+        let prev = vec![0u8; 64 * 10 + 20];
+        let mut cur = prev.clone();
+        assert!(diff_runs(&cur, &prev).is_empty(), "identyczne: nic do wysłania");
+        cur[0] = 1; // linia 0
+        cur[64 * 2 + 5] = 1; // linia 2 (luka 1 linia = 64 B <= 128: scalone z linią 0)
+        cur[64 * 9] = 1; // linia 9 (daleko: osobny fragment)
+        cur[64 * 10 + 19] = 1; // niepełna linia na końcu (20 B)
+        assert_eq!(diff_runs(&cur, &prev), vec![(0, 64 * 3), (64 * 9, 64 * 10 + 20)]);
+        // Luka większa niż RUN_MERGE_GAP rozdziela fragmenty.
+        let mut far = prev.clone();
+        far[0] = 1;
+        far[64 * 4] = 1; // luka 3 linie = 192 B > 128
+        assert_eq!(diff_runs(&far, &prev), vec![(0, 64), (64 * 4, 64 * 5)]);
     }
 
 }

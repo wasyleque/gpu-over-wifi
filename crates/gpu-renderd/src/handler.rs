@@ -47,6 +47,17 @@ pub trait GpuBackend {
     fn mem_read(&mut self, _memory: u64, _offset: u64, _len: u32) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
     }
+    /// Zapis kilku rozłącznych fragmentów pamięci (patrz `Request::MemWriteRuns`): `runs` to `(przesunięcie, długość)`, a `raw` to ich sklejone bajty.
+    /// Domyślnie pojedyncze zapisy; backend może zrobić to jednym wywołaniem.
+    fn mem_write_runs(&mut self, memory: u64, runs: &[(u64, u32)], _pages: &[(u32, u64)], raw: &[u8]) -> Result<(), i32> {
+        let mut at = 0usize;
+        for &(offset, len) in runs {
+            let end = at.checked_add(len as usize).filter(|e| *e <= raw.len()).ok_or(ERR_UNKNOWN)?;
+            self.mem_write(memory, offset, &raw[at..end])?;
+            at = end;
+        }
+        Ok(())
+    }
     /// Odczyt samych różnic pamięci (patrz `Request::MemReadDelta`); `max_bytes` ogranicza jedną odpowiedź.
     fn mem_read_delta(&mut self, _memory: u64, _max_bytes: usize) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
@@ -181,7 +192,7 @@ impl<B: GpuBackend> Session<B> {
     }
 
     pub fn handle_request(&mut self, req: Request) -> Option<Response> {
-        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::PresentFrame { .. });
+        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
         let r = self.handle(req);
         if silent && !matches!(r, Response::Error { .. }) {
             None
@@ -354,6 +365,17 @@ impl<B: GpuBackend> Session<B> {
                     // Rozpakowanie ma dokładnie `raw_len` bajtów (limit sprawdzony przy dekodowaniu żądania): bomba dekompresyjna niemożliwa.
                     let r = match lz4_flex::block::decompress(&data, raw_len as usize) {
                         Ok(raw) if raw.len() == raw_len as usize => self.backend.mem_write(memory, offset, &raw),
+                        _ => Err(ERR_UNKNOWN),
+                    };
+                    if let Some(t) = t {
+                        acct::add(1, t.elapsed());
+                    }
+                    self.note_async(r)
+                }
+                Request::MemWriteRuns { memory, runs, pages, raw_len, data } => {
+                    let t = acct::enabled().then(std::time::Instant::now);
+                    let r = match lz4_flex::block::decompress(&data, raw_len as usize) {
+                        Ok(raw) if raw.len() == raw_len as usize => self.backend.mem_write_runs(memory, &runs, &pages, &raw),
                         _ => Err(ERR_UNKNOWN),
                     };
                     if let Some(t) = t {
@@ -926,6 +948,20 @@ mod tests {
         assert_eq!(s.handle_request(Request::MemWriteLz4 { memory: 1, offset: 0, raw_len: 9_999, data: packed }), None);
         assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
         assert_eq!(s.handle_request(Request::MemWriteLz4 { memory: 1, offset: 0, raw_len: 100, data: vec![0xFF; 20] }), None);
+        assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
+    }
+
+    #[test]
+    fn memory_write_runs_are_applied_silently_and_inconsistent_ones_surface_at_sync() {
+        let mut s = stream_session(None);
+        let raw: Vec<u8> = (0..192u32).map(|i| i as u8).collect();
+        let packed = lz4_flex::block::compress(&raw);
+        let ok = Request::MemWriteRuns { memory: 1, runs: vec![(0, 64), (4096, 128)], pages: vec![(0, 7), (1, 9)], raw_len: 192, data: packed.clone() };
+        assert_eq!(s.handle_request(ok), None);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: 0 }));
+        // Fragmenty dłuższe niż rozpakowane dane: błąd asynchroniczny, nic nie czytamy poza danymi.
+        let bad = Request::MemWriteRuns { memory: 1, runs: vec![(0, 64), (4096, 200)], pages: vec![], raw_len: 192, data: packed };
+        assert_eq!(s.handle_request(bad), None);
         assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
     }
 

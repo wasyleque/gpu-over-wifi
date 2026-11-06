@@ -476,6 +476,29 @@ impl Replayer {
         self.range_call("vkFlushMappedMemoryRanges", device, e.real)
     }
 
+    /// Zapis kilku fragmentów jednej pamięci jednym odwzorowaniem i jednym `vkFlushMappedMemoryRanges` (patrz `Request::MemWriteRuns`).
+    pub fn mem_write_runs(&mut self, memory: u64, runs: &[(u64, u32)], pages: &[(u32, u64)], raw: &[u8]) -> Result<(), i32> {
+        let (ptr, e, device) = self.mapping(memory)?;
+        let mut at = 0usize;
+        for &(offset, len) in runs {
+            let end = offset.checked_add(len as u64).filter(|x| *x <= e.size).ok_or(ERR_UNKNOWN)?;
+            let next = at.checked_add(len as usize).filter(|x| *x <= raw.len()).ok_or(ERR_UNKNOWN)?;
+            let part = &raw[at..next];
+            // SAFETY: zakres [offset, end) mieści się w odwzorowanej pamięci o rozmiarze `e.size`.
+            unsafe { std::ptr::copy_nonoverlapping(part.as_ptr(), ptr.add(offset as usize), part.len()) };
+            self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_data(offset as usize, part);
+            let _ = end;
+            at = next;
+        }
+        // Strony dotknięte zapisem nie zostały przesłane w całości: ich skróty podaje klient (po zapisie), żeby odczyt różnic ich nie odsyłał.
+        if let Some(t) = self.pages.get_mut(&memory) {
+            for &(i, h) in pages {
+                t.set_hash(i as usize, h);
+            }
+        }
+        self.range_call("vkFlushMappedMemoryRanges", device, e.real)
+    }
+
     /// Odczyt różnic: tylko strony, które zmieniły się od ostatniego zapisu lub odczytu tej pamięci (limit jednej odpowiedzi
     /// to `max_bytes`; flaga `more` mówi, że trzeba zapytać ponownie). Format: `pagediff::encode_segments`.
     pub fn mem_read_delta(&mut self, memory: u64, max_bytes: usize) -> Result<Vec<u8>, i32> {

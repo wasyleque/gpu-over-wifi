@@ -21,6 +21,9 @@ pub const MAX_DATA: usize = 4 * 1024 * 1024;
 /// Maksymalny rozmiar jednej partii poleceń / jednego zapisu pamięci (M2).
 /// Najwięcej zakresów w jednym `MemReadDeltaRanges`.
 pub const MAX_DELTA_RANGES: usize = 4096;
+/// Najwięcej fragmentów w jednym `MemWriteRuns`.
+pub const MAX_WRITE_RUNS: usize = 65_536;
+
 pub const MAX_BATCH: usize = 8 * 1024 * 1024;
 
 /// Którą funkcję `vkGetPhysicalDevice*` wywołać na serwerze.
@@ -79,6 +82,9 @@ pub enum Request {
     MemWrite { memory: u64, offset: u64, data: Vec<u8> },
     /// Jak `MemWrite`, ale `data` to blok LZ4, który po rozpakowaniu ma dokładnie `raw_len` bajtów (limit `MAX_BATCH`).
     MemWriteLz4 { memory: u64, offset: u64, raw_len: u32, data: Vec<u8> },
+    /// Zapis kilku rozłącznych fragmentów jednej pamięci (`pages`: skróty całych stron dotkniętych zapisem po jego wykonaniu, żeby serwer nie odsyłał ich jako zmienionych): `runs` to `(przesunięcie, długość)`, a `data` to blok LZ4 sklejonych bajtów wszystkich
+    /// fragmentów (po rozpakowaniu dokładnie `raw_len` = suma długości). Klient wysyła tylko linie, które różnią się od poprzednio wysłanej zawartości.
+    MemWriteRuns { memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw_len: u32, data: Vec<u8> },
     /// Odczyt pamięci serwera.
     MemRead { memory: u64, offset: u64, len: u32 },
     /// Odczyt różnic: serwer odsyła tylko strony pamięci zmienione od ostatniego zapisu/odczytu (format: `pagediff::encode_segments`).
@@ -192,6 +198,22 @@ impl Request {
                 e.put_u64(*memory);
                 e.put_u64(*offset);
                 e.put_u32(*len);
+            }
+            Request::MemWriteRuns { memory, runs, pages, raw_len, data } => {
+                e.put_u8(19);
+                e.put_u64(*memory);
+                e.put_u32(runs.len() as u32);
+                for (o, l) in runs {
+                    e.put_u64(*o);
+                    e.put_u32(*l);
+                }
+                e.put_u32(pages.len() as u32);
+                for (i, h) in pages {
+                    e.put_u32(*i);
+                    e.put_u64(*h);
+                }
+                e.put_u32(*raw_len);
+                e.put_bytes(data);
             }
             Request::MemWriteLz4 { memory, offset, raw_len, data } => {
                 e.put_u8(17);
@@ -329,6 +351,35 @@ impl Request {
                     ranges.push((d.get_u64()?, d.get_u64()?));
                 }
                 Request::MemReadDeltaRanges { memory, ranges, cached }
+            }
+            19 => {
+                let memory = d.get_u64()?;
+                let n = d.get_u32()? as usize;
+                if n > MAX_WRITE_RUNS || n * 12 > d.remaining() {
+                    return Err(MsgError::LimitExceeded("memory write runs"));
+                }
+                let mut runs = Vec::with_capacity(n);
+                let mut total = 0u64;
+                for _ in 0..n {
+                    let (o, l) = (d.get_u64()?, d.get_u32()?);
+                    total += l as u64;
+                    runs.push((o, l));
+                }
+                let np = d.get_u32()? as usize;
+                if np > MAX_WRITE_RUNS || np * 12 > d.remaining() {
+                    return Err(MsgError::LimitExceeded("memory write pages"));
+                }
+                let mut pages = Vec::with_capacity(np);
+                for _ in 0..np {
+                    pages.push((d.get_u32()?, d.get_u64()?));
+                }
+                let raw_len = d.get_u32()?;
+                let data = d.get_bytes()?;
+                // Suma długości fragmentów musi zgadzać się z rozmiarem po rozpakowaniu (nic nie czytamy ani nie piszemy poza zadeklarowanym).
+                if total != raw_len as u64 || raw_len as usize > MAX_BATCH || data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("memory write runs size"));
+                }
+                Request::MemWriteRuns { memory, runs, pages, raw_len, data: data.to_vec() }
             }
             17 => {
                 let memory = d.get_u64()?;
@@ -473,6 +524,7 @@ mod tests {
             Request::MemReadDeltaRanges { memory: 9, ranges: vec![(0, 4096), (1 << 40, 17)], cached: true },
             Request::MemReadDeltaRanges { memory: 9, ranges: vec![], cached: false },
             Request::MemWriteLz4 { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
+            Request::MemWriteRuns { memory: 6, runs: vec![(0, 64), (192, 128)], pages: vec![(0, 0xABCD)], raw_len: 192, data: vec![9, 9, 9] },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },
             Request::PresentFrame { memory: 9, len: 1_870_000, seq: 77, width: 650, height: 718, format: 1, codec: 2 },

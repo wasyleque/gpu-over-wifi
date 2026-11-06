@@ -100,6 +100,18 @@ impl PageTracker {
         PageTracker { known, len }
     }
 
+    /// Zapamiętany skrót strony `i` (to, co obie strony uznają za jej zawartość).
+    pub fn hash(&self, page: usize) -> Option<u64> {
+        self.known.get(page).copied()
+    }
+
+    /// Ustawia skrót strony po zapisie fragmentów (`MemWriteRuns`): strona nie została przesłana w całości, więc jej skrótu nie da się policzyć z danych.
+    pub fn set_hash(&mut self, page: usize, hash: u64) {
+        if let Some(k) = self.known.get_mut(page) {
+            *k = hash;
+        }
+    }
+
     fn page_range(&self, i: usize) -> (usize, usize) {
         (i * PAGE, ((i + 1) * PAGE).min(self.len))
     }

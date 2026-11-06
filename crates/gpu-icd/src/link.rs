@@ -17,7 +17,7 @@ use gpu_renderd::client::{Client, ClientError};
 
 /// Czy serwer odpowie na to żądanie (`Cmds`, `MemWrite*` i `PresentFrame` są ciche, o ile się powiodą).
 pub fn expects_reply(req: &Request) -> bool {
-    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::PresentFrame { .. })
+    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
 }
 
 struct Turn {
@@ -100,7 +100,12 @@ struct Out {
 
 /// Zapis pamięci do skompresowania i opakowania w ramkę. Robi to wątek roboczy albo, gdy żaden jeszcze go nie wziął, wątek nadawczy w swojej kolei.
 /// Wejście zadania: numer ramki, pamięć, przesunięcie, bajty.
-type JobInput = (u16, u64, u64, Vec<u8>);
+type RunsInput = (u16, u64, Vec<(u64, u32)>, Vec<(u32, u64)>, Vec<u8>);
+
+enum JobInput {
+    Mem(u16, u64, u64, Vec<u8>),
+    Runs(RunsInput),
+}
 type JobOutput = Result<Vec<u8>, ()>;
 
 struct Job {
@@ -113,8 +118,12 @@ struct Job {
 impl Job {
     fn run(&self) {
         let taken = self.input.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some((seq, memory, offset, raw)) = taken {
-            let r = mem_frame(seq, memory, offset, raw).map_err(|_| ());
+        if let Some(input) = taken {
+            let r = match input {
+                JobInput::Mem(seq, memory, offset, raw) => mem_frame(seq, memory, offset, raw),
+                JobInput::Runs((seq, memory, runs, pages, raw)) => runs_frame(seq, memory, runs, pages, raw),
+            }
+            .map_err(|_| ());
             *self.output.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
             self.done.notify_all();
         }
@@ -175,6 +184,17 @@ fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>
     };
     WIRE_TOTAL.fetch_add(wire, std::sync::atomic::Ordering::Relaxed);
     *WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry(memory).or_insert(0) += wire;
+    let frame = Frame::new(0, flags::CRC, seq, 0, req.encode()).map_err(ClientError::Frame)?;
+    Ok(frame.encode())
+}
+
+/// Zapis fragmentów pamięci jako ramka `MemWriteRuns` (zawsze blok LZ4 sklejonych bajtów).
+fn runs_frame(seq: u16, memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw: Vec<u8>) -> Result<Vec<u8>, ClientError> {
+    let data = gpu_proto::video::compress_lz4(&raw);
+    let wire = data.len() as u64 + runs.len() as u64 * 12 + pages.len() as u64 * 12;
+    WIRE_TOTAL.fetch_add(wire, std::sync::atomic::Ordering::Relaxed);
+    *WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry(memory).or_insert(0) += wire;
+    let req = Request::MemWriteRuns { memory, runs, pages, raw_len: raw.len() as u32, data };
     let frame = Frame::new(0, flags::CRC, seq, 0, req.encode()).map_err(ClientError::Frame)?;
     Ok(frame.encode())
 }
@@ -323,7 +343,18 @@ impl Link {
     /// robi wątek nadawczy. Wołający oddaje własną kopię bajtów.
     pub fn send_mem(&mut self, memory: u64, offset: u64, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
-        let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some((self.seq, memory, offset, raw))), output: Mutex::new(None), done: Condvar::new() });
+        let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some(JobInput::Mem(self.seq, memory, offset, raw))), output: Mutex::new(None), done: Condvar::new() });
+        if self.direct.is_none() && !self.workers.is_empty() {
+            self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
+            self.out.work_cv.notify_one();
+        }
+        self.enqueue_item(Item::Job(job))
+    }
+
+    /// Zapis fragmentów jednej pamięci (patrz `Request::MemWriteRuns`); kolejność w strumieniu jak w `send_mem`, kompresja w wątku roboczym.
+    pub fn send_mem_runs(&mut self, memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw: Vec<u8>) -> Result<(), ClientError> {
+        self.seq = self.seq.wrapping_add(1);
+        let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some(JobInput::Runs((self.seq, memory, runs, pages, raw)))), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
             self.out.work_cv.notify_one();

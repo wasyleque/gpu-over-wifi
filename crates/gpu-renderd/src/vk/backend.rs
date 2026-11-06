@@ -380,6 +380,10 @@ impl GpuBackend for VulkanBackend {
         self.replay.mem_read(memory, offset, len)
     }
 
+    fn mem_write_runs(&mut self, memory: u64, runs: &[(u64, u32)], pages: &[(u32, u64)], raw: &[u8]) -> Result<(), i32> {
+        self.replay.mem_write_runs(memory, runs, pages, raw)
+    }
+
     fn mem_prefetch(&mut self, items: &[DeltaItem]) {
         self.replay.mem_prefetch(items);
     }
