@@ -12,6 +12,10 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 *American Truck Simulator (native Linux Vulkan game) in the cab on the Ryzen 5 4500U laptop, drawn by the RTX 3090 Ti in another machine over a 1 Gb/s cable: **68-72 FPS** in light scenes (it was 3-45 FPS a day earlier). In a busy cockpit scene with mirrors it drops to about 6 FPS because the game rewrites ~17 MB of mapped memory per frame. The frame-rate overlay was not enabled in this screenshot; the numbers come from the driver's own statistics ([`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md)).*
 
+![vkQuake running on a Ryzen laptop through the remote driver](docs/images/vkquake-remote-rtx3090ti.png)
+
+*Can it run Doom? Not Doom, but **Quake**: vkQuake (native Vulkan, shareware episode) on the Ryzen laptop with the remote driver, a 6 237-frame timedemo at **54 FPS** (34-77) with the RTX 3090 Ti in another machine ([`docs/measurements/2026-11-06-vkquake`](docs/measurements/2026-11-06-vkquake/README.md)).*
+
 ![Black Book running on a Ryzen laptop, rendered on a remote RTX 3090 Ti: 59.7 FPS](docs/images/blackbook-remote-rtx3090ti.png)
 
 *Black Book (Proton, DXVK) on the Ryzen laptop, drawn by the RTX 3090 Ti in another machine: **40-60 FPS** with the game's own counter ([`docs/measurements/2026-11-05-blackbook`](docs/measurements/2026-11-05-blackbook/README.md)).*
