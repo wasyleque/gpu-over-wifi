@@ -15,6 +15,20 @@ Screenshots `tr1.png`-`tr3.png` were taken around the end of the benchmark runs 
 
 Full HD at high settings gave **1-2 FPS** in the very first attempt (before this day's fixes).
 
+## Full built-in benchmark result (tester, 2026-11-06, build 0.3.7)
+
+`tr_bench_results_1.png` (game's own result screen):
+
+| Scene | FPS | min | max |
+|---|---|---|---|
+| Mountain Peak | **14.18** | 3.11 | 35.86 |
+| Syria | **8.32** | 2.20 | 34.15 |
+| Geothermal Valley | **7.86** | 1.35 | 49.52 |
+| **Overall** | **9.59** | | |
+
+(The settings of this run are the tester's usual Full HD / high, DX11; the very first attempt on the first build gave 1-2 FPS.)
+The minima are the start of each scene (asset streaming); the maxima are the cut-scene-like intro seconds.
+
 ## What was fixed on the way
 
 1. The game creates several Vulkan instances in one process (DXVK probes, vkd3d-proton, the real D3D11 device). The driver kept
