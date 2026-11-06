@@ -16,6 +16,9 @@ build 0.3.6 + device-group instance extension. Frame 150 of each run was dumped 
 | `mesh_shading` | pass | frame has few colours (19), plausible for a flat-shaded mesh; not compared against a local reference |
 | `oit_linked_lists` | pass | order-independent transparency, atomics |
 | `ray_tracing_basic` | **pass (ray tracing)** | with `GPU_ICD_RAYTRACING=1`: 300 frames, no errors; frame 150 is the expected RGB-gradient triangle drawn by a ray-tracing pipeline (`ray_tracing_basic.png`) |
+| `ray_tracing_extended`, `ray_tracing_position_fetch` | **pass (ray tracing)** | with `GPU_ICD_RAYTRACING=1`: 300 frames each, no errors, no watchdog |
+| `timestamp_queries` | pass | |
+| `hello_triangle_1_3` | sample crashes | SIGSEGV in the sample itself: `HeadlessWindow::create_surface` calls a null function pointer (backtrace under gdb: frame 0 is address 0, frame 1 the sample's `create_surface`); not in the driver, no driver log line precedes it; not investigated further |
 | `ray_queries` | **pass (ray tracing)** | with `GPU_ICD_RAYTRACING=1`: 300 frames; frame 150 shows the Sponza hall with ray-query shadows / ambient occlusion (`ray_queries.png`) |
 | `buffer_device_address` | **not available** | the instance extension `VK_KHR_device_group_creation` is now advertised, but the sample also needs the device extension `VK_KHR_device_group`, which is still filtered (device groups) |
 | `shader_object` | environment | needs the layer `VK_LAYER_KHRONOS_shader_object`, which is not installed on the laptop |
