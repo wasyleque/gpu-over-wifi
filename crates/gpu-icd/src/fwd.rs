@@ -2558,9 +2558,7 @@ mod memreq_target_tests {
                         at += l as usize;
                     }
                     assert_eq!(at, raw.len());
-                    for p in p0..p1 {
-                        sent_pages[p] = true;
-                    }
+                    sent_pages[p0..p1].fill(true);
                     for p in p0..p1 {
                         let (a, b) = (p * 4096, ((p + 1) * 4096).min(len));
                         assert_eq!(server[a..b], shadow[a..b], "strona {p} po wysyłce różni się między serwerem a klientem");
