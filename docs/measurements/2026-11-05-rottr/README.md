@@ -1,5 +1,9 @@
 # Rise of the Tomb Raider (Epic, Proton, DX11 via DXVK) on the remote RTX 3090 Ti, 2026-11-05/06
 
+> **Correction (tester, 2026-11-06):** the 25-66 FPS samples in the tables below are the **start screen / menu**, not gameplay. Benchmark
+> scene 1 runs at **10-13 FPS** and scene 2 at **6-8 FPS** (the tester closes the game there). The "mean ~20 FPS" figures therefore mix the menu
+> with the benchmark and overstate the game; compare runs by scene, not by mean.
+
 Ryzen 5 4500U laptop, 1 Gb/s cable, H.264, built-in benchmark of the game, everything on high, DX12 off.
 Screenshots `tr1.png`-`tr3.png` were taken around the end of the benchmark runs (23:53-23:58) and are not attributed to a particular run; game FPS counter top-left: 18.6 and 8.5 in two scenes. Their size is the size of the desktop, not the render resolution.
 
