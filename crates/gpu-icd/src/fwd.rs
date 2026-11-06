@@ -925,7 +925,80 @@ pub(crate) fn lock_state(inst: &InstanceObj) -> std::sync::MutexGuard<'_, InstSt
     lock(&inst.state)
 }
 
+/// Czy wywołanie jest odpytywaniem stanu synchronizacji (semafor czasowy, płotek): pętla bez końca na takim wywołaniu nie pojawia się w
+/// watchdogu (każde wywołanie wraca od razu), a silnik gry (REDengine) kończy się własnym watchdogiem po 120 s.
+fn spin_op(op: u16) -> bool {
+    static SET: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| COMMANDS.iter().map(|c| matches!(c.name, "vkWaitSemaphores" | "vkWaitSemaphoresKHR" | "vkGetSemaphoreCounterValue" | "vkGetSemaphoreCounterValueKHR" | "vkGetFenceStatus" | "vkWaitForFences")).collect()).get(op as usize).copied().unwrap_or(false)
+}
+
+struct SpinEntry {
+    first: std::time::Instant,
+    last: std::time::Instant,
+    count: u64,
+    reported: Option<std::time::Instant>,
+}
+
+thread_local! {
+    /// Odpytywania z tym samym kluczem (polecenie, uchwyt, wartość, wynik) w tym wątku; wpisy nieoglądane od 5 s są usuwane, więc pętla, która
+    /// przeplata kilka różnych wywołań, nadal jest wykrywana.
+    static SPIN: std::cell::RefCell<std::collections::HashMap<u64, SpinEntry>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Wykrywa wątek, który ponad 20 s odpytuje ten sam semafor/płotek z tym samym wynikiem (zgubiony sygnał?), i raz na 10 s pisze o nim do logu.
+///
+/// # Safety
+/// `ints` pochodzą z wywołania aplikacji zgodnego z sygnaturą polecenia, `r` to jego wynik.
+unsafe fn spin_watch(op: u16, ints: &[u64; 14], r: u64) {
+    let name = COMMANDS[op as usize].name;
+    let mut h: u64 = op as u64 ^ ((r as u32) as u64) << 20;
+    let mut desc = String::new();
+    match name {
+        "vkWaitSemaphores" | "vkWaitSemaphoresKHR" if ints[1] != 0 => {
+            let info = ints[1] as *const u8;
+            let n = std::ptr::read_unaligned(info.add(20) as *const u32).min(16) as usize;
+            let (sems, vals) = (std::ptr::read_unaligned(info.add(24) as *const u64) as *const u64, std::ptr::read_unaligned(info.add(32) as *const u64) as *const u64);
+            for i in 0..n {
+                let (sm, v) = (std::ptr::read_unaligned(sems.add(i)), std::ptr::read_unaligned(vals.add(i)));
+                h = h.rotate_left(7) ^ sm ^ v.rotate_left(29);
+                desc.push_str(&format!(" sem {sm:#x} czeka na {v}"));
+            }
+        }
+        "vkGetSemaphoreCounterValue" | "vkGetSemaphoreCounterValueKHR" if ints[2] != 0 => {
+            let v = std::ptr::read_unaligned(ints[2] as *const u64);
+            h = h.rotate_left(7) ^ ints[1] ^ v.rotate_left(29);
+            desc = format!(" sem {:#x} wartość {v}", ints[1]);
+        }
+        _ => {
+            h = h.rotate_left(7) ^ ints[1] ^ ints[2];
+            desc = format!(" uchwyt {:#x}", ints[1]);
+        }
+    }
+    SPIN.with(|c| {
+        let mut c = c.borrow_mut();
+        let now = std::time::Instant::now();
+        if c.len() > 64 {
+            c.retain(|_, e| now.duration_since(e.last).as_secs() < 5);
+        }
+        let e = c.entry(h).or_insert(SpinEntry { first: now, last: now, count: 0, reported: None });
+        if now.duration_since(e.last).as_secs() >= 5 {
+            *e = SpinEntry { first: now, last: now, count: 0, reported: None };
+        }
+        e.last = now;
+        e.count += 1;
+        if now.duration_since(e.first).as_secs() >= 20 && e.count >= 200 && e.reported.is_none_or(|t| now.duration_since(t).as_secs() >= 10) {
+            e.reported = Some(now);
+            eprintln!("gpu-icd: PĘTLA: wątek {:?} od {} s odpytuje {name} z tym samym wynikiem ({} wywołań, wynik {}){desc}", std::thread::current().id(), now.duration_since(e.first).as_secs(), e.count, r as u32 as i32);
+        }
+    });
+}
+
 unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
+    if spin_op(op) {
+        let r = forward_inner(op, ints, floats);
+        spin_watch(op, &ints, r);
+        return r;
+    }
     // Tworzenie urządzenia jest rzadkie, a jego niepowodzenie bez śladu w logu zatrzymało Rise of the Tomb Raider: zapisujemy każdy wynik.
     if COMMANDS.get(op as usize).is_some_and(|c| c.name == "vkCreateDevice") {
         let r = forward_inner(op, ints, floats);
