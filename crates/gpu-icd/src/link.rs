@@ -214,6 +214,10 @@ impl Link {
     /// Przejmuje połączenie po uwierzytelnieniu (strumień jest wtedy "czysty": żadnych niewysłanych ani nieodebranych bajtów).
     pub fn from_client(client: Client) -> Result<Link, ClientError> {
         let (stream, seq) = client.into_stream();
+        // Limit 30 s z uzgadniania nie może zostać na łączu roboczym: odpowiedź na długie oczekiwanie (fence, semafor, zaległa praca serwera) trwająca
+        // dłużej kończyła się błędem odczytu i zerwaniem połączenia, a gra wisiała. Martwy serwer wykrywa keepalive TCP.
+        stream.set_read_timeout(None)?;
+        gpu_renderd::client::enable_keepalive(&stream);
         let reader = stream.try_clone()?;
         let direct_stream = stream.try_clone()?;
         let mut writer = stream;
@@ -562,6 +566,42 @@ mod tests {
             assert_eq!(g.0, e.0, "kolejność zapisów");
             assert_eq!(g.1, e.1, "zawartość zapisu pod {}", e.0);
         }
+        drop(link);
+        srv.join().unwrap();
+    }
+
+    /// Odpowiedź wolniejsza niż limit czasu z uzgadniania (30 s w produkcji) nie zrywa łącza roboczego.
+    #[test]
+    fn a_slow_reply_does_not_break_the_working_link() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let srv = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut fr = FrameReader::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = match s.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                fr.push(&buf[..n]);
+                while let Some(f) = fr.next_frame().unwrap() {
+                    let resp = match Request::decode(&f.payload).unwrap() {
+                        Request::Hello { .. } => Response::HelloOk { version: gpu_proto::msg::PROTOCOL_VERSION },
+                        Request::MemRead { .. } => {
+                            std::thread::sleep(std::time::Duration::from_millis(700));
+                            Response::Data(vec![5])
+                        }
+                        _ => continue,
+                    };
+                    s.write_all(&Frame::new(0, flags::CRC, f.header.seq, 0, resp.encode()).unwrap().encode()).unwrap();
+                }
+            }
+        });
+        let mut client = Client::connect(addr, b"t").unwrap();
+        client.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+        let mut link = Link::from_client(client).unwrap();
+        assert_eq!(link.call(&Request::MemRead { memory: 1, offset: 0, len: 1 }).unwrap(), Response::Data(vec![5]), "odpowiedź po 700 ms mimo limitu 200 ms z uzgadniania");
         drop(link);
         srv.join().unwrap();
     }

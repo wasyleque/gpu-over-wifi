@@ -10,13 +10,14 @@ use crate::conn::{serve_connection, ServeError};
 use crate::handler::Session;
 use crate::vk::backend::VulkanBackend;
 
-/// Bezczynność na gnieździe, po której połączenie jest zamykane (ochrona przed zawieszonymi klientami).
+/// Bezczynność na gnieździe, po której zamykane jest połączenie, które się NIE uwierzytelniło (uwierzytelnione trwa do końca, patrz `conn.rs`).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Obsługuje jedno już zaakceptowane połączenie aż do jego końca.
 pub fn handle_stream(mut stream: TcpStream, token: Vec<u8>) -> Result<(), ServeError> {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
+    crate::client::enable_keepalive(&stream);
     let backend = VulkanBackend::new().map_err(|_| ServeError::Io(ErrorKind::Other))?;
     let mut session = Session::new(backend, token);
     let mut reader = stream.try_clone().map_err(|e| ServeError::Io(e.kind()))?;

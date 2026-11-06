@@ -30,6 +30,23 @@ pub struct Client {
     seq: u16,
 }
 
+
+extern "C" {
+    fn setsockopt(fd: i32, level: i32, name: i32, value: *const std::ffi::c_void, len: u32) -> i32;
+}
+
+/// Keepalive TCP: martwy klient (zabita gra, zerwany kabel) jest wykrywany po ok. 60 s, a bezczynny, ale żywy zostaje.
+pub fn enable_keepalive(stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    // SOL_SOCKET=1/SO_KEEPALIVE=9, IPPROTO_TCP=6/TCP_KEEPIDLE=4, TCP_KEEPINTVL=5, TCP_KEEPCNT=6 (Linux).
+    for (level, name, value) in [(1, 9, 1i32), (6, 4, 30), (6, 5, 10), (6, 6, 3)] {
+        // SAFETY: `value` żyje przez czas wywołania, długość to rozmiar `i32`, a `fd` należy do żywego gniazda.
+        unsafe { setsockopt(fd, level, name, &value as *const i32 as *const std::ffi::c_void, 4) };
+    }
+}
+
+
 impl Client {
     /// Łączy się i wykonuje `Hello` z tokenem.
     pub fn connect<A: ToSocketAddrs>(addr: A, token: &[u8]) -> Result<Client, ClientError> {

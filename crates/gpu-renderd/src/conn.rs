@@ -121,6 +121,12 @@ pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
                     // Interrupted, try again
                     continue;
                 }
+                // Limit czasu odczytu (`server::IDLE_TIMEOUT`) chroni przed klientami, którzy się nie uwierzytelnili. Uwierzytelniony klient bez żądań
+                // jest po prostu bezczynny (gra liczy coś na procesorze przez kilka minut, np. wczytuje świat): zamknięcie połączenia zawiesiłoby grę,
+                // która potem czeka w nieskończoność na kartę (Cyberpunk po 120 s ciszy). Martwego klienta wykrywa keepalive TCP (`server::enable_keepalive`).
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && session.is_authenticated() => {
+                    continue;
+                }
                 Err(e) => {
                     return Err(ServeError::Io(e.kind()));
                 }
@@ -405,6 +411,56 @@ mod tests {
         assert_eq!(l.iter().filter(|e| e.starts_with("prefetch ")).count(), 1, "tylko jedna grupa: {l:?}");
         assert!(pos("prefetch [11, 12, 13]") < pos("delta 11") && pos("delta 11") < pos("ranges 12") && pos("ranges 12") < pos("delta 13"));
         assert!(pos("delta 13") < pos("prefetch_end") && pos("prefetch_end") < pos("delta 14"), "koniec grupy przed następnym żądaniem: {l:?}");
+    }
+
+    /// Czytnik, który najpierw kończy się limitem czasu (jak gniazdo po `IDLE_TIMEOUT`), a potem oddaje dane.
+    struct TimeoutThen {
+        left: Vec<u8>,
+        timeouts: usize,
+    }
+    impl std::io::Read for TimeoutThen {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.timeouts > 0 {
+                self.timeouts -= 1;
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let n = self.left.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.left[..n]);
+            self.left.drain(..n);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn an_authenticated_connection_survives_read_timeouts_but_an_unauthenticated_one_is_closed() {
+        let (mut s, _) = session();
+        let hello_frame = req_frame(1, 0, &hello());
+        // Uwierzytelniony: po Hello trzy limity czasu z rzędu nie zamykają połączenia, potem przychodzi kolejne żądanie.
+        let mut input = TimeoutThen { left: hello_frame.clone(), timeouts: 0 };
+        let mut out = Vec::new();
+        // Najpierw Hello (bez limitów), potem limity i żądanie: składamy to w dwóch krokach tym samym czytnikiem.
+        struct Phased(TimeoutThen, Vec<u8>, bool);
+        impl std::io::Read for Phased {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.read(buf)?;
+                if n == 0 && !self.2 {
+                    self.2 = true;
+                    self.0.timeouts = 3;
+                    self.0.left = std::mem::take(&mut self.1);
+                    return Err(std::io::ErrorKind::WouldBlock.into());
+                }
+                Ok(n)
+            }
+        }
+        let after = req_frame(2, 0, &Request::EnumInstanceVersion);
+        let mut rd = Phased(std::mem::replace(&mut input, TimeoutThen { left: Vec::new(), timeouts: 0 }), after, false);
+        assert_eq!(serve_connection(&mut s, &mut rd, &mut out), Ok(()), "uwierzytelniony klient po limitach czasu nadal jest obsługiwany");
+        let r = parse_responses(&out);
+        assert_eq!(r.iter().map(|(f, _)| f.header.seq).collect::<Vec<_>>(), vec![1, 2]);
+        // Nieuwierzytelniony: pierwszy limit czasu kończy połączenie błędem.
+        let (mut s2, _) = session();
+        let mut rd2 = TimeoutThen { left: Vec::new(), timeouts: 1 };
+        assert!(serve_connection(&mut s2, &mut rd2, &mut Vec::new()).is_err());
     }
 
     /// Zapisy do gniazda liczone osobno, żeby sprawdzić, że odpowiedzi na grupę żądań idą razem.
