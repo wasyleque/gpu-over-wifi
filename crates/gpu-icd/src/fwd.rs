@@ -253,6 +253,11 @@ fn plan_runs(chunk: &[u8], base: usize, prev: &mut [u8], prev_ok: &mut [bool]) -
     (runs, raw)
 }
 
+fn runs_verify() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_RUNS_VERIFY").is_some())
+}
+
 fn runs_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // Opt-in (`GPU_ICD_RUNS=1`) do czasu poprawki: pierwsza wersja pomijała linie zerowe nigdy niewysłanej strony, więc serwer zostawał z jej starą treścią.
@@ -473,13 +478,42 @@ impl InstState {
                 let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
                 acct.0 += 1;
                 acct.1 += raw.len() as u64;
+                let verify_runs = if runs_verify() { Some(runs.clone()) } else { None };
                 if self.client.send_mem_runs(memory, runs, pages, raw).is_err() {
                     self.lose();
+                }
+                if let Some(sent) = verify_runs {
+                    self.verify_runs(memory, base, chunk, &sent);
                 }
             }
             chunk_start = chunk_end;
         }
         true
+    }
+
+    /// Diagnostyka (`GPU_ICD_RUNS_VERIFY=1`): po wysłaniu fragmentów czyta ten sam zakres z serwera i porównuje z tym, co klient miał w chwili wysyłki.
+    /// Rozróżnia różnice w fragmentach wysłanych (uszkodzony transfer) i w pominiętych (serwer ma starą treść niezmienionych linii).
+    fn verify_runs(&mut self, memory: u64, base: usize, chunk: &[u8], sent: &[(u64, u32)]) {
+        static REPORTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let Ok(Response::Data(server)) = self.client.call(&Request::MemRead { memory, offset: base as u64, len: chunk.len() as u32 }) else { return };
+        if server.len() != chunk.len() || server == chunk {
+            return;
+        }
+        let in_sent = |off: usize| sent.iter().any(|&(o, l)| (o as usize) <= base + off && base + off < o as usize + l as usize);
+        let (mut diff_sent, mut diff_skipped, mut first) = (0usize, 0usize, None);
+        for (i, (a, b)) in chunk.iter().zip(&server).enumerate() {
+            if a != b {
+                first.get_or_insert(i);
+                if in_sent(i) {
+                    diff_sent += 1;
+                } else {
+                    diff_skipped += 1;
+                }
+            }
+        }
+        if REPORTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+            eprintln!("gpu-icd: RUNS ROZJAZD pamięć {memory:#x} zakres {base:#x}+{:#x}: różnych bajtów we wysłanych fragmentach {diff_sent}, w pominiętych liniach {diff_skipped}, pierwszy przy +{:#x} (fragmentów wysłano {})", chunk.len(), first.unwrap_or(0), sent.len());
+        }
     }
 
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
