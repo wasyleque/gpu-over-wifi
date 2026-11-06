@@ -12,6 +12,8 @@ pub const BASE_INSTANCE_EXTENSIONS: &[(&str, u32)] = &[
     ("VK_KHR_external_memory_capabilities", 1),
     ("VK_KHR_external_semaphore_capabilities", 1),
     ("VK_KHR_external_fence_capabilities", 1),
+    // Odpowiednik rdzenia 1.1: `vkEnumeratePhysicalDeviceGroups[KHR]` odpowiadamy lokalnie (jedna grupa na kartę). Wymaga go np. próbka `buffer_device_address`.
+    ("VK_KHR_device_group_creation", 1),
 ];
 
 pub const SURFACE_EXTENSIONS: &[(&str, u32)] = &[
