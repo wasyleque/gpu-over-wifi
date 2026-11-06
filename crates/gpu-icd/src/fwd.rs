@@ -478,12 +478,13 @@ impl InstState {
                 let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
                 acct.0 += 1;
                 acct.1 += raw.len() as u64;
-                let verify_runs = if runs_verify() { Some(runs.clone()) } else { None };
+                // Porównujemy z KOPIĄ `prev` po planie (to, co klient uważa, że serwer ma), a nie z żywą pamięcią aplikacji: ta zmienia się podczas wysyłki.
+                let verify_runs = if runs_verify() { Some((runs.clone(), prev[base..base + chunk.len()].to_vec())) } else { None };
                 if self.client.send_mem_runs(memory, runs, pages, raw).is_err() {
                     self.lose();
                 }
-                if let Some(sent) = verify_runs {
-                    self.verify_runs(memory, base, chunk, &sent);
+                if let Some((sent, believed)) = verify_runs {
+                    self.verify_runs(memory, base, &believed, &sent);
                 }
             }
             chunk_start = chunk_end;
@@ -494,6 +495,7 @@ impl InstState {
     /// Diagnostyka (`GPU_ICD_RUNS_VERIFY=1`): po wysłaniu fragmentów czyta ten sam zakres z serwera i porównuje z tym, co klient miał w chwili wysyłki.
     /// Rozróżnia różnice w fragmentach wysłanych (uszkodzony transfer) i w pominiętych (serwer ma starą treść niezmienionych linii).
     fn verify_runs(&mut self, memory: u64, base: usize, chunk: &[u8], sent: &[(u64, u32)]) {
+        // `chunk`: kopia tego, co klient uważa, że serwer ma po zapisie (`prev` po planie).
         static REPORTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let Ok(Response::Data(server)) = self.client.call(&Request::MemRead { memory, offset: base as u64, len: chunk.len() as u32 }) else { return };
         if server.len() != chunk.len() || server == chunk {
