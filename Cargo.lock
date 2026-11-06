@@ -445,11 +445,11 @@ dependencies = [
 
 [[package]]
 name = "gpu-h264"
-version = "0.3.6"
+version = "0.3.7"
 
 [[package]]
 name = "gpu-icd"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "gpu-proto",
  "gpu-renderd",
@@ -460,14 +460,14 @@ dependencies = [
 
 [[package]]
 name = "gpu-nvenc"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "gpu-h264",
 ]
 
 [[package]]
 name = "gpu-proto"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "gpu-wire",
  "lz4_flex",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "gpu-renderd"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "gpu-nvenc",
  "gpu-proto",
@@ -486,14 +486,14 @@ dependencies = [
 
 [[package]]
 name = "gpu-vaapi"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "gpu-h264",
 ]
 
 [[package]]
 name = "gpu-vkcodec"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "gpu-proto",
  "gpu-wire",
@@ -501,14 +501,14 @@ dependencies = [
 
 [[package]]
 name = "gpu-vkgen"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "roxmltree",
 ]
 
 [[package]]
 name = "gpu-wire"
-version = "0.3.6"
+version = "0.3.7"
 
 [[package]]
 name = "hashbrown"
@@ -580,7 +580,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hub-client"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "hub-proto",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "hub-proto"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "hub-server"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "async-trait",
  "axum",
