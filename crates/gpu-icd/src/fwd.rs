@@ -698,7 +698,8 @@ unsafe fn query_cache_lockfree(op: u16, cmd: &gpu_proto::meta::CommandMeta, inst
 }
 
 fn query_cacheable(name: &str) -> bool {
-    matches!(name, "vkGetPhysicalDeviceImageFormatProperties2" | "vkGetPhysicalDeviceImageFormatProperties2KHR")
+    // Czyste funkcje żądania: możliwości karty i rozmiary/offsety układów deskryptorów (identyfikator układu jest unikalny w instancji).
+    matches!(name, "vkGetPhysicalDeviceImageFormatProperties2" | "vkGetPhysicalDeviceImageFormatProperties2KHR" | "vkGetDescriptorSetLayoutBindingOffsetEXT" | "vkGetDescriptorSetLayoutSizeEXT")
 }
 
 /// Kopiuje zapamiętany deskryptor pod `out`, jeśli jest w cache i ma dokładnie `size` bajtów.
@@ -836,11 +837,16 @@ fn fast_table() -> &'static [bool] {
         COMMANDS
             .iter()
             .map(|c| {
-                c.class == CmdClass::FireAndForget
-                    && c.name.starts_with("vkCmd")
-                    // Wykonanie buforów wtórnych zależy od ich zawartości na serwerze: zawsze zwykłą ścieżką (przegląd agy).
-                    && c.name != "vkCmdExecuteCommands"
-                    && c.ret == Ret::Void
+                // `vkBeginCommandBuffer`/`vkResetCommandBuffer` (20 tys. wejść w blokadę i 5 s czekania na nią w benchmarku Rise of the Tomb Raider)
+                // trafiają do bufora poleceń tak samo jak `vkCmd*`: zwracają sukces od razu (błąd serwera wraca asynchronicznie jak dotąd), a stare
+                // zaległości tego bufora wyrzuca `fast_record`.
+                let lifecycle = matches!(c.name, "vkBeginCommandBuffer" | "vkResetCommandBuffer") && std::env::var_os("GPU_ICD_NO_FAST_LIFECYCLE").is_none();
+                (lifecycle
+                    || (c.class == CmdClass::FireAndForget
+                        && c.name.starts_with("vkCmd")
+                        // Wykonanie buforów wtórnych zależy od ich zawartości na serwerze: zawsze zwykłą ścieżką (przegląd agy).
+                        && c.name != "vkCmdExecuteCommands"
+                        && c.ret == Ret::Void))
                     && c.params().first().is_some_and(|p| p.type_name == "VkCommandBuffer" && p.elem == Elem::Handle)
                     && !c.params().iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1)
             })
@@ -889,6 +895,10 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
     let cb = slots[0] as *const DispObj;
     if cb.is_null() {
         return false;
+    }
+    // Nowe nagrywanie albo reset: zaległości z przerwanego nagrywania (np. po `vkResetCommandPool`) są śmieciami i nie mogą wyprzedzić `Begin`.
+    if matches!(cmd.name, "vkBeginCommandBuffer" | "vkResetCommandBuffer") {
+        drop((*cb).take());
     }
     // SAFETY: uchwyt bufora poleceń to wskaźnik na obiekt ICD żyjący do `vkFreeCommandBuffers`/zniszczenia puli.
     if (*cb).push(&bytes) {
@@ -2191,13 +2201,13 @@ mod memreq_target_tests {
             assert!(t[idx(yes)], "{yes} powinno iść szybką ścieżką");
         }
         // Wszystko, co zwraca wynik, ma obsługę w `exec` albo potrzebuje kolejności względem blokady: zwykła ścieżka.
-        for no in ["vkEndCommandBuffer", "vkBeginCommandBuffer", "vkQueueSubmit", "vkQueueSubmit2", "vkCreateBuffer", "vkGetDescriptorEXT", "vkAllocateMemory", "vkWaitForFences", "vkResetCommandPool", "vkUpdateDescriptorSets"] {
+        for no in ["vkEndCommandBuffer", "vkQueueSubmit", "vkQueueSubmit2", "vkCreateBuffer", "vkGetDescriptorEXT", "vkAllocateMemory", "vkWaitForFences", "vkResetCommandPool", "vkUpdateDescriptorSets"] {
             assert!(!t[idx(no)], "{no} nie może iść szybką ścieżką");
         }
         // Żadne polecenie szybkiej ścieżki nie ma specjalnej obsługi po nazwie w `exec` (te zaczynają się od innych przedrostków).
         for (op, c) in COMMANDS.iter().enumerate() {
             if t[op] {
-                assert!(c.name.starts_with("vkCmd"), "{}", c.name);
+                assert!(c.name.starts_with("vkCmd") || matches!(c.name, "vkBeginCommandBuffer" | "vkResetCommandBuffer"), "{}", c.name);
             }
         }
     }
@@ -2279,6 +2289,17 @@ mod memreq_target_tests {
         two.extend(mk(3));
         let out = sanitize_descriptor_writes(&two);
         assert_eq!((ptrs(&out[..64]), ptrs(&out[64..])), ([false, true, false], [true, false, false]));
+    }
+
+    #[test]
+    fn begin_and_reset_command_buffer_use_the_lock_free_path_and_other_lifecycle_commands_do_not() {
+        let t = fast_table();
+        let on = |n: &str| t[COMMANDS.iter().position(|c| c.name == n).unwrap()];
+        assert!(on("vkBeginCommandBuffer") && on("vkResetCommandBuffer") && on("vkCmdDraw"));
+        // Koniec nagrywania opróżnia bufor do wspólnej partii pod blokadą (kolejność w strumieniu), a wykonanie buforów wtórnych zależy od serwera.
+        for n in ["vkEndCommandBuffer", "vkCmdExecuteCommands", "vkQueueSubmit", "vkAllocateCommandBuffers", "vkResetCommandPool"] {
+            assert!(!on(n), "{n}");
+        }
     }
 
 }
