@@ -296,6 +296,9 @@ impl TexelSynth {
     pub fn observe(&mut self, address: u64, range: u64, format: u32, actual: &[u8]) -> Event {
         let Some(i) = texel_slot(format) else { return Event::None };
         let Some(expected) = texel_encode(address, range, format) else { return Event::None };
+        if actual.len() != expected.len() {
+            return Event::None; // rozmiar spoza specyfikacji (musi być równy rozmiarowi deskryptora): nie uczymy się na takiej odpowiedzi
+        }
         let ok = expected[..] == *actual;
         match self.mode[i] {
             Mode::Disabled => Event::None,
