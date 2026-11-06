@@ -179,6 +179,154 @@ pub unsafe fn input_of(info: *const u8) -> Option<(u32, u64, u64)> {
     Some((ty, std::ptr::read_unaligned(p.add(16) as *const u64), std::ptr::read_unaligned(p.add(24) as *const u64)))
 }
 
+// ---------- bufory teksela (UNIFORM_TEXEL_BUFFER = 4, STORAGE_TEXEL_BUFFER = 5) ----------
+//
+// Sonda `descriptor_probe` (1008 próbek: 18 formatów x 7 zakresów x 4 adresy, RTX 3090 Ti, sterownik 580; surowe dane w
+// `docs/measurements/descriptor-probes/`) pokazała, że 16-bajtowy deskryptor to dla 17 z 18 formatów: `adres >> k` (u64), liczba elementów
+// `zakres / 2^k` (u32, w dół) i stała zależna tylko od formatu (u32); typy 4 i 5 dają te same bajty. Format R32G32B32 (12-bajtowy teksel, 106) nie
+// ma takiej postaci (dzielenie przez 12 i zależność od wyrównania), więc zostaje na zapytaniach do serwera. Jak przy buforach, wzór NIE jest
+// przyjmowany na wiarę: włącza się po `LEARN_NEEDED` zgodnych odpowiedziach serwera dla danego formatu, jest audytowany, a niezgodność wyłącza format na stałe.
+
+pub const UNIFORM_TEXEL_BUFFER: u32 = 4;
+pub const STORAGE_TEXEL_BUFFER: u32 = 5;
+
+/// `(VkFormat, k, stała)`: przesunięcie adresu i słowo trzecie deskryptora (zmierzone sondą).
+const TEXEL_FORMATS: [(u32, u32, u32); 17] = [
+    (9, 0, 653),
+    (13, 0, 3858),
+    (37, 2, 4566),
+    (43, 2, 2582),
+    (44, 2, 1039),
+    (50, 2, 2517),
+    (64, 2, 4631),
+    (70, 1, 1169),
+    (74, 1, 3729),
+    (76, 1, 2323),
+    (81, 2, 3243),
+    (83, 2, 2258),
+    (97, 3, 2225),
+    (100, 2, 2160),
+    (103, 3, 2127),
+    (109, 4, 2041),
+    (122, 2, 2712),
+];
+
+static TEXEL_READY: [AtomicBool; 17] = [const { AtomicBool::new(false) }; 17];
+static TEXEL_CALLS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
+
+fn texel_slot(format: u32) -> Option<usize> {
+    TEXEL_FORMATS.iter().position(|f| f.0 == format)
+}
+
+/// Bajty deskryptora teksela według wzoru; `None` dla formatów spoza tabeli i dla wejść zerowych (te zostają na serwerze).
+pub fn texel_encode(address: u64, range: u64, format: u32) -> Option<[u8; 16]> {
+    let (_, k, constant) = TEXEL_FORMATS[texel_slot(format)?];
+    if address == 0 || range == 0 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&(address >> k).to_le_bytes());
+    out[8..12].copy_from_slice(&((range >> k) as u32).to_le_bytes());
+    out[12..16].copy_from_slice(&constant.to_le_bytes());
+    Some(out)
+}
+
+/// Wejście `vkGetDescriptorEXT` dla bufora teksela: `(adres, zakres, format)` z `VkDescriptorAddressInfoEXT` (adres @16, zakres @24, format @32).
+///
+/// # Safety
+/// Jak `input_of`.
+pub unsafe fn texel_input_of(info: *const u8) -> Option<(u64, u64, u32)> {
+    if info.is_null() {
+        return None;
+    }
+    let ty = std::ptr::read_unaligned(info.add(16) as *const u32);
+    if ty != UNIFORM_TEXEL_BUFFER && ty != STORAGE_TEXEL_BUFFER {
+        return None;
+    }
+    let p = std::ptr::read_unaligned(info.add(24) as *const *const u8);
+    if p.is_null() {
+        return None;
+    }
+    Some((std::ptr::read_unaligned(p.add(16) as *const u64), std::ptr::read_unaligned(p.add(24) as *const u64), std::ptr::read_unaligned(p.add(32) as *const u32)))
+}
+
+/// Stan uczenia formatów tekseli (po jednym na format z tabeli; wspólny dla typów 4 i 5).
+pub struct TexelSynth {
+    mode: [Mode; 17],
+}
+
+impl Default for TexelSynth {
+    fn default() -> TexelSynth {
+        TexelSynth { mode: [Mode::Learning(0); 17] }
+    }
+}
+
+impl TexelSynth {
+    /// Deskryptor policzony lokalnie, jeśli wzór dla formatu jest sprawdzony i to nie kolej na kontrolę; inaczej `None` (pytamy serwer).
+    pub fn try_local(&mut self, size: usize, address: u64, range: u64, format: u32) -> Option<[u8; 16]> {
+        let i = texel_slot(format)?;
+        if size != 16 {
+            return None;
+        }
+        match &mut self.mode[i] {
+            Mode::Verified(calls) => {
+                *calls += 1;
+                if *calls % AUDIT_EVERY == 0 {
+                    return None;
+                }
+                texel_encode(address, range, format)
+            }
+            _ => None,
+        }
+    }
+
+    /// Jak `try_local`, ale bez blokady i bez `&mut self` (statyczne flagi gotowości).
+    pub fn try_lockfree(size: usize, address: u64, range: u64, format: u32) -> Option<[u8; 16]> {
+        let i = texel_slot(format)?;
+        if size != 16 || !TEXEL_READY[i].load(Ordering::Acquire) {
+            return None;
+        }
+        if TEXEL_CALLS[i].fetch_add(1, Ordering::Relaxed) % AUDIT_EVERY == AUDIT_EVERY - 1 {
+            return None;
+        }
+        texel_encode(address, range, format)
+    }
+
+    /// Porównuje prawdziwą odpowiedź serwera ze wzorem (uczenie i kontrola).
+    pub fn observe(&mut self, address: u64, range: u64, format: u32, actual: &[u8]) -> Event {
+        let Some(i) = texel_slot(format) else { return Event::None };
+        let Some(expected) = texel_encode(address, range, format) else { return Event::None };
+        let ok = expected[..] == *actual;
+        match self.mode[i] {
+            Mode::Disabled => Event::None,
+            Mode::Learning(n) => {
+                if !ok {
+                    self.mode[i] = Mode::Disabled;
+                    TEXEL_READY[i].store(false, Ordering::Release);
+                    return Event::Disabled;
+                }
+                if n + 1 >= LEARN_NEEDED {
+                    self.mode[i] = Mode::Verified(0);
+                    TEXEL_READY[i].store(true, Ordering::Release);
+                    Event::Verified
+                } else {
+                    self.mode[i] = Mode::Learning(n + 1);
+                    Event::None
+                }
+            }
+            Mode::Verified(_) => {
+                if ok {
+                    Event::None
+                } else {
+                    self.mode[i] = Mode::Disabled;
+                    TEXEL_READY[i].store(false, Ordering::Release);
+                    Event::Disabled
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +468,62 @@ mod tests {
         // Niezgodność wyłącza także ścieżkę bez blokady.
         assert_eq!(s.observe(STORAGE_BUFFER, 0x9000, 64, &[1; 16]), Event::Disabled);
         assert!(Synth::try_lockfree(STORAGE_BUFFER, 16, 0x9000, 64).is_none());
+    }
+
+    /// Wszystkie próbki z sondy (1008 wierszy): formaty z tabeli są odtwarzane co do bajtu, a R32G32B32 (106) nie jest liczony lokalnie.
+    #[test]
+    fn texel_formulas_reproduce_every_probe_sample_of_the_declared_formats() {
+        let probe = include_str!("../../../docs/measurements/descriptor-probes/texel-buffer-rtx3090ti-580.txt");
+        let (mut checked, mut skipped) = (0, 0);
+        for line in probe.lines().filter(|l| l.starts_with("TEXEL ")) {
+            let p: Vec<&str> = line.split_whitespace().collect();
+            let a = u64::from_str_radix(p[2].trim_start_matches("0x"), 16).unwrap();
+            let r = u64::from_str_radix(p[3].trim_start_matches("0x"), 16).unwrap();
+            let f: u32 = p[4].parse().unwrap();
+            match texel_encode(a, r, f) {
+                Some(got) => {
+                    assert_eq!(got.to_vec(), hex(p[5]), "typ {} adres {a:#x} zakres {r:#x} format {f}", p[1]);
+                    checked += 1;
+                }
+                None => {
+                    assert_eq!(f, 106, "tylko format 106 zostaje na serwerze");
+                    skipped += 1;
+                }
+            }
+        }
+        assert_eq!((checked, skipped), (952, 56), "17 formatów x 56 próbek i 56 próbek formatu 106");
+    }
+
+    #[test]
+    fn texel_synthesis_learns_per_format_audits_and_disables_on_a_mismatch() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = TexelSynth::default();
+        assert!(s.try_local(16, 0x1000, 256, 37).is_none(), "na początku pytamy serwer");
+        for i in 0..LEARN_NEEDED as u64 {
+            let a = 0x1000 + i * 16;
+            let ev = s.observe(a, 256, 37, &texel_encode(a, 256, 37).unwrap());
+            assert_eq!(ev, if i + 1 == LEARN_NEEDED as u64 { Event::Verified } else { Event::None });
+        }
+        assert_eq!(s.try_local(16, 0x2000, 64, 37), texel_encode(0x2000, 64, 37));
+        assert!(s.try_local(16, 0x2000, 64, 109).is_none(), "inny format uczy się osobno");
+        assert!(s.try_local(8, 0x2000, 64, 37).is_none(), "zły rozmiar deskryptora");
+        assert!(texel_encode(0x2000, 64, 106).is_none() && texel_encode(0, 64, 37).is_none());
+        assert_eq!(s.observe(0x2000, 64, 37, &[1; 16]), Event::Disabled);
+        assert!(s.try_local(16, 0x2000, 64, 37).is_none(), "wyłączenie jest trwałe");
+    }
+
+    #[test]
+    fn texel_input_is_read_from_the_descriptor_get_info_layout() {
+        let mut addr = [0u8; 40];
+        addr[16..24].copy_from_slice(&0x7000u64.to_le_bytes());
+        addr[24..32].copy_from_slice(&512u64.to_le_bytes());
+        addr[32..36].copy_from_slice(&109u32.to_le_bytes());
+        let mut info = [0u8; 32];
+        info[16..20].copy_from_slice(&UNIFORM_TEXEL_BUFFER.to_le_bytes());
+        info[24..32].copy_from_slice(&(addr.as_ptr() as u64).to_le_bytes());
+        assert_eq!(unsafe { texel_input_of(info.as_ptr()) }, Some((0x7000, 512, 109)));
+        info[16..20].copy_from_slice(&UNIFORM_BUFFER.to_le_bytes());
+        assert_eq!(unsafe { texel_input_of(info.as_ptr()) }, None);
     }
 
 }

@@ -100,6 +100,8 @@ struct InstState {
     gpuw: gpuwrite::GpuWrites,
     /// Lokalne wyliczanie deskryptorów buforów (uczy się i weryfikuje na odpowiedziach serwera; patrz `descsynth`).
     synth: descsynth::Synth,
+    /// Deskryptory buforów tekseli liczone lokalnie per format (patrz `descsynth`).
+    texel: descsynth::TexelSynth,
     /// Pamięci, dla których plan odświeżania został już zapisany w logu (jednorazowo, przy `GPU_ICD_STATS=periodic`).
     plans_logged: std::collections::HashSet<u64>,
     /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
@@ -356,6 +358,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             mem_cached: HashMap::new(),
             gpuw: Default::default(),
             synth: Default::default(),
+            texel: Default::default(),
             plans_logged: Default::default(),
             gpu_dirty: false,
             scan_pending: false,

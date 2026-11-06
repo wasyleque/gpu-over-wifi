@@ -742,6 +742,13 @@ unsafe fn descriptor_lockfree(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints:
             return true;
         }
     }
+    if let Some((address, range, format)) = crate::descsynth::texel_input_of(info as *const u8) {
+        if let Some(d) = crate::descsynth::TexelSynth::try_lockfree(size as usize, address, range, format) {
+            std::ptr::copy_nonoverlapping(d.as_ptr(), out as *mut u8, d.len());
+            DESC_LOCKFREE_SYNTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+    }
     let params = cmd.params();
     let mut slots = [0u64; 8];
     if params.len() > slots.len() {
@@ -1491,6 +1498,13 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
                 return Step::Done(0);
             }
         }
+        if let Some((address, range, format)) = crate::descsynth::texel_input_of(slots[1] as *const u8) {
+            if let Some(d) = st.texel.try_local(slots[2] as usize, address, range, format) {
+                std::ptr::copy_nonoverlapping(d.as_ptr(), slots[3] as *mut u8, d.len());
+                st.stats.desc_synth += 1;
+                return Step::Done(0);
+            }
+        }
     }
     // Aktualizacja deskryptorów szablonem: dane zawierają uchwyty, więc rozwijamy ją do zwykłego vkUpdateDescriptorSets.
     if cmd.name == "vkUpdateDescriptorSetWithTemplate" {
@@ -1849,6 +1863,14 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
                 match st.synth.observe(ty, address, range, actual) {
                     crate::descsynth::Event::Verified => eprintln!("gpu-icd: deskryptory buforów typu {ty} liczone lokalnie (wzór potwierdzony {} odpowiedziami serwera)", crate::descsynth::LEARN_NEEDED),
                     crate::descsynth::Event::Disabled => eprintln!("gpu-icd: wzór deskryptora typu {ty} NIE zgadza się z serwerem (adres {address:#x}, zakres {range:#x}); liczenie lokalne wyłączone"),
+                    crate::descsynth::Event::None => {}
+                }
+            }
+            if let Some((address, range, format)) = crate::descsynth::texel_input_of(slots[1] as *const u8) {
+                let actual = std::slice::from_raw_parts(slots[3] as *const u8, slots[2] as usize);
+                match st.texel.observe(address, range, format, actual) {
+                    crate::descsynth::Event::Verified => eprintln!("gpu-icd: deskryptory tekseli formatu {format} liczone lokalnie (wzór potwierdzony {} odpowiedziami serwera)", crate::descsynth::LEARN_NEEDED),
+                    crate::descsynth::Event::Disabled => eprintln!("gpu-icd: wzór deskryptora teksela formatu {format} NIE zgadza się z serwerem (adres {address:#x}, zakres {range:#x}); liczenie lokalne wyłączone"),
                     crate::descsynth::Event::None => {}
                 }
             }
