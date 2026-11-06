@@ -775,6 +775,10 @@ static LOCK_HOLD_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// Liczba poleceń obsłużonych szybką ścieżką (bez blokady instancji).
 static FAST_COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+static REFRESH_APPLY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REFRESH_DRAIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REFRESH_DRAINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Trzymanie i czekanie na blokadę instancji wg polecenia (indeks = kod polecenia): pokazuje, kto naprawdę zajmuje blokadę.
 static HOLD_NS: [std::sync::atomic::AtomicU64; 1024] = [const { std::sync::atomic::AtomicU64::new(0) }; 1024];
 static HOLD_N: [std::sync::atomic::AtomicU64; 1024] = [const { std::sync::atomic::AtomicU64::new(0) }; 1024];
@@ -1119,6 +1123,10 @@ fn periodic_stats(stats: &Stats) {
         }
         eprintln!("[gpu-icd] {}", lock_report());
         eprintln!("[gpu-icd] blokada wg poleceń: {}", lock_top());
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!("[gpu-icd] wpisywanie odświeżeń: różnice {} ms, doczytywanie {} ms w {} obiegach", REFRESH_APPLY_NS.load(Relaxed) / 1_000_000, REFRESH_DRAIN_NS.load(Relaxed) / 1_000_000, REFRESH_DRAINS.load(Relaxed));
+        }
         if let Some(l) = crate::latency::report_and_reset() {
             eprintln!("[gpu-icd] {l}");
         }
@@ -1693,8 +1701,14 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
     let mut refreshed = false;
     for (i, (id, d)) in p.pre_ids.iter().zip(r.deltas).enumerate() {
         if let Some(d) = d {
-            if st.apply_delta(*id, &d, p.base + 2 + i as u64) {
+            let ta = std::time::Instant::now();
+            let more = st.apply_delta(*id, &d, p.base + 2 + i as u64);
+            REFRESH_APPLY_NS.fetch_add(ta.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            if more {
+                let td = std::time::Instant::now();
                 st.drain_delta(*id);
+                REFRESH_DRAIN_NS.fetch_add(td.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                REFRESH_DRAINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             refreshed = true;
         }
