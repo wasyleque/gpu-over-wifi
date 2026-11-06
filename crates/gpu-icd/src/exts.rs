@@ -134,11 +134,11 @@ mod tests {
                 println!("{ext}: brak w tabeli");
                 continue;
             };
-            println!("== {ext}: {} poleceń", cmds.len());
+            println!("== {ext}: {} poleceń, ogłaszalne: {}", cmds.len(), is_advertisable(ext));
             for c in cmds.iter() {
                 match find_command(resolve_alias(c)) {
                     None => println!("   {c}: BRAK W METADANYCH"),
-                    Some((_, m)) => println!("   {c}: {}", unencodable_reason(m).map_or("kodowalne".to_string(), |w| format!("NIEKODOWALNE: {w}"))),
+                    Some((_, m)) => println!("   {c}: {} (supported={}, lokalne={})", unencodable_reason(m).map_or("kodowalne".to_string(), |w| format!("NIEKODOWALNE: {w}")), m.supported, is_local_only_command(c)),
                 }
             }
         }

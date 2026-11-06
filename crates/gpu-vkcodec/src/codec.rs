@@ -185,7 +185,7 @@ unsafe fn enc_value(meta: &StructMeta, m: &MemberMeta, at: *const u8, enc: &mut 
         Elem::Scalar | Elem::Char | Elem::Union => {
             if m.elem == Elem::Union {
                 let u = meta_of(m.type_name)?;
-                if u.members().iter().any(|x| x.shape != Shape::Value) {
+                if u.members().iter().any(|x| x.shape != Shape::Value) && !RAW_ADDRESS_UNIONS.contains(&u.name) {
                     return Err(unsupported(meta, m, "unia ze wskaźnikiem"));
                 }
             }
@@ -218,6 +218,27 @@ unsafe fn cstr_bytes<'a>(p: *const u8) -> Result<&'a [u8], CodecError> {
         n += 1;
     }
     Err(CodecError::Limit("napis"))
+}
+
+/// Parametry-tablice wskaźników do tablic w budowie struktur przyspieszenia (ray tracing): `ppBuildRangeInfos[i]` i `ppMaxPrimitiveCounts[i]`
+/// mają `pInfos[i].geometryCount` elementów (zależność, której `len` z vk.xml nie wyraża).
+fn is_per_info_array(m: &MemberMeta) -> bool {
+    m.ptr_depth == 2 && matches!(m.name, "ppBuildRangeInfos" | "ppMaxPrimitiveCounts") && matches!(m.elem, Elem::Struct | Elem::Scalar)
+}
+
+/// `geometryCount` elementu `i` tablicy `pInfos` (`VkAccelerationStructureBuildGeometryInfoKHR`) tego samego polecenia.
+unsafe fn per_info_count(meta: &StructMeta, base: *const u8, infos: *const u8, i: usize) -> Result<u64, CodecError> {
+    if infos.is_null() {
+        return Err(CodecError::Unsupported("pInfos puste przy tablicy per-info".into()));
+    }
+    let gm = meta_of("VkAccelerationStructureBuildGeometryInfoKHR")?;
+    let gc = gm.members().iter().find(|x| x.name == "geometryCount").ok_or_else(|| CodecError::Unsupported("brak geometryCount".into()))?;
+    let _ = (meta, base);
+    let n = std::ptr::read_unaligned(infos.add(i * gm.size as usize + gc.offset as usize) as *const u32) as u64;
+    if n > MAX_ELEMS {
+        return Err(CodecError::Limit("geometryCount"));
+    }
+    Ok(n)
 }
 
 unsafe fn enc_ptr(meta: &StructMeta, m: &MemberMeta, base: *const u8, enc: &mut Encoder, ctx: &dyn Ctx, depth: usize) -> Result<(), CodecError> {
@@ -261,7 +282,7 @@ unsafe fn enc_ptr(meta: &StructMeta, m: &MemberMeta, base: *const u8, enc: &mut 
         (1, Elem::Union) => {
             // Unie (np. VkClearColorValue) przechodzą jako surowe bloki; nie mogą zawierać wskaźników.
             let um = meta_of(m.type_name)?;
-            if um.members().iter().any(|x| x.shape != Shape::Value) {
+            if um.members().iter().any(|x| x.shape != Shape::Value) && !RAW_ADDRESS_UNIONS.contains(&um.name) {
                 return Err(unsupported(meta, m, "unia ze wskaźnikiem"));
             }
             enc.put_varint(count);
@@ -277,6 +298,27 @@ unsafe fn enc_ptr(meta: &StructMeta, m: &MemberMeta, base: *const u8, enc: &mut 
                     return Err(unsupported(meta, m, "pusty napis w tablicy"));
                 }
                 enc.put_bytes(cstr_bytes(s)?);
+            }
+        }
+        (2, Elem::Struct | Elem::Scalar) if is_per_info_array(m) => {
+            let infos_m = meta.members().iter().find(|x| x.name == "pInfos").ok_or_else(|| unsupported(meta, m, "brak pInfos"))?;
+            let infos = std::ptr::read_unaligned(base.add(infos_m.offset as usize) as *const *const u8);
+            enc.put_varint(count);
+            for i in 0..count as usize {
+                let inner = per_info_count(meta, base, infos, i)?;
+                let row = std::ptr::read_unaligned(p.add(i * 8) as *const *const u8);
+                if row.is_null() && inner > 0 {
+                    return Err(unsupported(meta, m, "pusta tablica per-info"));
+                }
+                enc.put_varint(inner);
+                if m.elem == Elem::Struct {
+                    let sm = meta_of(m.type_name)?;
+                    for j in 0..inner as usize {
+                        enc_struct(sm, row.add(j * m.elem_size as usize), enc, ctx, depth + 1, false)?;
+                    }
+                } else {
+                    enc.put_bytes(std::slice::from_raw_parts(row, inner as usize * m.elem_size as usize));
+                }
             }
         }
         _ => return Err(unsupported(meta, m, "rodzaj wskaźnika")),
@@ -647,6 +689,39 @@ unsafe fn dec_ptr(meta: &StructMeta, m: &MemberMeta, dec: &mut Decoder, dst: *mu
                 std::ptr::copy_nonoverlapping(b.as_ptr(), p.add(i * size), size);
             }
             put_ptr(dst, m.offset, p);
+        }
+        (2, Elem::Struct | Elem::Scalar) if is_per_info_array(m) => {
+            let n = dec.get_varint()?;
+            check_count(meta, m, dst, n)?;
+            if n > dec.remaining() as u64 {
+                return Err(CodecError::Limit("liczba elementów ponad dane"));
+            }
+            let infos_m = meta.members().iter().find(|x| x.name == "pInfos").ok_or_else(|| unsupported(meta, m, "brak pInfos"))?;
+            let infos = std::ptr::read_unaligned(dst.add(infos_m.offset as usize) as *const *const u8);
+            let arr = arena.alloc(n as usize * 8)?;
+            for i in 0..n as usize {
+                let inner = dec.get_varint()?;
+                // Liczba elementów musi zgadzać się z `geometryCount` zdekodowanego `pInfos[i]` (serwer czytałby poza tablicą).
+                if inner != per_info_count(meta, dst, infos, i)? {
+                    return Err(CodecError::Limit("liczba elementów per-info"));
+                }
+                let size = m.elem_size as usize;
+                let row = arena.alloc(inner as usize * size)?;
+                if m.elem == Elem::Struct {
+                    let sm = meta_of(m.type_name)?;
+                    for k in 0..inner as usize {
+                        dec_struct(sm, dec, row.add(k * size), arena, ctx, depth + 1, false)?;
+                    }
+                } else {
+                    let b = dec.get_bytes()?;
+                    if b.len() != inner as usize * size {
+                        return Err(CodecError::Limit("rozmiar danych"));
+                    }
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), row, b.len());
+                }
+                std::ptr::write_unaligned(arr.add(i * 8) as *mut u64, row as u64);
+            }
+            put_ptr(dst, m.offset, arr);
         }
         (2, Elem::Char) if nt => {
             let n = dec.get_varint()?;

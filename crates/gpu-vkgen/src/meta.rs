@@ -277,7 +277,9 @@ pub fn compute_commands(xml: &str) -> Result<Vec<CommandRow>, String> {
             Some("void") => "Void",
             Some("VkResult") => "VkResult",
             // Adres na urządzeniu (VkDeviceAddress) i wartości 64-bitowe wracają w odpowiedzi na `Query`.
-            Some("VkDeviceAddress") | Some("uint64_t") => "U64",
+            // Także `VkDeviceSize` i `uint32_t` (np. `vkGetRayTracingShaderGroupStackSizeKHR`, `vkGetDeferredOperationMaxConcurrencyKHR`): wartość wraca jako u64,
+            // a wołający (ABI x86-64) czyta tylko młodsze bity.
+            Some("VkDeviceAddress") | Some("uint64_t") | Some("VkDeviceSize") | Some("uint32_t") => "U64",
             _ => "Other",
         };
         let mut params = Vec::new();
@@ -288,7 +290,10 @@ pub fn compute_commands(xml: &str) -> Result<Vec<CommandRow>, String> {
         let supported = params.iter().all(|p| match (p.shape, p.elem) {
             (_, "External") | (_, "FuncPtr") if p.shape == "Pointer" => false,
             ("Value", "Scalar") | ("Value", "Handle") => p.count == 1,
-            ("Pointer", "Scalar") | ("Pointer", "Char") | ("Pointer", "Void") | ("Pointer", "Handle") | ("Pointer", "Struct") | ("Pointer", "Union") => p.ptr_depth == 1 || (p.ptr_depth == 2 && p.elem == "Char"),
+            ("Pointer", "Scalar") | ("Pointer", "Char") | ("Pointer", "Void") | ("Pointer", "Handle") | ("Pointer", "Struct") | ("Pointer", "Union") => {
+                // `ppBuildRangeInfos` i `ppMaxPrimitiveCounts` (ray tracing): tablice wskaźników do tablic o długości `pInfos[i].geometryCount`, kodowane specjalnie.
+                p.ptr_depth == 1 || (p.ptr_depth == 2 && p.elem == "Char") || (p.ptr_depth == 2 && matches!(p.name.as_str(), "ppBuildRangeInfos" | "ppMaxPrimitiveCounts"))
+            }
             _ => false,
         }) && ret != "Other";
         let class = if ret == "U64" { "Query" } else { match classes.get(name) {
