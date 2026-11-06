@@ -753,7 +753,12 @@ static LOCK_HOLD_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// Liczba poleceń obsłużonych szybką ścieżką (bez blokady instancji).
 static FAST_COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-struct HoldTimer(std::time::Instant);
+/// Trzymanie i czekanie na blokadę instancji wg polecenia (indeks = kod polecenia): pokazuje, kto naprawdę zajmuje blokadę.
+static HOLD_NS: [std::sync::atomic::AtomicU64; 1024] = [const { std::sync::atomic::AtomicU64::new(0) }; 1024];
+static HOLD_N: [std::sync::atomic::AtomicU64; 1024] = [const { std::sync::atomic::AtomicU64::new(0) }; 1024];
+static WAIT_NS_BY_OP: [std::sync::atomic::AtomicU64; 1024] = [const { std::sync::atomic::AtomicU64::new(0) }; 1024];
+
+struct HoldTimer(std::time::Instant, u16);
 
 impl Drop for HoldTimer {
     fn drop(&mut self) {
@@ -761,7 +766,19 @@ impl Drop for HoldTimer {
         let ns = self.0.elapsed().as_nanos() as u64;
         LOCK_HOLD_NS.fetch_add(ns, Relaxed);
         LOCK_HOLD_MAX_NS.fetch_max(ns, Relaxed);
+        if let (Some(a), Some(n)) = (HOLD_NS.get(self.1 as usize), HOLD_N.get(self.1 as usize)) {
+            a.fetch_add(ns, Relaxed);
+            n.fetch_add(1, Relaxed);
+        }
     }
+}
+
+/// Ranking poleceń wg łącznego czasu trzymania i czekania na blokadę (top 6): `nazwa wejść ms trzymania / ms czekania`.
+pub fn lock_top() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut v: Vec<(usize, u64, u64, u64)> = (0..COMMANDS.len().min(1024)).map(|i| (i, HOLD_N[i].load(Relaxed), HOLD_NS[i].load(Relaxed), WAIT_NS_BY_OP[i].load(Relaxed))).filter(|x| x.1 > 0).collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.2 + x.3));
+    v.iter().take(8).map(|(i, n, h, w)| format!("{} {}x trzymanie {}ms czekanie {}ms", COMMANDS[*i].name.trim_start_matches("vk"), n, h / 1_000_000, w / 1_000_000)).collect::<Vec<_>>().join("; ")
 }
 
 /// Opis pomiaru blokady do statystyk.
@@ -906,9 +923,13 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let t_lock = std::time::Instant::now();
     let mut st = lock_state(inst);
     crate::watchdog::phase(crate::watchdog::HOLD_LOCK, 0);
-    LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    let waited = t_lock.elapsed().as_nanos() as u64;
+    LOCK_WAIT_NS.fetch_add(waited, std::sync::atomic::Ordering::Relaxed);
+    if let Some(a) = WAIT_NS_BY_OP.get(op as usize) {
+        a.fetch_add(waited, std::sync::atomic::Ordering::Relaxed);
+    }
     LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut hold = HoldTimer(std::time::Instant::now());
+    let mut hold = HoldTimer(std::time::Instant::now(), op);
     let fail = |e: i32| -> u64 { e as u32 as u64 };
     if st.device_lost && cmd.ret == Ret::VkResult {
         return fail(VK_ERROR_DEVICE_LOST);
@@ -977,7 +998,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
                 crate::watchdog::phase(crate::watchdog::HOLD_LOCK, p.base);
                 LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                hold = HoldTimer(std::time::Instant::now());
+                hold = HoldTimer(std::time::Instant::now(), op);
                 exec_finish(&mut st, p, resp)
             }
         };
@@ -994,7 +1015,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         drop(st);
         std::thread::sleep(std::time::Duration::from_micros(50));
         st = lock_state(inst);
-        hold = HoldTimer(std::time::Instant::now());
+        hold = HoldTimer(std::time::Instant::now(), op);
         slice_ns = (slice_ns * 2).min(4_000_000);
     };
     let _ = &hold;
@@ -1069,6 +1090,7 @@ fn periodic_stats(stats: &Stats) {
             eprintln!("[gpu-icd] odczyt leniwy: pamięci {}, unieważnienia {}, błędy stron {} (z pobraniem {}, {} KB), przekroczenia czasu {}", stats.lazy_memories, stats.lazy_invalidations, crate::lazymap::FAULTS.load(Relaxed), crate::lazymap::FAULTS_FETCHED.load(Relaxed), crate::lazymap::FETCHED_BYTES.load(Relaxed) / 1024, crate::lazymap::FETCH_TIMEOUTS.load(Relaxed));
         }
         eprintln!("[gpu-icd] {}", lock_report());
+        eprintln!("[gpu-icd] blokada wg poleceń: {}", lock_top());
         if let Some(l) = crate::latency::report_and_reset() {
             eprintln!("[gpu-icd] {l}");
         }
