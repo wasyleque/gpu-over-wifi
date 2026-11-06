@@ -233,7 +233,8 @@ fn diff_runs(chunk: &[u8], prev: &[u8]) -> Vec<(usize, usize)> {
 
 fn runs_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var_os("GPU_ICD_NO_RUNS").is_none())
+    // Opt-in (`GPU_ICD_RUNS=1`) do czasu poprawki: pierwsza wersja pomijała linie zerowe nigdy niewysłanej strony, więc serwer zostawał z jej starą treścią.
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_RUNS").is_some() && std::env::var_os("GPU_ICD_NO_RUNS").is_none())
 }
 
 /// Zapas puli (zestawy i deskryptory każdego typu), poniżej którego alokacje zestawów idą synchronicznie, oraz częstotliwość audytu.
