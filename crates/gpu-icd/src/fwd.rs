@@ -675,6 +675,28 @@ pub(crate) fn desc_cache_clear() {
 static QUERY_CACHE: std::sync::RwLock<Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>> = std::sync::RwLock::new(None);
 static QUERY_CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Trafienie w cache zapytania bez blokady instancji; `None` = brak w cache (zwykła ścieżka).
+///
+/// # Safety
+/// Argumenty muszą pochodzić z wywołania aplikacji zgodnego z sygnaturą polecenia.
+unsafe fn query_cache_lockfree(op: u16, cmd: &gpu_proto::meta::CommandMeta, inst: &InstanceObj, ints: &[u64; 14], floats: &[f64; 8]) -> Option<u64> {
+    let params = cmd.params();
+    let mut slots = vec![0u64; params.len()];
+    fill_slots(params, ints, floats, &mut slots);
+    let mut e = Encoder::new();
+    encode_command(op, slots.as_ptr() as *const u8, &mut e, &IcdCtx).ok()?;
+    let mut key = (inst as *const InstanceObj as usize).to_le_bytes().to_vec();
+    key.extend_from_slice(&e.finish());
+    let reply = QUERY_CACHE.read().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&key)).cloned()?;
+    let result = reply.get(..4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
+    let mut dec = Decoder::new(reply.get(4..).unwrap_or(&[]));
+    if result < 0 || decode_out_params(cmd, slots.as_ptr() as *const u8, &mut dec).is_ok() {
+        QUERY_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Some(result as u32 as u64);
+    }
+    None
+}
+
 fn query_cacheable(name: &str) -> bool {
     matches!(name, "vkGetPhysicalDeviceImageFormatProperties2" | "vkGetPhysicalDeviceImageFormatProperties2KHR")
 }
@@ -918,6 +940,12 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         return 0;
     }
     let Some(inst) = state_for(cmd, ints[0]) else { return VK_ERROR_INITIALIZATION_FAILED as u32 as u64 };
+    // Zapytania o możliwości karty z cache nie wchodzą w blokadę instancji (11 tys. wejść i 3,2 s czekania na 1 969 klatek Rise of the Tomb Raider).
+    if query_cacheable(cmd.name) {
+        if let Some(r) = query_cache_lockfree(op, cmd, inst, &ints, &floats) {
+            return r;
+        }
+    }
     crate::watchdog::set(op, crate::watchdog::WAIT_LOCK, 0);
     let _wd = WdGuard;
     let t_lock = std::time::Instant::now();
