@@ -948,6 +948,14 @@ static DIFF_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 static DIFF_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DIFF_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DIFF_PREV: std::sync::Mutex<Option<std::collections::HashMap<u64, Vec<u8>>>> = std::sync::Mutex::new(None);
+/// Pomiar cache'u po zawartości: okna 4 KiB wysyłane wcześniej GDZIEKOLWIEK (skrót w zbiorze), z tego te, które różnią się od poprzedniej zawartości
+/// tego samego miejsca (czyli takie, których różnice bajtowe nie oszczędzą, a cache po zawartości tak), oraz okna zerowe.
+static DUP_WINDOWS_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DUP_SEEN_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DUP_SEEN_CHANGED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DUP_ZERO_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DUP_SEEN: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::sync::Mutex::new(None);
+const DUP_SEEN_MAX: usize = 4 << 20;
 
 fn diffstat_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -964,6 +972,34 @@ fn diffstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
         let d = o.iter().zip(n).filter(|(a, b)| a != b).count() as u64;
         bytes += d;
         lines += u64::from(d > 0) * n.len() as u64;
+    }
+    {
+        let mut seen_g = DUP_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = seen_g.get_or_insert_with(Default::default);
+        let (mut win, mut dup, mut dup_changed, mut zero) = (0u64, 0u64, 0u64, 0u64);
+        for (o, n) in old.chunks(4096).zip(data.chunks(4096)) {
+            if n.len() < 4096 {
+                break;
+            }
+            win += 4096;
+            if n.iter().all(|&b| b == 0) {
+                zero += 4096;
+            }
+            let h = gpu_proto::pagediff::page_hash(n);
+            let known = seen.contains(&h);
+            if known {
+                dup += 4096;
+                if o != n {
+                    dup_changed += 4096;
+                }
+            } else if seen.len() < DUP_SEEN_MAX {
+                seen.insert(h);
+            }
+        }
+        DUP_WINDOWS_BYTES.fetch_add(win, Relaxed);
+        DUP_SEEN_BYTES.fetch_add(dup, Relaxed);
+        DUP_SEEN_CHANGED_BYTES.fetch_add(dup_changed, Relaxed);
+        DUP_ZERO_BYTES.fetch_add(zero, Relaxed);
     }
     old.copy_from_slice(data);
     DIFF_SENT.fetch_add(data.len() as u64, Relaxed);
@@ -1405,6 +1441,8 @@ fn periodic_stats(stats: &Stats) {
             use std::sync::atomic::Ordering::Relaxed;
             let (sent, bytes, lines) = (DIFF_SENT.load(Relaxed), DIFF_BYTES.load(Relaxed), DIFF_LINES.load(Relaxed));
             eprintln!("[gpu-icd] różnice względem poprzednio wysłanego: wysłano {} MB, zmienione bajty {} MB ({:.0}%), zmienione linie 64 B {} MB ({:.0}%)", sent >> 20, bytes >> 20, 100.0 * bytes as f64 / sent.max(1) as f64, lines >> 20, 100.0 * lines as f64 / sent.max(1) as f64);
+            let (win, dup, dupc, zero) = (DUP_WINDOWS_BYTES.load(Relaxed), DUP_SEEN_BYTES.load(Relaxed), DUP_SEEN_CHANGED_BYTES.load(Relaxed), DUP_ZERO_BYTES.load(Relaxed));
+            eprintln!("[gpu-icd] cache po zawartości (okna 4 KiB): sprawdzono {} MB, już wysyłane gdziekolwiek {} MB ({:.0}%), z tego zmienione względem tego samego miejsca {} MB ({:.0}%), okna zerowe {} MB ({:.0}%)", win >> 20, dup >> 20, 100.0 * dup as f64 / win.max(1) as f64, dupc >> 20, 100.0 * dupc as f64 / win.max(1) as f64, zero >> 20, 100.0 * zero as f64 / win.max(1) as f64);
         }
         {
             use std::sync::atomic::Ordering::Relaxed;
