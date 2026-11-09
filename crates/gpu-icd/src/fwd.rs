@@ -554,6 +554,9 @@ impl InstState {
             let len = self.mems.get(&memory).map_or(0, |m| m.data.len());
             diffstat_note(memory, len, offset as usize, data);
         }
+        if dump_enabled() {
+            dump_sample(memory, data);
+        }
         let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
         acct.0 += 1;
         acct.1 += data.len() as u64;
@@ -972,6 +975,36 @@ const DUP_SEEN_MAX: usize = 4 << 20;
 fn diffstat_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var_os("GPU_ICD_DIFFSTAT").is_some())
+}
+
+/// Pomiar kodowania (`GPU_ICD_DUMP_DIR=<katalog>`): zapisuje co 7. wysyłkę zapisu pamięci (surowe bajty, do 192 MB na pamięć) do plików `mem-<uchwyt>.bin`,
+/// żeby porównać kodery (LZ4, zstd, ...) offline na prawdziwym ruchu. Tylko do pomiarów.
+fn dump_sample(memory: u64, data: &[u8]) {
+    use std::io::Write;
+    type Dump = (std::path::PathBuf, std::collections::HashMap<u64, (u64, u64)>);
+    static STATE: std::sync::Mutex<Option<Dump>> = std::sync::Mutex::new(None);
+    const PER_MEM_MAX: u64 = 192 << 20;
+    let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        let Some(dir) = std::env::var_os("GPU_ICD_DUMP_DIR") else { return };
+        *g = Some((std::path::PathBuf::from(dir), Default::default()));
+    }
+    let Some((dir, per)) = g.as_mut() else { return };
+    let e = per.entry(memory).or_insert((0, 0));
+    e.0 += 1;
+    if e.0 % 7 != 1 || e.1 + data.len() as u64 > PER_MEM_MAX {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("mem-{memory:x}.bin"))) {
+        if f.write_all(data).is_ok() {
+            e.1 += data.len() as u64;
+        }
+    }
+}
+
+fn dump_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_DUMP_DIR").is_some())
 }
 
 fn diffstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
