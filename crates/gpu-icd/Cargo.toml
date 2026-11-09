@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+zstd = { version = "0.13", default-features = false }
 gpu-proto = { path = "../gpu-proto" }
 gpu-renderd = { path = "../gpu-renderd" }
 gpu-vkcodec = { path = "../gpu-vkcodec" }

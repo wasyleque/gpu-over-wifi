@@ -17,7 +17,7 @@ use gpu_renderd::client::{Client, ClientError};
 
 /// Czy serwer odpowie na to żądanie (`Cmds`, `MemWrite*` i `PresentFrame` są ciche, o ile się powiodą).
 pub fn expects_reply(req: &Request) -> bool {
-    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
+    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
 }
 
 struct Turn {
@@ -169,13 +169,34 @@ pub fn wire_of(memory: u64) -> u64 {
     WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&memory).copied()).unwrap_or(0)
 }
 
-/// Zapis pamięci jako ramka: LZ4 tylko gdy oszczędza co najmniej 10% (małe i źle kompresowalne, np. tekstury BCn, idą surowo).
+/// Czy zapisy pamięci idą kodowane zstd (poziom 1; na ruchu Tomb Raidera o ok. 17% mniej bajtów niż LZ4 przy 2-3x wolniejszym kodowaniu).
+/// `GPU_ICD_MEM_LZ4=1` wraca do LZ4 (np. dla starszego serwera, który nie zna `MemWriteZstd`).
+fn mem_zstd() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_MEM_LZ4").is_none())
+}
+
+/// Zapis pamięci jako ramka: zstd (albo LZ4) tylko gdy oszczędza co najmniej 10% (małe i źle kompresowalne, np. tekstury BCn, idą surowo).
 fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>, ClientError> {
-    let packed = (raw.len() >= 4096).then(|| gpu_proto::video::compress_lz4(&raw)).filter(|c| c.len() * 10 <= raw.len() * 9);
+    let raw_len = raw.len() as u32;
+    let packed = (raw.len() >= 4096)
+        .then(|| {
+            if mem_zstd() {
+                zstd::bulk::compress(&raw, 1).ok().map(|c| (true, c))
+            } else {
+                Some((false, gpu_proto::video::compress_lz4(&raw)))
+            }
+        })
+        .flatten()
+        .filter(|(_, c)| c.len() * 10 <= raw.len() * 9);
     let (req, wire) = match packed {
-        Some(c) => {
+        Some((true, c)) => {
             let n = c.len() as u64;
-            (Request::MemWriteLz4 { memory, offset, raw_len: raw.len() as u32, data: c }, n)
+            (Request::MemWriteZstd { memory, offset, raw_len, data: c }, n)
+        }
+        Some((false, c)) => {
+            let n = c.len() as u64;
+            (Request::MemWriteLz4 { memory, offset, raw_len, data: c }, n)
         }
         None => {
             let n = raw.len() as u64;
@@ -559,6 +580,10 @@ mod tests {
                         Request::MemWrite { offset, data, .. } => seen2.lock().unwrap().push((offset, data)),
                         Request::MemWriteLz4 { offset, raw_len, data, .. } => {
                             let raw = gpu_proto::video::decompress_lz4(&data, raw_len as usize).unwrap();
+                            seen2.lock().unwrap().push((offset, raw));
+                        }
+                        Request::MemWriteZstd { offset, raw_len, data, .. } => {
+                            let raw = zstd::bulk::decompress(&data, raw_len as usize).unwrap();
                             seen2.lock().unwrap().push((offset, raw));
                         }
                         Request::MemRead { .. } => {

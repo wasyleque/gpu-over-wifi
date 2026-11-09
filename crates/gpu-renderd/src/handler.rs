@@ -192,7 +192,7 @@ impl<B: GpuBackend> Session<B> {
     }
 
     pub fn handle_request(&mut self, req: Request) -> Option<Response> {
-        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
+        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
         let r = self.handle(req);
         if silent && !matches!(r, Response::Error { .. }) {
             None
@@ -364,6 +364,18 @@ impl<B: GpuBackend> Session<B> {
                     let t = acct::enabled().then(std::time::Instant::now);
                     // Rozpakowanie ma dokładnie `raw_len` bajtów (limit sprawdzony przy dekodowaniu żądania): bomba dekompresyjna niemożliwa.
                     let r = match lz4_flex::block::decompress(&data, raw_len as usize) {
+                        Ok(raw) if raw.len() == raw_len as usize => self.backend.mem_write(memory, offset, &raw),
+                        _ => Err(ERR_UNKNOWN),
+                    };
+                    if let Some(t) = t {
+                        acct::add(1, t.elapsed());
+                    }
+                    self.note_async(r)
+                }
+                Request::MemWriteZstd { memory, offset, raw_len, data } => {
+                    let t = acct::enabled().then(std::time::Instant::now);
+                    // `bulk::decompress` zapisuje najwyżej `raw_len` bajtów (pojemność wyjścia), więc bomba dekompresyjna jest niemożliwa.
+                    let r = match zstd::bulk::decompress(&data, raw_len as usize) {
                         Ok(raw) if raw.len() == raw_len as usize => self.backend.mem_write(memory, offset, &raw),
                         _ => Err(ERR_UNKNOWN),
                     };
@@ -948,6 +960,22 @@ mod tests {
         assert_eq!(s.handle_request(Request::MemWriteLz4 { memory: 1, offset: 0, raw_len: 9_999, data: packed }), None);
         assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
         assert_eq!(s.handle_request(Request::MemWriteLz4 { memory: 1, offset: 0, raw_len: 100, data: vec![0xFF; 20] }), None);
+        assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
+    }
+
+    #[test]
+    fn zstd_memory_writes_are_silent_and_malformed_ones_surface_at_sync() {
+        let mut s = stream_session(None);
+        let raw = vec![7u8; 10_000];
+        let packed = zstd::bulk::compress(&raw, 1).unwrap();
+        assert_eq!(s.handle_request(Request::MemWriteZstd { memory: 1, offset: 0, raw_len: raw.len() as u32, data: packed.clone() }), None);
+        assert_eq!(s.handle_request(Request::Sync), Some(Response::Synced { error: 0 }), "poprawna ramka nie zgłasza błędu");
+        // Deklarowana długość mniejsza niż po rozpakowaniu (bomba), zniekształcona ramka i pusta ramka: błąd asynchroniczny.
+        assert_eq!(s.handle_request(Request::MemWriteZstd { memory: 1, offset: 0, raw_len: 9_999, data: packed }), None);
+        assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
+        assert_eq!(s.handle_request(Request::MemWriteZstd { memory: 1, offset: 0, raw_len: 100, data: vec![0xFF; 20] }), None);
+        assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
+        assert_eq!(s.handle_request(Request::MemWriteZstd { memory: 1, offset: 0, raw_len: 100, data: vec![] }), None);
         assert!(matches!(s.handle_request(Request::Sync), Some(Response::Synced { error }) if error != 0));
     }
 

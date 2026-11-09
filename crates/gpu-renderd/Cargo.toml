@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+zstd = { version = "0.13", default-features = false }
 gpu-proto = { path = "../gpu-proto" }
 gpu-wire = { path = "../gpu-wire" }
 gpu-vkcodec = { path = "../gpu-vkcodec" }
