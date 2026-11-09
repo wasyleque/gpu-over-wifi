@@ -451,6 +451,18 @@ impl InstState {
         if !runs_enabled() {
             return false;
         }
+        // Różnice względem `prev` są poprawne tylko wtedy, gdy zawartość serwera zmieniamy wyłącznie my: pamięć, do której GPU może pisać (bufory ze zapisem, obrazy,
+        // nieznane), może na serwerze różnić się od `prev`, a zapis tej samej wartości co poprzednio nadal musi ją tam przywrócić. Dlatego tylko `Plan::Skip`.
+        let plan = self.gpuw.plan(memory);
+        {
+            static SEEN: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::sync::Mutex::new(None);
+            if SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(memory) {
+                eprintln!("gpu-icd: runs: pamięć {memory:#x}: plan GPU {plan:?} => {} ({})", if plan == crate::gpuwrite::Plan::Skip { "różnice" } else { "całe zakresy" }, self.gpuw.describe(memory));
+            }
+        }
+        if plan != crate::gpuwrite::Plan::Skip {
+            return false;
+        }
         let Some(s) = self.mems.get_mut(&memory) else { return false };
         if s.data.len() > PREV_MAX_BYTES {
             return false;
