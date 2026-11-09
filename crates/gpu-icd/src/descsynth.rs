@@ -214,6 +214,11 @@ const TEXEL_FORMATS: [(u32, u32, u32); 17] = [
 static TEXEL_READY: [AtomicBool; 17] = [const { AtomicBool::new(false) }; 17];
 static TEXEL_CALLS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
 
+/// Czy format jest w tabeli wzorów (diagnostyka chybień).
+pub fn texel_format_known(format: u32) -> bool {
+    texel_slot(format).is_some()
+}
+
 fn texel_slot(format: u32) -> Option<usize> {
     TEXEL_FORMATS.iter().position(|f| f.0 == format)
 }

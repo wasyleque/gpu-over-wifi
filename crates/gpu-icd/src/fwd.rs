@@ -963,6 +963,9 @@ static DIFF_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 static DIFF_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DIFF_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DIFF_PREV: std::sync::Mutex<Option<std::collections::HashMap<u64, Vec<u8>>>> = std::sync::Mutex::new(None);
+/// Chybienia syntezy deskryptorów tekseli wg (typ, format, powód).
+static TEXEL_MISS: std::sync::Mutex<std::collections::BTreeMap<(u32, u32, &str), u64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Pomiar cache'u po zawartości: okna 4 KiB wysyłane wcześniej GDZIEKOLWIEK (skrót w zbiorze), z tego te, które różnią się od poprzedniej zawartości
 /// tego samego miejsca (czyli takie, których różnice bajtowe nie oszczędzą, a cache po zawartości tak), oraz okna zerowe.
 static DUP_WINDOWS_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1480,6 +1483,14 @@ fn periodic_stats(stats: &Stats) {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] odczyt leniwy: pamięci {}, unieważnienia {}, błędy stron {} (z pobraniem {}, {} KB), przekroczenia czasu {}", stats.lazy_memories, stats.lazy_invalidations, crate::lazymap::FAULTS.load(Relaxed), crate::lazymap::FAULTS_FETCHED.load(Relaxed), crate::lazymap::FETCHED_BYTES.load(Relaxed) / 1024, crate::lazymap::FETCH_TIMEOUTS.load(Relaxed));
         }
+        {
+            let g = TEXEL_MISS.lock().unwrap_or_else(|e| e.into_inner());
+            if !g.is_empty() {
+                let mut v: Vec<_> = g.iter().collect();
+                v.sort_by_key(|x| std::cmp::Reverse(*x.1));
+                eprintln!("[gpu-icd] chybienia syntezy tekseli (typ, format, powód): {}", v.iter().take(8).map(|((t, f, w), n)| format!("({t}, {f}, {w}) {n}x")).collect::<Vec<_>>().join("; "));
+            }
+        }
         eprintln!("[gpu-icd] {}", lock_report());
         eprintln!("[gpu-icd] blokada wg poleceń: {}", lock_top());
         if diffstat_enabled() {
@@ -1846,6 +1857,13 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         // VkDescriptorGetInfoEXT: `type` pod offsetem 16.
         let ty = if slots[1] != 0 { std::ptr::read_unaligned((slots[1] as *const u8).add(16) as *const u32) } else { u32::MAX };
         st.stats.desc_miss_by_type[(ty as usize).min(11)] += 1;
+        // Które formaty tekseli i jakie wejścia zostają na serwerze mimo syntezy (do wyboru, co dopisać do tabeli).
+        if ty == crate::descsynth::UNIFORM_TEXEL_BUFFER || ty == crate::descsynth::STORAGE_TEXEL_BUFFER {
+            if let Some((addr, range, format)) = crate::descsynth::texel_input_of(slots[1] as *const u8) {
+                let why = if addr == 0 || range == 0 { "zerowe wejście" } else if crate::descsynth::texel_format_known(format) { "format w tabeli (uczenie/audyt/wyłączony)" } else { "format spoza tabeli" };
+                *TEXEL_MISS.lock().unwrap_or_else(|e| e.into_inner()).entry((ty, format, why)).or_insert(0) += 1;
+            }
+        }
     }
     let query_key = query_cacheable(cmd.name).then(|| {
         let mut k = st.owner.to_le_bytes().to_vec();
