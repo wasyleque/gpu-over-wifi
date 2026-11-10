@@ -760,6 +760,13 @@ impl InstState {
     fn apply_delta(&mut self, id: u64, d: &[u8], ticket: u64) -> bool {
         let Some((more, segs)) = gpu_proto::pagediff::decode_segments(d) else { return false };
         xfer_audit_check(id, !segs.is_empty());
+        {
+            let mut g = REFRESH_BY_MEM.lock().unwrap_or_else(|e| e.into_inner());
+            let e = g.entry(id).or_insert((0, 0, 0));
+            e.0 += 1;
+            e.1 += u64::from(!segs.is_empty());
+            e.2 += segs.iter().map(|(_, b)| b.len() as u64).sum::<u64>();
+        }
         for (off, body) in segs {
             self.stats.memr_bytes += body.len() as u64;
             // Kopiujemy do istniejącego bufora (aplikacja trzyma wskaźnik z `vkMapMemory`), z pominięciem stron z nowszą odpowiedzią.
@@ -1227,6 +1234,16 @@ static AUDIT_BAD: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new())
 static AUDIT_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static AUDIT_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static AUDIT_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Odświeżenia pamięci z serwera wg pamięci: (odpowiedzi, z niepustą różnicą, bajty różnic). Pokazuje, które pamięci GPU naprawdę zapisuje.
+static REFRESH_BY_MEM: std::sync::Mutex<std::collections::BTreeMap<u64, (u64, u64, u64)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn refresh_by_mem_report() -> String {
+    let g = REFRESH_BY_MEM.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<_> = g.iter().collect();
+    v.sort_by_key(|(_, e)| std::cmp::Reverse(e.2));
+    v.iter().take(12).map(|(id, (n, ch, b))| format!("{id:#x}: {n} odświeżeń, {ch} z różnicą, {} KB", b >> 10)).collect::<Vec<_>>().join("; ")
+}
 
 fn xfer_audit_bad(id: u64) -> bool {
     AUDIT_BAD.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
@@ -1711,6 +1728,7 @@ fn periodic_stats(stats: &Stats) {
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         let (n, q, r) = crate::link::wait_split();
+        eprintln!("[gpu-icd] odświeżenia pamięci wg pamięci (GPU zapisało): {}", refresh_by_mem_report());
         let (ad, am, asx) = xfer_audit_stats();
         if xorstat_enabled() {
             let (r, k, z, x, pf) = xorstat();
