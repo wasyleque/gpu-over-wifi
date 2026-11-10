@@ -111,3 +111,14 @@ Lesson: the earlier assumption "usage 0x7" came from the memory-properties field
 
 Mountain Peak 21.80, Syria 10.42, Geothermal 10.04, **Overall 13.40** (run 10: 12.92, +3.7 %). Wire bytes per frame ~3.29 MB (run 10: ~3.74 MB over a two-run log),
 send-queue wait per reply 1.62 ms (run 10: 2.11 ms), server-wait per frame ~44.6 ms (run 10: ~49.2 ms). 8,765 pushes; audit 0 misses of 416. Now the default (2 ms).
+
+### Runs 12-14: noise check (eager push on/off, deferred flush)
+
+| run | change | Mountain Peak | Syria | Geothermal | Overall |
+|---|---|---|---|---|---|
+| 12 | eager 2 ms + server defers vkFlushMappedMemoryRanges | 19.68 | 10.01 | 9.97 | 12.61 |
+| 13 | eager 2 ms, old server | 19.81 | 10.01 | 9.87 | 12.60 |
+| 14 | eager **off**, old server | 21.92 | 10.79 | 10.64 | **13.87** |
+
+Eager on: 13.40 / 12.61 / 12.60; eager off: 12.92 / 13.87. Run-to-run spread is therefore at least ~±4 %, much larger than the 0.01 FPS seen once in runs 6/7; the +3.7 % of run 11
+was not reproducible. Eager push is now off by default (`GPU_ICD_EAGER_PUSH_US=2000` enables it). Deferred server flush reverted: memwrite time per call 8.7 → 7.5 µs but no FPS gain.
