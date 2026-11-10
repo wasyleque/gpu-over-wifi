@@ -44,11 +44,6 @@ pub trait GpuBackend {
     fn mem_write(&mut self, _memory: u64, _offset: u64, _data: &[u8]) -> Result<(), i32> {
         Err(ERR_UNKNOWN)
     }
-    /// Wykonuje odroczone `vkFlushMappedMemoryRanges` po zapisach pamięci; woła się przed każdym żądaniem, które nie jest zapisem pamięci
-    /// (GPU sięga do pamięci dopiero przez polecenia, odczyty i zapytania).
-    fn flush_pending(&mut self) -> Result<(), i32> {
-        Ok(())
-    }
     fn mem_read(&mut self, _memory: u64, _offset: u64, _len: u32) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
     }
@@ -338,10 +333,6 @@ impl<B: GpuBackend> Session<B> {
                 },
             }
         } else {
-            if !matches!(req, Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteRuns { .. }) {
-                let r = self.backend.flush_pending();
-                let _ = self.note_async(r);
-            }
             match req {
                 Request::Hello { .. } => Response::Error {
                     code: ERR_PROTOCOL,
