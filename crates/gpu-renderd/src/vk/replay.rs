@@ -108,6 +108,8 @@ pub struct Replayer {
     instance: VkInstance,
     fns: HashMap<u16, *const c_void>,
     maps: HashMap<u64, *mut u8>,
+    /// Pamięci zapisane od ostatniego `vkFlushMappedMemoryRanges` (flush odroczony do pierwszego żądania, które nie jest zapisem pamięci).
+    flush_pending: Vec<u64>,
     /// Stan stron pamięci znany klientowi (do odczytu samych różnic).
     pages: HashMap<u64, gpu_proto::pagediff::PageTracker>,
     /// Surowa wartość zwrócona przez ostatnio wykonane polecenie (dla poleceń `Ret::U64`).
@@ -196,7 +198,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new(), copy: Default::default() }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), flush_pending: Vec::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new(), copy: Default::default() }
     }
 
     pub fn registered_handles(&self) -> usize {
@@ -473,7 +475,33 @@ impl Replayer {
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), data.len()) };
         // Klient ma te strony w takim stanie, jaki właśnie wysłał: odczyt różnic nie odeśle ich z powrotem.
         self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_data(offset as usize, data);
-        self.range_call("vkFlushMappedMemoryRanges", device, e.real)
+        let _ = device;
+        self.note_flush(memory);
+        Ok(())
+    }
+
+    fn note_flush(&mut self, memory: u64) {
+        if !self.flush_pending.contains(&memory) {
+            self.flush_pending.push(memory);
+        }
+    }
+
+    /// Wykonuje odroczone flushe zapisanych pamięci (jeden `vkFlushMappedMemoryRanges` na pamięć, nie na blok).
+    pub fn flush_pending(&mut self) -> Result<(), i32> {
+        if self.flush_pending.is_empty() {
+            return Ok(());
+        }
+        let mut first = Ok(());
+        for memory in std::mem::take(&mut self.flush_pending) {
+            // Pamięć mogła zostać zwolniona (polecenie po zapisie): wtedy nie ma czego flushować.
+            let Some(e) = self.registry.get(memory).filter(|e| e.kind == "VkDeviceMemory").copied() else { continue };
+            if let Err(c) = self.range_call("vkFlushMappedMemoryRanges", e.parent, e.real) {
+                if first.is_ok() {
+                    first = Err(c);
+                }
+            }
+        }
+        first
     }
 
     /// Zapis kilku fragmentów jednej pamięci jednym odwzorowaniem i jednym `vkFlushMappedMemoryRanges` (patrz `Request::MemWriteRuns`).
@@ -496,7 +524,9 @@ impl Replayer {
                 t.set_hash(i as usize, h);
             }
         }
-        self.range_call("vkFlushMappedMemoryRanges", device, e.real)
+        let _ = device;
+        self.note_flush(memory);
+        Ok(())
     }
 
     /// Odczyt różnic: tylko strony, które zmieniły się od ostatniego zapisu lub odczytu tej pamięci (limit jednej odpowiedzi

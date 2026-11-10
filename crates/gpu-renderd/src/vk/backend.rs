@@ -376,6 +376,10 @@ impl GpuBackend for VulkanBackend {
         self.replay.mem_write(memory, offset, data)
     }
 
+    fn flush_pending(&mut self) -> Result<(), i32> {
+        self.replay.flush_pending()
+    }
+
     fn mem_read(&mut self, memory: u64, offset: u64, len: u32) -> Result<Vec<u8>, i32> {
         self.replay.mem_read(memory, offset, len)
     }
