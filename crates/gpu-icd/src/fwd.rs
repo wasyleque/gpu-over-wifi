@@ -164,7 +164,7 @@ pub struct Flags {
     /// `GPU_ICD_NO_XFER_TRACK=1`: odświeżaj pamięci tylko-transferowe po każdej pracy (dawne zachowanie).
     pub no_xfer_track: bool,
     /// `GPU_ICD_EAGER_PUSH_US=<µs>`: przy `vkEndCommandBuffer` wypychamy zapisy aplikacji do odwzorowanej pamięci, jeśli od poprzedniego skanu minęło tyle
-    /// mikrosekund (0 = wyłączone; domyślnie 0). Łącze pracuje wtedy, gdy gra jeszcze nagrywa polecenia, a nie dopiero przy `vkQueueSubmit`.
+    /// mikrosekund (0 = wyłączone; domyślnie 2000). Łącze pracuje wtedy, gdy gra jeszcze nagrywa polecenia, a nie dopiero przy `vkQueueSubmit`.
     pub eager_push_us: u64,
     /// Odczyt leniwy pamięci HOST_CACHED (domyślnie włączony; `GPU_ICD_NO_LAZY=1` wyłącza).
     pub lazy: bool,
@@ -188,7 +188,7 @@ pub fn flags() -> &'static Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),
-        eager_push_us: std::env::var("GPU_ICD_EAGER_PUSH_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+        eager_push_us: std::env::var("GPU_ICD_EAGER_PUSH_US").ok().and_then(|v| v.parse().ok()).unwrap_or(2000),
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
         desc_spec: std::env::var_os("GPU_ICD_NO_DESC_SPEC").is_none(),
         locked_wait: std::env::var_os("GPU_ICD_LOCKED_WAIT").is_some(),

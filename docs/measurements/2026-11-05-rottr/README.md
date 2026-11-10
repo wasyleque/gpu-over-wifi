@@ -106,3 +106,8 @@ Mountain Peak 19.86, Syria 10.08, Geothermal 10.39, **Overall 12.92** (run 8: 11
 The five 8 MB resource-descriptor heaps (usage 0x420000) and the small sampler heaps (0x220000) are written by the CPU only; skipping them cut server
 `memreaddelta` from ~17.6 calls/frame (10.2 ms) to ~8.0 calls/frame (6.0 ms). Audit: 40,124 skips, 627 verified refreshes, 0 misses.
 Lesson: the earlier assumption "usage 0x7" came from the memory-properties field, not buffer usage; check `powód odświeżania pamięci` lines before designing around flags.
+
+### Run 11 (eager push of mapped-memory writes at vkEndCommandBuffer, `GPU_ICD_EAGER_PUSH_US=2000`)
+
+Mountain Peak 21.80, Syria 10.42, Geothermal 10.04, **Overall 13.40** (run 10: 12.92, +3.7 %). Wire bytes per frame ~3.29 MB (run 10: ~3.74 MB over a two-run log),
+send-queue wait per reply 1.62 ms (run 10: 2.11 ms), server-wait per frame ~44.6 ms (run 10: ~49.2 ms). 8,765 pushes; audit 0 misses of 416. Now the default (2 ms).
