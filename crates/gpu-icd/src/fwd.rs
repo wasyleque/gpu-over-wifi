@@ -544,9 +544,8 @@ impl InstState {
 
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
         if xorstat_enabled() {
-            if let Some(s) = self.mems.get(&memory) {
-                xorstat_note(s, offset as usize, data);
-            }
+            let len = self.mems.get(&memory).map_or(0, |m| m.data.len());
+            xorstat_note(memory, len, offset as usize, data);
         }
         // Zapis w całości (np. `vkFlushMappedMemoryRanges`, `vkUnmapMemory`) zmienia to, co serwer ma: kopia poprzedniej treści musi to odzwierciedlać.
         if let Some(s) = self.mems.get_mut(&memory) {
@@ -1048,27 +1047,30 @@ fn xorstat_enabled() -> bool {
     *V.get_or_init(|| std::env::var_os("GPU_ICD_XORSTAT").is_some())
 }
 
-fn xorstat_note(s: &Shadow, offset: usize, data: &[u8]) {
+type XorPrev = std::collections::HashMap<u64, (Vec<u8>, Vec<bool>)>;
+static XOR_PREV: std::sync::Mutex<Option<XorPrev>> = std::sync::Mutex::new(None);
+
+/// `prev`: własna kopia "ostatnio wysłane w to miejsce" (diagnostyka; domyślny tryb klienta nie trzyma poprzedniej treści).
+fn xorstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
     use std::sync::atomic::Ordering::Relaxed;
-    let Some(prev) = s.prev.as_ref() else { return };
-    let Some(old) = prev.get(offset..offset + data.len()) else { return };
-    // Tylko pełne strony 4 KiB o znanej treści na serwerze; cały zapis w jednej próbce (do 64 KiB), żeby zachować rozmiary bloków jak na łączu.
-    let first = offset.div_ceil(4096);
+    let mut g = XOR_PREV.lock().unwrap_or_else(|e| e.into_inner());
+    let (old, known_pages) = g.get_or_insert_with(Default::default).entry(memory).or_insert_with(|| (vec![0u8; mem_len], vec![false; mem_len.div_ceil(4096)]));
+    if offset + data.len() > old.len() {
+        return;
+    }
     let mut xor = data.to_vec();
     let mut known = 0u64;
-    for p in 0..data.len() / 4096 {
-        let page = first + p;
-        if page * 4096 < offset || page >= s.prev_ok.len() || !s.prev_ok[page] {
-            continue;
-        }
+    // Strony 4 KiB w całości objęte zapisem i wysłane tu już wcześniej: XOR z poprzednią treścią.
+    let first = offset.div_ceil(4096);
+    let last = (offset + data.len()) / 4096;
+    for page in first..last {
         let at = page * 4096 - offset;
-        if at + 4096 > data.len() {
-            continue;
+        if known_pages[page] {
+            for i in 0..4096 {
+                xor[at + i] = data[at + i] ^ old[page * 4096 + i];
+            }
+            known += 4096;
         }
-        for i in 0..4096 {
-            xor[at + i] = data[at + i] ^ old[at + i];
-        }
-        known += 4096;
     }
     XOR_RAW.fetch_add(data.len() as u64, Relaxed);
     XOR_KNOWN.fetch_add(known, Relaxed);
@@ -1076,6 +1078,10 @@ fn xorstat_note(s: &Shadow, offset: usize, data: &[u8]) {
         let (a, b) = (chunk * MEM_CHUNK, ((chunk + 1) * MEM_CHUNK).min(data.len()));
         XOR_ZSTD_RAW.fetch_add(zstd::bulk::compress(&data[a..b], 1).map_or(b - a, |v| v.len()) as u64, Relaxed);
         XOR_ZSTD_XOR.fetch_add(zstd::bulk::compress(&xor[a..b], 1).map_or(b - a, |v| v.len()) as u64, Relaxed);
+    }
+    old[offset..offset + data.len()].copy_from_slice(data);
+    for page in first..last {
+        known_pages[page] = true;
     }
 }
 
