@@ -726,13 +726,23 @@ impl InstState {
         self.stats.lazy_invalidations += n;
     }
 
+    /// Czy pamięć `id` trzeba odświeżyć po oczekiwaniu: bufory deskryptorów pomijamy (GPU ich nie pisze), pamięci pisane tylko transferem odświeżamy,
+    /// gdy zgłoszona praca miała polecenia zapisu; co 64. pominięcie jest audytowane, a pamięć przyłapana na zmianie jest odświeżana już zawsze.
+    fn needs_refresh(&self, id: u64) -> bool {
+        if xfer_audit_bad(id) {
+            return true;
+        }
+        let skip = if self.gpuw.descriptor_only(id) { true } else { !self.xfer_dirty && self.gpuw.transfer_only(id) };
+        !skip || xfer_audit_pick(id)
+    }
+
     /// Odwzorowane pamięci, które po oczekiwaniu trzeba odświeżyć z serwera (mapowane i dozwolone do odczytu).
     fn refresh_ids(&self) -> Vec<u64> {
         self.mems
             .iter()
             .filter(|(i, s)| s.mapped && s.lazy.is_none() && self.mem_refresh.get(i).copied().unwrap_or(true) && self.gpuw.plan(**i) != crate::gpuwrite::Plan::Skip)
             // Pamięć, do której GPU pisze tylko transferami: bez poleceń transferu w zgłoszonej pracy nic się nie zmieniło.
-            .filter(|(i, _)| self.xfer_dirty || !self.gpuw.transfer_only(**i) || xfer_audit_pick(**i))
+            .filter(|(i, _)| self.needs_refresh(**i))
             .map(|(i, _)| *i)
             .collect()
     }
@@ -1141,11 +1151,18 @@ fn xfer_table() -> &'static [bool] {
 /// przeoczyło zapis (błąd do zgłoszenia w logu; dane i tak trafiają do pamięci aplikacji).
 static AUDIT_IDS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 static AUDIT_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUDIT_BAD: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+static AUDIT_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static AUDIT_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static AUDIT_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+fn xfer_audit_bad(id: u64) -> bool {
+    AUDIT_BAD.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
+}
+
 fn xfer_audit_pick(id: u64) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
+    AUDIT_SKIPPED.fetch_add(1, Relaxed);
     if !AUDIT_TICK.fetch_add(1, Relaxed).is_multiple_of(64) {
         return false;
     }
@@ -1163,18 +1180,19 @@ fn xfer_audit_check(id: u64, changed: bool) {
         g.swap_remove(p);
         let done = AUDIT_DONE.fetch_add(1, Relaxed) + 1;
         if changed {
+            AUDIT_BAD.lock().unwrap_or_else(|e| e.into_inner()).push(id);
             let miss = AUDIT_MISS.fetch_add(1, Relaxed) + 1;
             if miss <= 20 {
-                eprintln!("gpu-icd: AUDYT TRANSFERÓW: pamięć {id:#x} zmieniona mimo braku poleceń zapisu (przeoczenie śledzenia nr {miss} z {done} sprawdzeń)");
+                eprintln!("gpu-icd: AUDYT: pamięć {id:#x} zmieniona mimo pominięcia odświeżania (nr {miss} z {done} sprawdzeń); odświeżana już zawsze");
             }
         }
     }
 }
 
 /// Audyt śledzenia zapisów transferem: (sprawdzenia, przeoczenia).
-pub fn xfer_audit_stats() -> (u64, u64) {
+pub fn xfer_audit_stats() -> (u64, u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
-    (AUDIT_DONE.load(Relaxed), AUDIT_MISS.load(Relaxed))
+    (AUDIT_DONE.load(Relaxed), AUDIT_MISS.load(Relaxed), AUDIT_SKIPPED.load(Relaxed))
 }
 
 /// Zapisuje w buforze poleceń, czy ostatnie nagranie mogło zapisać bufor transferem; `Begin`/`Reset` zaczynają od zera.
@@ -1612,8 +1630,8 @@ fn periodic_stats(stats: &Stats) {
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         let (n, q, r) = crate::link::wait_split();
-        let (ad, am) = xfer_audit_stats();
-        eprintln!("[gpu-icd] audyt śledzenia zapisów transferem: {ad} sprawdzeń, {am} przeoczeń");
+        let (ad, am, asx) = xfer_audit_stats();
+        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń");
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {

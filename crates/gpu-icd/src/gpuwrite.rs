@@ -11,6 +11,9 @@ const READ_ONLY_BUFFER_USAGE: u32 = 0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x100;
 
 /// VK_BUFFER_USAGE_TRANSFER_DST_BIT.
 const TRANSFER_DST: u32 = 0x2;
+/// VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT, RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT.
+const DEVICE_ADDRESS: u32 = 0x20000;
+const DESCRIPTOR_BUFFERS: u32 = 0x200000 | 0x400000;
 
 pub fn usage_is_read_only(usage: u32) -> bool {
     usage != 0 && usage & !READ_ONLY_BUFFER_USAGE == 0
@@ -33,6 +36,8 @@ struct MemUse {
     whole: bool,
     /// Przypisano bufor, który GPU może zapisać także inaczej niż transferem (storage, adres urządzenia, nieznane użycie).
     other: bool,
+    /// Przypisano bufor, który nie jest czystym buforem deskryptorów (użycie poza bitami do odczytu, deskryptorów i adresu urządzenia, albo bez bitu deskryptorów).
+    non_desc: bool,
     ranges: Vec<(u64, u64)>,
     /// Diagnostyka (do logu): pierwsze bufory przypisane do pamięci jako (przesunięcie, rozmiar, flagi użycia).
     sample: Vec<(u64, u64, u32)>,
@@ -68,6 +73,9 @@ impl GpuWrites {
         if !matches!(self.bufs.get(&buffer), Some(&(_, usage)) if usage != 0 && usage & !(READ_ONLY_BUFFER_USAGE | TRANSFER_DST) == 0) {
             e.other = true;
         }
+        if !matches!(self.bufs.get(&buffer), Some(&(_, usage)) if usage & DESCRIPTOR_BUFFERS != 0 && usage & !(READ_ONLY_BUFFER_USAGE | DESCRIPTOR_BUFFERS | DEVICE_ADDRESS) == 0) {
+            e.non_desc = true;
+        }
         match self.bufs.get(&buffer) {
             Some(&(_, usage)) if usage_is_read_only(usage) => {}
             Some(&(size, _)) if size > 0 => e.ranges.push((offset, size)),
@@ -90,6 +98,12 @@ impl GpuWrites {
     /// Do pamięci przypisano wyłącznie bufory, które GPU może zapisać tylko poleceniami transferu (użycie: bity tylko do odczytu i TRANSFER_DST).
     pub fn transfer_only(&self, memory: u64) -> bool {
         self.mems.get(&memory).is_some_and(|e| !e.whole && !e.other)
+    }
+
+    /// Do pamięci przypisano wyłącznie bufory deskryptorów (VK_EXT_descriptor_buffer): zapisuje je procesor, a GPU tylko czyta. Jedyna droga zapisu przez
+    /// GPU to wskaźnik z adresu urządzenia, której nie wykluczamy statycznie: klient pomija odświeżanie, ale audytuje (patrz `fwd::xfer_audit_pick`).
+    pub fn descriptor_only(&self, memory: u64) -> bool {
+        self.mems.get(&memory).is_some_and(|e| !e.whole && !e.non_desc)
     }
 
     pub fn plan(&self, memory: u64) -> Plan {
@@ -154,6 +168,25 @@ mod tests {
         assert!(!g.transfer_only(13) && !g.transfer_only(99));
         g.bind_buffer(14, 77, 0); // nieznany bufor
         assert!(!g.transfer_only(14));
+    }
+
+    #[test]
+    fn descriptor_buffer_memories_are_recognised() {
+        let mut g = GpuWrites::default();
+        g.buffer_created(1, 8 << 20, 0x420000); // resource descriptor + adres
+        g.buffer_created(2, 8192, 0x220000); // sampler descriptor + adres
+        g.buffer_created(3, 4096, 0x20000 | 0x20); // storage + adres: zwykły bufor
+        g.buffer_created(4, 4096, 0x20000); // sam adres
+        g.bind_buffer(10, 1, 0);
+        g.bind_buffer(10, 2, 8 << 20);
+        assert!(g.descriptor_only(10));
+        g.bind_buffer(11, 1, 0);
+        g.bind_buffer(11, 3, 8 << 20);
+        assert!(!g.descriptor_only(11));
+        g.bind_buffer(12, 4, 0);
+        assert!(!g.descriptor_only(12) && !g.descriptor_only(99));
+        g.bind_image(13);
+        assert!(!g.descriptor_only(13));
     }
 
     #[test]
