@@ -26,6 +26,11 @@ z klientami Linux i Windows po Wi-Fi/LAN. Inspiracja: komercyjny produkt referen
 - [ ] E6 Windows: build klienta (cross/CI), instalator.
 - [ ] E7 badanie zdalnego CUDA.
 
+## Pochodzenie rozwiązań
+Produkty komercyjne tego typu są zamknięte: nie mieliśmy ich kodu, binarek, specyfikacji protokołów ani wewnętrznej dokumentacji i niczego z tego nie używamy. Punktem wyjścia był ogólny, publiczny opis problemu
+(zdalny GPU to problem opóźnienia i przepustowości) oraz wyłącznie ogólnodostępne materiały: rejestr i specyfikacja Vulkan (Khronos), dokumentacja loadera i interfejsu ICD, otwarte sterowniki i dokumentacja jądra Linux,
+dokumentacja używanych bibliotek kompresji. Każda technika w repozytorium została zaprojektowana, zaimplementowana i zmierzona samodzielnie; deklaracji z zewnątrz, których nie dało się sprawdzić, nie przyjmujemy na wiarę.
+
 ## Zasady
 - Podnieść wersję w Cargo.toml przed każdym push na GitHub.
 - Bezpieczeństwo: tylko LAN/VPN, token + TLS; nie wystawiać portów na świat.

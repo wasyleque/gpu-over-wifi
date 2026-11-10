@@ -42,6 +42,14 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 | LZ4 and H.264 frame transport, selectable (`GPU_ICD_CODEC`) | Windows client driver, HEVC |
 | AI proxy with VRAM-aware scheduling, DeepSeek via InferSSD | Game-session reservations in the scheduler |
 
+## Independent development
+
+Commercial products in this space are closed, so there was nothing to copy from: no source code, binaries, protocol specifications or internal documentation of any
+such product were available to us or used here. We started from the public, general description of the problem (a remote GPU is a latency and bandwidth problem) and from openly
+available material only: the Khronos Vulkan registry and specification, the Vulkan loader and ICD interface documentation, open-source drivers and the Linux kernel documentation, and the
+documentation of the compression libraries we use. Every technique in this repository was designed, implemented and measured by us. Where public claims about what is possible could not be
+checked, we measured ourselves, and several ideas that sounded promising did not work (they are recorded with their numbers in [`docs/measurements`](docs/measurements/2026-11-05-rottr/README.md) and `AGENTS.md`).
+
 ## Test hardware
 
 | Role | Machine | CPU | RAM | GPU | Storage | OS |
