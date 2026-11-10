@@ -83,3 +83,14 @@ the scene whose link was saturated) is consistent with the byte reduction but is
   Per memory: 0x100046 4.3x -> 6.6x, 0x10004a 3.2x -> 4.2x, the dense 64 MB heap 0x100077 only 1.48x -> 1.64x.
 * In run 5 the wire/raw ratio of the six biggest memories fell from 48 % (run 4, LZ4) to 39 % (zstd-1): the same as the offline estimate.
   Server side, decoding stays cheap (4.5 M memory writes, 38.5 s in total); the server is busy roughly a quarter of the time, so it is not the bottleneck.
+
+## Runs 6 and 7 (Ryzen with 16 GB RAM, zstd)
+
+| run | Mountain Peak | Syria | Geothermal | Overall |
+|---|---|---|---|---|
+| 6 | 16.06 | 9.62 | 10.01 | **11.55** |
+| 7 | 15.98 | 9.69 | 10.00 | **11.55** |
+
+Run 5 (6.6 GB RAM) scored 10.67, so +8 %; runs 6 and 7 agree to 0.01 FPS Overall. RAM was not the main limit.
+Texel misses: 3,640 of ~3,700 were format 98 (R32_UINT). Server answers sampled from run 7: `u64 = address >> 2`, `u32 = range >> 2`,
+`u32 = 0xe50` (identical in all samples), so `(98, 2, 3664)` was added to `TEXEL_FORMATS` (still gated by learning and audit).

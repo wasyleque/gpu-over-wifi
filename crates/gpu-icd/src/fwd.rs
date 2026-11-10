@@ -2162,6 +2162,17 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
             }
             if let Some((address, range, format)) = crate::descsynth::texel_input_of(slots[1] as *const u8) {
                 let actual = std::slice::from_raw_parts(slots[3] as *const u8, slots[2] as usize);
+                // Format spoza tabeli: zapisujemy prawdziwe odpowiedzi serwera (do wyprowadzenia przesunięcia i stałej offline; nic nie jest zgadywane).
+                if !crate::descsynth::texel_format_known(format) && address != 0 && range != 0 {
+                    static SEEN: std::sync::Mutex<std::collections::BTreeMap<u32, u32>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+                    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+                    let n = seen.entry(format).or_insert(0);
+                    if *n < 12 {
+                        *n += 1;
+                        let hex: String = actual.iter().map(|b| format!("{b:02x}")).collect();
+                        eprintln!("gpu-icd: próbka teksela formatu {format}: adres {address:#x} zakres {range:#x} -> {hex}");
+                    }
+                }
                 match st.texel.observe(address, range, format, actual) {
                     crate::descsynth::Event::Verified => eprintln!("gpu-icd: deskryptory tekseli formatu {format} liczone lokalnie (wzór potwierdzony {} odpowiedziami serwera)", crate::descsynth::LEARN_NEEDED),
                     crate::descsynth::Event::Disabled => eprintln!("gpu-icd: wzór deskryptora teksela formatu {format} NIE zgadza się z serwerem (adres {address:#x}, zakres {range:#x}); liczenie lokalne wyłączone"),

@@ -191,7 +191,7 @@ pub const UNIFORM_TEXEL_BUFFER: u32 = 4;
 pub const STORAGE_TEXEL_BUFFER: u32 = 5;
 
 /// `(VkFormat, k, stała)`: przesunięcie adresu i słowo trzecie deskryptora (zmierzone sondą).
-const TEXEL_FORMATS: [(u32, u32, u32); 17] = [
+const TEXEL_FORMATS: [(u32, u32, u32); 18] = [
     (9, 0, 653),
     (13, 0, 3858),
     (37, 2, 4566),
@@ -205,14 +205,15 @@ const TEXEL_FORMATS: [(u32, u32, u32); 17] = [
     (81, 2, 3243),
     (83, 2, 2258),
     (97, 3, 2225),
+    (98, 2, 3664),
     (100, 2, 2160),
     (103, 3, 2127),
     (109, 4, 2041),
     (122, 2, 2712),
 ];
 
-static TEXEL_READY: [AtomicBool; 17] = [const { AtomicBool::new(false) }; 17];
-static TEXEL_CALLS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
+static TEXEL_READY: [AtomicBool; 18] = [const { AtomicBool::new(false) }; 18];
+static TEXEL_CALLS: [AtomicU64; 18] = [const { AtomicU64::new(0) }; 18];
 
 /// Czy format jest w tabeli wzorów (diagnostyka chybień).
 pub fn texel_format_known(format: u32) -> bool {
@@ -257,12 +258,12 @@ pub unsafe fn texel_input_of(info: *const u8) -> Option<(u64, u64, u32)> {
 
 /// Stan uczenia formatów tekseli (po jednym na format z tabeli; wspólny dla typów 4 i 5).
 pub struct TexelSynth {
-    mode: [Mode; 17],
+    mode: [Mode; 18],
 }
 
 impl Default for TexelSynth {
     fn default() -> TexelSynth {
-        TexelSynth { mode: [Mode::Learning(0); 17] }
+        TexelSynth { mode: [Mode::Learning(0); 18] }
     }
 }
 
