@@ -253,6 +253,10 @@ pub fn wait_split() -> (u64, u64, u64) {
     (MARK_N.load(Relaxed), MARK_QUEUE_US.load(Relaxed) / n, MARK_REPLY_US.load(Relaxed) / n)
 }
 
+/// Czas (ns) kopiowania w `send_mem_group` pod blokadą instancji: prefiks i surowe bajty z lustra/shadow oraz aktualizacja lustra.
+pub static GROUP_COPY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static GROUP_MIRROR_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 static WIRE_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static WIRE_BY_MEM: Mutex<Option<std::collections::HashMap<u64, u64>>> = Mutex::new(None);
 
@@ -563,14 +567,16 @@ impl Link {
 
     /// Kilka fragmentów jednej pamięci w jednej ramce (`MemWriteRunsPfx`); `parts` to `(przesunięcie, bajty)`. Prefiks to kopia lustra z chwili wywołania
     /// (przed zapisem któregokolwiek fragmentu), potem lustro przejmuje nowe bajty; kolejność w strumieniu jak w `send_mem`.
-    pub fn send_mem_group(&mut self, memory: u64, parts: Vec<(u64, Vec<u8>)>) -> Result<(), ClientError> {
+    pub fn send_mem_group(&mut self, memory: u64, parts: &[(u64, &[u8])]) -> Result<(), ClientError> {
+        use std::sync::atomic::Ordering::Relaxed;
         self.seq = self.seq.wrapping_add(1);
+        let t0 = std::time::Instant::now();
         let total: usize = parts.iter().map(|p| p.1.len()).sum();
         let m = self.mirror.entry(memory).or_default();
         let mut prefix = Vec::with_capacity(total);
         let mut raw = Vec::with_capacity(total);
         let mut runs = Vec::with_capacity(parts.len());
-        for (o, d) in &parts {
+        for (o, d) in parts {
             let (off, end) = (*o as usize, *o as usize + d.len());
             if m.len() < end {
                 m.resize(end, 0);
@@ -579,9 +585,12 @@ impl Link {
             raw.extend_from_slice(d);
             runs.push((*o, d.len() as u32));
         }
-        for (o, d) in &parts {
+        let t1 = std::time::Instant::now();
+        for (o, d) in parts {
             m[*o as usize..*o as usize + d.len()].copy_from_slice(d);
         }
+        GROUP_COPY_NS.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+        GROUP_MIRROR_NS.fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
         let job = Arc::new(Job { len: total, input: Mutex::new(Some(JobInput::RunsPfx(self.seq, memory, runs, raw, prefix))), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
@@ -907,7 +916,8 @@ mod tests {
                 // Kilka fragmentów w jednej ramce (jedno z nich dobrze kompresowalne, jedno poniżej progu kompresji).
                 let base = i * 4096;
                 let parts: Vec<(u64, Vec<u8>)> = vec![(base, data.iter().take(5000).copied().collect()), (base + 1_000_000, data.iter().rev().take(12_000).copied().collect()), (base + 2_000_000, vec![(i % 251) as u8; 300])];
-                link.send_mem_group(7, parts.clone()).unwrap();
+                let refs: Vec<(u64, &[u8])> = parts.iter().map(|(o, d)| (*o, d.as_slice())).collect();
+                link.send_mem_group(7, &refs).unwrap();
                 sent.extend(parts);
                 continue;
             }

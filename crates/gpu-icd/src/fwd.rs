@@ -75,6 +75,8 @@ pub struct Stats {
     pub eager_pushes: u64,
     pub mem_groups: u64,
     pub early_waits: u64,
+    pub t_note_ns: u64,
+    pub t_group_ns: u64,
     pub mem_group_parts: u64,
     pub refresh_ranged: u64,
     pub refresh_ranged_bytes: u64,
@@ -604,14 +606,18 @@ impl InstState {
             }
             return;
         }
+        let t0 = std::time::Instant::now();
         for (o, d) in parts {
             self.note_mem_send(memory, *o, d);
         }
+        let t1 = std::time::Instant::now();
         self.stats.mem_groups += 1;
         self.stats.mem_group_parts += parts.len() as u64;
-        if self.client.send_mem_group(memory, parts.iter().map(|(o, d)| (*o, d.to_vec())).collect()).is_err() {
+        if self.client.send_mem_group(memory, parts).is_err() {
             self.lose();
         }
+        self.stats.t_note_ns += (t1 - t0).as_nanos() as u64;
+        self.stats.t_group_ns += t1.elapsed().as_nanos() as u64;
     }
 
     /// Diagnostyka (tylko przy `GPU_ICD_DEBUG`): ile stron 4 KiB wysyłanych w tej sesji już wcześniej widzieliśmy (potencjał cache
@@ -1831,7 +1837,7 @@ fn periodic_stats(stats: &Stats) {
             let (r, k, z, x, pf) = xorstat();
             eprintln!("[gpu-icd] XORSTAT: surowo {} MB, strony o znanej treści {} MB, zstd surowych {} MB, zstd po XOR {} MB, zstd z prefiksem poprzedniej treści {} MB", r >> 20, k >> 20, z >> 20, x >> 20, pf >> 20);
         }
-        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}; zapisy pamięci scalone: {} ramek z {} fragmentów; oczekiwania zwrócone wcześniej: {} (odebrane odroczone odpowiedzi {})", stats.eager_pushes, stats.mem_groups, stats.mem_group_parts, stats.early_waits, crate::link::DEFERRED_DONE.load(std::sync::atomic::Ordering::Relaxed));
+        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}; zapisy pamięci scalone: {} ramek z {} fragmentów; oczekiwania zwrócone wcześniej: {} (odebrane odroczone odpowiedzi {}); wysyłka różnic: księgowość {} ms, grupa {} ms (z tego kopie {} ms)", stats.eager_pushes, stats.mem_groups, stats.mem_group_parts, stats.early_waits, crate::link::DEFERRED_DONE.load(std::sync::atomic::Ordering::Relaxed), stats.t_note_ns / 1_000_000, stats.t_group_ns / 1_000_000, crate::link::GROUP_COPY_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000);
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
