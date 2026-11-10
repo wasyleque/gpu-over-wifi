@@ -135,3 +135,9 @@ Both sides keep a "last sent here" mirror built from the same write sequence (in
 
 The byte-at-a-time software CRC32C in `gpu-proto` (~0.5 GB/s) was a hidden cost on both sides (frame CRC of every request and the raw-bytes CRC): replacing it with the SSE4.2 instruction
 removed ~60 s of server time per run and cut the client's send-queue wait from 2.2 to 0.77 ms. Overall 13.87 (run 14, best before) → 16.39 (+18 %).
+
+### Run 20 (same configuration as run 19 plus per-memory refresh statistics)
+
+Mountain Peak 26.49, Syria 13.66, Geothermal 15.13, **Overall 18.39** (run 19: 16.39 with the same build apart from the added statistics: identical-configuration spread is therefore at least ±6 %).
+Memories still refreshed after the descriptor-buffer skip, GPU writes found: `0x10004a` 11,042 refreshes / 0 with differences, `0x100302` 11,009 / 0, the rest ≤ 663 / 0. In this benchmark the GPU
+never wrote any host-visible memory, but this is not provable statically (vkd3d-proton uses device addresses), so refreshing is kept; the cost is the remaining server `memreaddelta` (~19 s).
