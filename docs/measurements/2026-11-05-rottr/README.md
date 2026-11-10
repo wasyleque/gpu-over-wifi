@@ -141,3 +141,11 @@ removed ~60 s of server time per run and cut the client's send-queue wait from 2
 Mountain Peak 26.49, Syria 13.66, Geothermal 15.13, **Overall 18.39** (run 19: 16.39 with the same build apart from the added statistics: identical-configuration spread is therefore at least ±6 %).
 Memories still refreshed after the descriptor-buffer skip, GPU writes found: `0x10004a` 11,042 refreshes / 0 with differences, `0x100302` 11,009 / 0, the rest ≤ 663 / 0. In this benchmark the GPU
 never wrote any host-visible memory, but this is not provable statically (vkd3d-proton uses device addresses), so refreshing is kept; the cost is the remaining server `memreaddelta` (~19 s).
+
+### Run 21: fragments of one memory merged into one frame (`MemWriteRunsPfx`)
+
+Mountain Peak 26.16, Syria 13.77, Geothermal 14.99, **Overall 18.24** (run 20: 18.39, run 19: 16.39; no measurable change).
+Merging: 217,919 frames from 6,433,536 fragments (~30 per frame); server `memwrite` calls 2.7 M → 0.26 M per run, but server time per frame is unchanged (~4.9 ms): the cost is per byte
+(decompression, mirror copy, page-hash tracking), not per call. Client send-queue wait per reply 0.77 → 0.48 ms; wire/raw 16.6 % (run 19: 19.8 %).
+Per frame (~55 ms): server busy ~18 ms (cmds 7.7, memwrite 4.9, memreaddelta 3.7, present encode 2.0), client waits ~25 ms on the server, ~30 ms is client-side CPU (game + interception). Overlapping the two
+(pipelining) is the only large lever left; it needs knowledge of whether the GPU writes host-visible memory (a wait may only return early if no unfetched GPU write can be read).
