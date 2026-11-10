@@ -94,3 +94,8 @@ the scene whose link was saturated) is consistent with the byte reduction but is
 Run 5 (6.6 GB RAM) scored 10.67, so +8 %; runs 6 and 7 agree to 0.01 FPS Overall. RAM was not the main limit.
 Texel misses: 3,640 of ~3,700 were format 98 (R32_UINT). Server answers sampled from run 7: `u64 = address >> 2`, `u32 = range >> 2`,
 `u32 = 0xe50` (identical in all samples), so `(98, 2, 3664)` was added to `TEXEL_FORMATS` (still gated by learning and audit).
+
+### Run 8 (format 98 synthesised locally)
+
+Mountain Peak 17.57, Syria 9.65, Geothermal 10.00 (10.02), **Overall 11.94**. Texel-buffer misses 3,704 → 94; descriptors answered locally/server 19,864 / 3,533
+(run 6: 21,155 / 6,757 at a comparable point). Remaining misses are mostly type 2 (SAMPLED_IMAGE, ~3,240).
