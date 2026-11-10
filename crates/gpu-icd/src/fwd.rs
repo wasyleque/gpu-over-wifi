@@ -1280,6 +1280,7 @@ fn xfer_table() -> &'static [bool] {
 fn thread_cpu_report() -> String {
     let tick = 100.0; // _SC_CLK_TCK na Linuksie
     let mut by: std::collections::BTreeMap<String, (f64, u32)> = Default::default();
+    let mut single: Vec<(f64, String)> = Vec::new();
     let Ok(dir) = std::fs::read_dir("/proc/self/task") else { return String::new() };
     for e in dir.flatten() {
         let (Ok(comm), Ok(stat)) = (std::fs::read_to_string(e.path().join("comm")), std::fs::read_to_string(e.path().join("stat"))) else { continue };
@@ -1287,13 +1288,16 @@ fn thread_cpu_report() -> String {
         let Some(rest) = stat.rsplit_once(')').map(|x| x.1) else { continue };
         let f: Vec<&str> = rest.split_whitespace().collect();
         let (Some(u), Some(sy)) = (f.get(11).and_then(|v| v.parse::<f64>().ok()), f.get(12).and_then(|v| v.parse::<f64>().ok())) else { continue };
-        let e = by.entry(comm.trim().to_string()).or_insert((0.0, 0));
-        e.0 += (u + sy) / tick;
-        e.1 += 1;
+        let acc = by.entry(comm.trim().to_string()).or_insert((0.0, 0));
+        acc.0 += (u + sy) / tick;
+        acc.1 += 1;
+        single.push(((u + sy) / tick, format!("{}#{}", comm.trim(), e.file_name().to_string_lossy())));
     }
     let mut v: Vec<_> = by.into_iter().collect();
     v.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
-    v.iter().take(10).map(|(n, (t, c))| format!("{n} x{c}: {t:.1}")).collect::<Vec<_>>().join("; ")
+    single.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let top: Vec<String> = single.iter().take(8).map(|(t, n)| format!("{n}: {t:.1}")).collect();
+    format!("{} | pojedyncze wątki: {}", v.iter().take(10).map(|(n, (t, c))| format!("{n} x{c}: {t:.1}")).collect::<Vec<_>>().join("; "), top.join("; "))
 }
 
 /// Czy aplikacja używa vkd3d-proton albo DXVK (`pEngineName` = "vkd3d" / "DXVK").
