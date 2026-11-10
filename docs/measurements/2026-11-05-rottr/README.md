@@ -99,3 +99,10 @@ Texel misses: 3,640 of ~3,700 were format 98 (R32_UINT). Server answers sampled 
 
 Mountain Peak 17.57, Syria 9.65, Geothermal 10.00 (10.02), **Overall 11.94**. Texel-buffer misses 3,704 → 94; descriptors answered locally/server 19,864 / 3,533
 (run 6: 21,155 / 6,757 at a comparable point). Remaining misses are mostly type 2 (SAMPLED_IMAGE, ~3,240).
+
+### Run 10 (descriptor-buffer memories skipped in post-wait refresh, with runtime audit)
+
+Mountain Peak 19.86, Syria 10.08, Geothermal 10.39, **Overall 12.92** (run 8: 11.94, run 9, transfer-only skip that never triggered: 11.84).
+The five 8 MB resource-descriptor heaps (usage 0x420000) and the small sampler heaps (0x220000) are written by the CPU only; skipping them cut server
+`memreaddelta` from ~17.6 calls/frame (10.2 ms) to ~8.0 calls/frame (6.0 ms). Audit: 40,124 skips, 627 verified refreshes, 0 misses.
+Lesson: the earlier assumption "usage 0x7" came from the memory-properties field, not buffer usage; check `powód odświeżania pamięci` lines before designing around flags.
