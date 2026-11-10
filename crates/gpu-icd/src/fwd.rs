@@ -72,6 +72,7 @@ pub struct Stats {
     /// Bajty zapisów pamięci faktycznie wysłane łączem (po kompresji LZ4).
     /// Odświeżenia pamięci według planu: całe / tylko zakresy (i ile bajtów obejmowały zakresy łącznie).
     pub refresh_whole: u64,
+    pub eager_pushes: u64,
     pub refresh_ranged: u64,
     pub refresh_ranged_bytes: u64,
     /// `vkGetDescriptorEXT`: odpowiedzi z cache / z serwera.
@@ -162,6 +163,9 @@ pub struct Flags {
     pub eager_scan: bool,
     /// `GPU_ICD_NO_XFER_TRACK=1`: odświeżaj pamięci tylko-transferowe po każdej pracy (dawne zachowanie).
     pub no_xfer_track: bool,
+    /// `GPU_ICD_EAGER_PUSH_US=<µs>`: przy `vkEndCommandBuffer` wypychamy zapisy aplikacji do odwzorowanej pamięci, jeśli od poprzedniego skanu minęło tyle
+    /// mikrosekund (0 = wyłączone; domyślnie 0). Łącze pracuje wtedy, gdy gra jeszcze nagrywa polecenia, a nie dopiero przy `vkQueueSubmit`.
+    pub eager_push_us: u64,
     /// Odczyt leniwy pamięci HOST_CACHED (domyślnie włączony; `GPU_ICD_NO_LAZY=1` wyłącza).
     pub lazy: bool,
     /// Spekulatywne odpowiedzi `vkAllocateDescriptorSets` z księgowości puli po stronie klienta (domyślnie włączone; `GPU_ICD_NO_DESC_SPEC=1`
@@ -184,6 +188,7 @@ pub fn flags() -> &'static Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),
+        eager_push_us: std::env::var("GPU_ICD_EAGER_PUSH_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
         desc_spec: std::env::var_os("GPU_ICD_NO_DESC_SPEC").is_none(),
         locked_wait: std::env::var_os("GPU_ICD_LOCKED_WAIT").is_some(),
@@ -1488,7 +1493,16 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     }
     match cmd.name {
         // Zamknięcie nagrywania: wszystko, co ten bufor zebrał, idzie do wspólnej partii PRZED `vkEndCommandBuffer`.
-        "vkEndCommandBuffer" => drain_cb(&mut st, slots[0]),
+        "vkEndCommandBuffer" => {
+            drain_cb(&mut st, slots[0]);
+            let gap = flags().eager_push_us;
+            if gap > 0 && st.last_push.elapsed().as_micros() as u64 >= gap {
+                // Zapisy aplikacji idą przed zebranymi poleceniami (jak przy zgłoszeniu), a łącze pracuje, gdy gra jeszcze nagrywa.
+                st.settle_memory();
+                st.last_push = std::time::Instant::now();
+                st.stats.eager_pushes += 1;
+            }
+        }
         // Początek nowego nagrywania albo reset: zaległości z przerwanego nagrywania (np. po `vkResetCommandPool`) są śmieciami i
         // nie mogą trafić do strumienia przed nowym `Begin` (serwer dostałby `vkCmd*` dla bufora, który nie nagrywa).
         "vkBeginCommandBuffer" | "vkResetCommandBuffer" if slots[0] != 0 => {
@@ -1631,7 +1645,7 @@ fn periodic_stats(stats: &Stats) {
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         let (n, q, r) = crate::link::wait_split();
         let (ad, am, asx) = xfer_audit_stats();
-        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń");
+        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}", stats.eager_pushes);
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
