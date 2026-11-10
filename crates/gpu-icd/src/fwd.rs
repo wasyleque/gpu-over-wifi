@@ -1080,8 +1080,8 @@ fn xorstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
         XOR_ZSTD_XOR.fetch_add(zstd::bulk::compress(&xor[a..b], 1).map_or(b - a, |v| v.len()) as u64, Relaxed);
     }
     old[offset..offset + data.len()].copy_from_slice(data);
-    for page in first..last {
-        known_pages[page] = true;
+    if first < last {
+        known_pages[first..last].fill(true);
     }
 }
 
