@@ -1040,6 +1040,7 @@ fn dump_sample(memory: u64, data: &[u8]) {
 static XOR_RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static XOR_ZSTD_RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static XOR_ZSTD_XOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static XOR_ZSTD_PFX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static XOR_KNOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn xorstat_enabled() -> bool {
@@ -1078,6 +1079,12 @@ fn xorstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
         let (a, b) = (chunk * MEM_CHUNK, ((chunk + 1) * MEM_CHUNK).min(data.len()));
         XOR_ZSTD_RAW.fetch_add(zstd::bulk::compress(&data[a..b], 1).map_or(b - a, |v| v.len()) as u64, Relaxed);
         XOR_ZSTD_XOR.fetch_add(zstd::bulk::compress(&xor[a..b], 1).map_or(b - a, |v| v.len()) as u64, Relaxed);
+        // Poprzednia treść tego samego miejsca jako prefiks słownika zstd (dopasowania w dowolnym przesunięciu, nie tylko bajt w bajt).
+        let mut cctx = zstd::zstd_safe::CCtx::create();
+        let mut out: Vec<u8> = Vec::with_capacity(zstd::zstd_safe::compress_bound(b - a));
+        let ok = cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(1)).is_ok() && cctx.ref_prefix(&old[offset + a..offset + b]).is_ok();
+        let n = if ok { cctx.compress2(&mut out, &data[a..b]).unwrap_or(b - a) } else { b - a };
+        XOR_ZSTD_PFX.fetch_add(n as u64, Relaxed);
     }
     old[offset..offset + data.len()].copy_from_slice(data);
     if first < last {
@@ -1086,9 +1093,9 @@ fn xorstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
 }
 
 /// (surowo, z tego strony o znanej treści, zstd surowych, zstd po XOR).
-pub fn xorstat() -> (u64, u64, u64, u64) {
+pub fn xorstat() -> (u64, u64, u64, u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
-    (XOR_RAW.load(Relaxed), XOR_KNOWN.load(Relaxed), XOR_ZSTD_RAW.load(Relaxed), XOR_ZSTD_XOR.load(Relaxed))
+    (XOR_RAW.load(Relaxed), XOR_KNOWN.load(Relaxed), XOR_ZSTD_RAW.load(Relaxed), XOR_ZSTD_XOR.load(Relaxed), XOR_ZSTD_PFX.load(Relaxed))
 }
 
 fn dump_enabled() -> bool {
@@ -1706,8 +1713,8 @@ fn periodic_stats(stats: &Stats) {
         let (n, q, r) = crate::link::wait_split();
         let (ad, am, asx) = xfer_audit_stats();
         if xorstat_enabled() {
-            let (r, k, z, x) = xorstat();
-            eprintln!("[gpu-icd] XORSTAT: surowo {} MB, strony o znanej treści {} MB, zstd surowych {} MB, zstd po XOR {} MB", r >> 20, k >> 20, z >> 20, x >> 20);
+            let (r, k, z, x, pf) = xorstat();
+            eprintln!("[gpu-icd] XORSTAT: surowo {} MB, strony o znanej treści {} MB, zstd surowych {} MB, zstd po XOR {} MB, zstd z prefiksem poprzedniej treści {} MB", r >> 20, k >> 20, z >> 20, x >> 20, pf >> 20);
         }
         eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}", stats.eager_pushes);
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
