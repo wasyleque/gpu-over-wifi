@@ -56,6 +56,7 @@ impl Shared {
         }
         // Tylko wątek, którego jest kolej, dochodzi tutaj, więc blokada odczytu nie jest rywalizowana.
         let r = self.read_one();
+        marks_replied(ticket);
         let mut t = self.turn.lock().unwrap_or_else(|e| e.into_inner());
         t.served += 1;
         if matches!(r, Err(ClientError::Io(_) | ClientError::Closed | ClientError::Frame(_) | ClientError::Msg(_))) {
@@ -145,16 +146,56 @@ impl Job {
 /// kolejki (jeden wątek na kompresję i zapis naraz wydłużył czekanie na odpowiedzi serwera 2x w Black Book).
 enum Item {
     Bytes(Vec<u8>),
+    /// Bajty żądania z odpowiedzią: bilet i chwila zakolejkowania (diagnostyka: ile trwa kolejka+zapis, a ile serwer+powrót).
+    Stamped(Vec<u8>, u64, std::time::Instant),
     Job(Arc<Job>),
 }
 
 impl Item {
     fn queued_len(&self) -> usize {
         match self {
-            Item::Bytes(b) => b.len(),
+            Item::Bytes(b) | Item::Stamped(b, ..) => b.len(),
             Item::Job(j) => j.len,
         }
     }
+}
+
+/// Diagnostyka czekania: dla każdego żądania z odpowiedzią czas od zakolejkowania do zapisu w gnieździe (kolejka za zapisami pamięci + wysyłka)
+/// oraz od zapisu do odebrania odpowiedzi (łącze, serwer, powrót). Dotyczy pierwszego żądania z odpowiedzią w zapisie.
+struct Mark {
+    t0: std::time::Instant,
+    written: Option<std::time::Instant>,
+}
+static MARKS: Mutex<Option<std::collections::HashMap<u64, Mark>>> = Mutex::new(None);
+static MARK_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MARK_QUEUE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MARK_REPLY_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn marks_written(ticket: u64, t0: std::time::Instant) {
+    let now = std::time::Instant::now();
+    let mut g = MARKS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    if m.len() < 4096 {
+        m.insert(ticket, Mark { t0, written: Some(now) });
+    }
+}
+
+fn marks_replied(ticket: u64) {
+    let now = std::time::Instant::now();
+    let m = MARKS.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(&ticket));
+    if let Some(Mark { t0, written: Some(w) }) = m {
+        use std::sync::atomic::Ordering::Relaxed;
+        MARK_N.fetch_add(1, Relaxed);
+        MARK_QUEUE_US.fetch_add(w.duration_since(t0).as_micros() as u64, Relaxed);
+        MARK_REPLY_US.fetch_add(now.duration_since(w).as_micros() as u64, Relaxed);
+    }
+}
+
+/// Średnie z `Mark`: (liczba, kolejka+zapis w µs, zapis→odpowiedź w µs).
+pub fn wait_split() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = MARK_N.load(Relaxed).max(1);
+    (MARK_N.load(Relaxed), MARK_QUEUE_US.load(Relaxed) / n, MARK_REPLY_US.load(Relaxed) / n)
 }
 
 static WIRE_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -283,8 +324,13 @@ impl Link {
                     }
                 };
                 let Some(item) = buf else { return };
+                let mut stamp = None;
                 let buf = match item {
                     Item::Bytes(b) => b,
+                    Item::Stamped(b, ticket, t0) => {
+                        stamp = Some((ticket, t0));
+                        b
+                    }
                     Item::Job(j) => match j.wait() {
                         Ok(b) => b,
                         Err(_) => continue,
@@ -298,6 +344,9 @@ impl Link {
                     t.broken = true;
                     sh.cv.notify_all();
                     return;
+                }
+                if let Some((ticket, t0)) = stamp {
+                    marks_written(ticket, t0);
                 }
             })
             .map_err(ClientError::Io)?;
@@ -389,7 +438,7 @@ impl Link {
             // `GPU_ICD_SYNC_SEND=1`: zapis w wątku wołającego (dawne zachowanie), do porównań przy szukaniu przyczyn zawieszeń.
             let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
             let bytes = match item {
-                Item::Bytes(b) => b,
+                Item::Bytes(b) | Item::Stamped(b, ..) => b,
                 Item::Job(j) => j.wait().map_err(|_| ClientError::Closed)?,
             };
             return w.write_all(&bytes).map_err(ClientError::Io);
@@ -411,9 +460,11 @@ impl Link {
     pub fn send(&mut self, req: &Request) -> Result<(), ClientError> {
         let mut buf = Vec::new();
         self.frame(req, &mut buf)?;
-        self.enqueue(buf)?;
         if expects_reply(req) {
+            self.enqueue_item(Item::Stamped(buf, self.sent, std::time::Instant::now()))?;
             self.sent += 1;
+        } else {
+            self.enqueue(buf)?;
         }
         Ok(())
     }
@@ -425,8 +476,13 @@ impl Link {
         for r in reqs {
             self.frame(r, &mut buf)?;
         }
-        self.enqueue(buf)?;
-        self.sent += reqs.iter().filter(|r| expects_reply(r)).count() as u64;
+        let replies = reqs.iter().filter(|r| expects_reply(r)).count() as u64;
+        if replies > 0 {
+            self.enqueue_item(Item::Stamped(buf, first, std::time::Instant::now()))?;
+        } else {
+            self.enqueue(buf)?;
+        }
+        self.sent += replies;
         Ok(first)
     }
 

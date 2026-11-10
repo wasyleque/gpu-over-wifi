@@ -1478,6 +1478,8 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        let (n, q, r) = crate::link::wait_split();
+        eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
             use std::sync::atomic::Ordering::Relaxed;
