@@ -25,7 +25,16 @@ struct Turn {
     served: u64,
     /// Odczyt zawiódł (rozłączenie, błąd ramki): wszyscy oczekujący dostają błąd zamiast czekać w nieskończoność.
     broken: bool,
+    /// Bilety odpowiedzi, na które nikt nie czeka (oczekiwanie zwrócone grze wcześniej, patrz `Shared::defer`): `(bilet, rodzaj)`, rodzaj 0 = odpowiedź na
+    /// zapytanie (pierwsze 4 bajty to kod wyniku), 1 = odpowiedź `Sync`. Odczytuje je następny wątek, który czeka na swoją odpowiedź.
+    deferred: Vec<(u64, u8)>,
+    /// Jakiś wątek właśnie odczytuje odroczoną odpowiedź.
+    draining: bool,
 }
+
+/// Pierwszy zapamiętany błąd z odroczonej odpowiedzi (0 = brak), do zgłoszenia przy następnym wywołaniu synchronicznym.
+pub static DEFERRED_FAIL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub static DEFERRED_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct Reader {
     stream: TcpStream,
@@ -40,18 +49,58 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Odbiera odpowiedź dla biletu `ticket` (czeka na swoją kolej; nie wymaga blokady instancji).
+    /// Rejestruje odpowiedzi `ticket` (zapytanie) i `ticket + 1` (`Sync`) jako odroczone: wołający nie czeka na nie, odczyta je kolejny czekający wątek.
+    pub fn defer(&self, ticket: u64) {
+        let mut t = self.turn.lock().unwrap_or_else(|e| e.into_inner());
+        t.deferred.push((ticket, 0));
+        t.deferred.push((ticket + 1, 1));
+    }
+
+    /// Obrabia odroczoną odpowiedź: kod wyniku różny od 0 albo błąd serwera zostaje zapamiętany w `DEFERRED_FAIL` (zgłoszony przy następnym wywołaniu).
+    fn finish_deferred(kind: u8, r: &Result<Response, ClientError>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        DEFERRED_DONE.fetch_add(1, Relaxed);
+        let code = match r {
+            Ok(Response::Data(d)) if kind == 0 => d.get(..4).map_or(0, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            Ok(_) => 0,
+            Err(ClientError::Remote(c, _)) => *c,
+            Err(_) => -4, // VK_ERROR_DEVICE_LOST: połączenie zerwane
+        };
+        if code != 0 && DEFERRED_FAIL.compare_exchange(0, code, Relaxed, Relaxed).is_ok() {
+            eprintln!("gpu-icd: ODROCZONA odpowiedź serwera z kodem {code} (rodzaj {kind}); następne wywołanie synchroniczne zgłosi błąd");
+        }
+    }
+
+    /// Odbiera odpowiedź dla biletu `ticket` (czeka na swoją kolej; nie wymaga blokady instancji). Odroczone odpowiedzi wcześniejszych biletów odczytuje po drodze.
     pub fn recv_at(&self, ticket: u64) -> Result<Response, ClientError> {
-        {
+        loop {
             let mut t = self.turn.lock().unwrap_or_else(|e| e.into_inner());
-            while t.served != ticket {
-                if t.broken {
-                    return Err(ClientError::Closed);
-                }
-                t = self.cv.wait(t).unwrap_or_else(|e| e.into_inner());
-            }
             if t.broken {
                 return Err(ClientError::Closed);
+            }
+            if t.served == ticket {
+                break;
+            }
+            let served = t.served;
+            let kind = t.deferred.iter().find(|d| d.0 == served).map(|d| d.1);
+            match kind {
+                Some(kind) if !t.draining => {
+                    t.draining = true;
+                    drop(t);
+                    let r = self.read_one();
+                    Self::finish_deferred(kind, &r);
+                    let mut t = self.turn.lock().unwrap_or_else(|e| e.into_inner());
+                    t.deferred.retain(|d| d.0 != served);
+                    t.served += 1;
+                    t.draining = false;
+                    if matches!(r, Err(ClientError::Io(_) | ClientError::Closed | ClientError::Frame(_) | ClientError::Msg(_))) {
+                        t.broken = true;
+                    }
+                    self.cv.notify_all();
+                }
+                _ => {
+                    let _t = self.cv.wait(t).unwrap_or_else(|e| e.into_inner());
+                }
             }
         }
         // Tylko wątek, którego jest kolej, dochodzi tutaj, więc blokada odczytu nie jest rywalizowana.
@@ -372,7 +421,7 @@ impl Link {
         let reader = stream.try_clone()?;
         let direct_stream = stream.try_clone()?;
         let mut writer = stream;
-        let shared = Arc::new(Shared { turn: Mutex::new(Turn { served: 0, broken: false }), cv: Condvar::new(), reader: Mutex::new(Reader { stream: reader, frames: FrameReader::new() }) });
+        let shared = Arc::new(Shared { turn: Mutex::new(Turn { served: 0, broken: false, deferred: Vec::new(), draining: false }), cv: Condvar::new(), reader: Mutex::new(Reader { stream: reader, frames: FrameReader::new() }) });
         let out = Arc::new(Out { q: Mutex::new(OutState { queue: VecDeque::new(), bytes: 0, closed: false, broken: false }), data: Condvar::new(), space: Condvar::new(), work: Mutex::new(VecDeque::new()), work_cv: Condvar::new(), work_closed: std::sync::atomic::AtomicBool::new(false) });
         let (o, sh) = (out.clone(), shared.clone());
         let sender = std::thread::Builder::new()
@@ -708,6 +757,24 @@ mod tests {
         drop(link);
         drop(shared);
         h.join().unwrap();
+    }
+
+    #[test]
+    fn deferred_replies_are_drained_by_the_next_waiter_in_order() {
+        let (addr, srv) = fake_server();
+        let mut link = Link::connect(addr, b"t").unwrap();
+        let before = DEFERRED_DONE.load(std::sync::atomic::Ordering::Relaxed);
+        // Dwa żądania z odpowiedzią (zapytanie + Sync), na które nikt nie czeka, potem zwykłe wywołanie.
+        let t = link.send_many(&[Request::MemRead { memory: 1, offset: 0, len: 1 }, Request::MemRead { memory: 2, offset: 0, len: 1 }]).unwrap();
+        link.shared().defer(t);
+        let r = link.call(&Request::MemRead { memory: 3, offset: 0, len: 1 }).unwrap();
+        assert_eq!(r, Response::Data(vec![3]), "własna odpowiedź wraca poprawnie po odroczonych");
+        let done = DEFERRED_DONE.load(std::sync::atomic::Ordering::Relaxed) - before;
+        assert!(done >= 2, "odroczone odpowiedzi odebrane przez następnego czekającego: {done}");
+        // Kolejne zwykłe wywołanie nadal działa (kolejność biletów nie rozjechała się).
+        assert_eq!(link.call(&Request::MemRead { memory: 4, offset: 0, len: 1 }).unwrap(), Response::Data(vec![4]));
+        drop(link);
+        srv.join().unwrap();
     }
 
     #[test]

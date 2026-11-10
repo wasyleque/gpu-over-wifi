@@ -96,6 +96,8 @@ struct InstState {
     mem_refresh: HashMap<u64, bool>,
     /// Pamięć o pewnie znanym typie HOST_CACHED (nieznany typ = `false`): serwer porównuje ją w miejscu, bez kopii pośredniej.
     mem_cached: HashMap<u64, bool>,
+    /// Pamięci, o których WIEMY, że nie są HOST_CACHED (w vkd3d-proton: sterty UPLOAD, dla GPU tylko do odczytu wg kontraktu D3D12).
+    mem_upload: std::collections::HashSet<u64>,
     /// Które zakresy odwzorowanej pamięci GPU może zapisać (decyduje, co odświeżać po oczekiwaniu).
     gpuw: gpuwrite::GpuWrites,
     /// Lokalne wyliczanie deskryptorów buforów (uczy się i weryfikuje na odpowiedziach serwera; patrz `descsynth`).
@@ -306,6 +308,16 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
     if info.is_null() || out.is_null() {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    // VkInstanceCreateInfo.pApplicationInfo @24, VkApplicationInfo.pEngineName @32: silnik "vkd3d" (vkd3d-proton) włącza kontrakt D3D12 (patrz `fwd::contract_active`).
+    {
+        let app = std::ptr::read_unaligned(info.add(24) as *const *const u8);
+        if !app.is_null() {
+            let name = std::ptr::read_unaligned(app.add(32) as *const *const c_char);
+            if !name.is_null() {
+                fwd::set_engine(&CStr::from_ptr(name).to_string_lossy());
+            }
+        }
+    }
     // VkInstanceCreateInfo: enabledExtensionCount @48, ppEnabledExtensionNames @56. Dozwolone tylko ogłoszone.
     let n_ext = std::ptr::read_unaligned(info.add(48) as *const u32) as usize;
     if std::env::var("GPU_ICD_DEBUG").is_ok() {
@@ -360,6 +372,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             memreq: Default::default(),
             mem_refresh: HashMap::new(),
             mem_cached: HashMap::new(),
+            mem_upload: Default::default(),
             gpuw: Default::default(),
             synth: Default::default(),
             texel: Default::default(),

@@ -74,6 +74,7 @@ pub struct Stats {
     pub refresh_whole: u64,
     pub eager_pushes: u64,
     pub mem_groups: u64,
+    pub early_waits: u64,
     pub mem_group_parts: u64,
     pub refresh_ranged: u64,
     pub refresh_ranged_bytes: u64,
@@ -168,6 +169,8 @@ pub struct Flags {
     /// `GPU_ICD_EAGER_PUSH_US=<µs>`: przy `vkEndCommandBuffer` wypychamy zapisy aplikacji do odwzorowanej pamięci, jeśli od poprzedniego skanu minęło tyle
     /// mikrosekund (0 = wyłączone; domyślnie 0: w TR nie dało powtarzalnego zysku). Łącze pracuje wtedy, gdy gra jeszcze nagrywa polecenia, a nie dopiero przy `vkQueueSubmit`.
     pub eager_push_us: u64,
+    /// `GPU_ICD_EARLY_WAIT=0` wyłącza, `=1` wymusza (też poza vkd3d), domyślnie (brak zmiennej) tylko dla silnika "vkd3d".
+    pub early_wait: Option<bool>,
     /// Odczyt leniwy pamięci HOST_CACHED (domyślnie włączony; `GPU_ICD_NO_LAZY=1` wyłącza).
     pub lazy: bool,
     /// Spekulatywne odpowiedzi `vkAllocateDescriptorSets` z księgowości puli po stronie klienta (domyślnie włączone; `GPU_ICD_NO_DESC_SPEC=1`
@@ -190,6 +193,7 @@ pub fn flags() -> &'static Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),
+        early_wait: std::env::var("GPU_ICD_EARLY_WAIT").ok().map(|v| v != "0"),
         eager_push_us: std::env::var("GPU_ICD_EAGER_PUSH_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
         desc_spec: std::env::var_os("GPU_ICD_NO_DESC_SPEC").is_none(),
@@ -784,7 +788,8 @@ impl InstState {
         if xfer_audit_bad(id) {
             return true;
         }
-        let skip = if self.gpuw.descriptor_only(id) { true } else { !self.xfer_dirty && self.gpuw.transfer_only(id) };
+        let upload = contract_active() && self.mem_upload.contains(&id);
+        let skip = if self.gpuw.descriptor_only(id) || upload { true } else { !self.xfer_dirty && self.gpuw.transfer_only(id) };
         !skip || xfer_audit_pick(id)
     }
 
@@ -1271,6 +1276,28 @@ fn xfer_table() -> &'static [bool] {
 
 /// Audyt śledzenia zapisów transferem: co 64. pominięte odświeżenie pamięci tylko-transferowej i tak jest wykonane; niepusta różnica = śledzenie
 /// przeoczyło zapis (błąd do zgłoszenia w logu; dane i tak trafiają do pamięci aplikacji).
+/// Czy aplikacja to vkd3d-proton (`pEngineName` = "vkd3d").
+static ENGINE_VKD3D: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_engine(name: &str) {
+    if name.starts_with("vkd3d") {
+        ENGINE_VKD3D.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if flags().periodic {
+        eprintln!("[gpu-icd] silnik aplikacji: {name:?}");
+    }
+}
+
+/// Kontrakt D3D12 aktywny: sterty UPLOAD (host-visible bez cache) nie są zapisywane przez GPU, więc nie wymagają odświeżania po oczekiwaniu, a
+/// oczekiwanie na semafor może wrócić do gry przed odpowiedzią serwera, gdy nie ma nic do odświeżenia (patrz `exec_begin`).
+fn contract_active() -> bool {
+    flags().early_wait.unwrap_or_else(|| ENGINE_VKD3D.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Najkrótszy limit czasu `vkWaitSemaphores`, który traktujemy jak oczekiwanie bez limitu (wynik zawsze sukces, błąd wraca odroczony). Krótsze to
+/// odpytywania (`timeout` bliski 0), których wynik zależy od serwera.
+const EARLY_MIN_TIMEOUT_NS: u64 = 500_000_000;
+
 static AUDIT_IDS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 static AUDIT_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static AUDIT_BAD: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
@@ -1777,7 +1804,7 @@ fn periodic_stats(stats: &Stats) {
             let (r, k, z, x, pf) = xorstat();
             eprintln!("[gpu-icd] XORSTAT: surowo {} MB, strony o znanej treści {} MB, zstd surowych {} MB, zstd po XOR {} MB, zstd z prefiksem poprzedniej treści {} MB", r >> 20, k >> 20, z >> 20, x >> 20, pf >> 20);
         }
-        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}; zapisy pamięci scalone: {} ramek z {} fragmentów", stats.eager_pushes, stats.mem_groups, stats.mem_group_parts);
+        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}; zapisy pamięci scalone: {} ramek z {} fragmentów; oczekiwania zwrócone wcześniej: {} (odebrane odroczone odpowiedzi {})", stats.eager_pushes, stats.mem_groups, stats.mem_group_parts, stats.early_waits, crate::link::DEFERRED_DONE.load(std::sync::atomic::Ordering::Relaxed));
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
@@ -2197,6 +2224,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
             let known = memory_is_cached(st, slots, cmd, args);
             let cached = known.unwrap_or(true);
             st.mem_cached.insert(mem_id, known.unwrap_or(false));
+            if known == Some(false) {
+                st.mem_upload.insert(mem_id);
+            }
             st.stats.mem_flags.insert(mem_id, (size, LAST_MEMORY_FLAGS.load(std::sync::atomic::Ordering::Relaxed)));
             let refresh = if flags().no_refresh_uncached { cached } else { size <= REFRESH_ALWAYS_BELOW || cached };
             st.mem_refresh.insert(mem_id, refresh);
@@ -2267,6 +2297,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         st.mem_sizes.remove(&slots[1]);
         st.mem_refresh.remove(&slots[1]);
         st.mem_cached.remove(&slots[1]);
+        st.mem_upload.remove(&slots[1]);
         st.gpuw.memory_freed(slots[1]);
         st.client.forget_memory(slots[1]);
     }
@@ -2281,6 +2312,11 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         return Step::Done(0);
     }
     // Droga synchroniczna: partia, potem polecenie, potem `Sync` (błąd asynchroniczny); jeden obieg po sieci.
+    // Błąd z odroczonej odpowiedzi wcześniejszego oczekiwania (patrz niżej) zgłaszamy tu, przy następnym wywołaniu synchronicznym.
+    let deferred_fail = crate::link::DEFERRED_FAIL.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if deferred_fail != 0 {
+        return Step::Done(fail(deferred_fail));
+    }
     if st.scan_pending {
         st.settle_memory();
     }
@@ -2303,6 +2339,19 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         reqs.push(req);
     }
     let ticket = st.client.send_many(&reqs).ok();
+    // Oczekiwanie na semafor bez limitu czasu wraca do gry od razu, gdy po nim nie ma czego odświeżać z serwera: serwer wykona je w kolejności strumienia
+    // (przed każdym późniejszym zapisem pamięci i poleceniem), więc GPU skończy pracę, zanim cokolwiek, co gra zrobi potem, dotrze do niego; odczyty
+    // leniwych pamięci (readback) idą żądaniem za oczekiwaniem w tym samym strumieniu. Wynik (sukces) i ewentualny błąd serwera odbiera następny czekający wątek.
+    if let (Some(t), true) = (ticket, cmd.class == CmdClass::Sync && pre_ids.is_empty() && cmd.name.starts_with("vkWaitSemaphores") && slots.get(2).is_some_and(|t| *t >= EARLY_MIN_TIMEOUT_NS) && contract_active()) {
+        st.client.shared().defer(t);
+        st.stats.early_waits += 1;
+        if st.gpu_dirty {
+            st.lazy_invalidate();
+        }
+        st.gpu_dirty = false;
+        st.xfer_dirty = false;
+        return Step::Done(0);
+    }
     Step::Pending(Pending {
         op,
         slots_ptr: slots.as_mut_ptr(),
@@ -2523,6 +2572,7 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
             st.mem_sizes.remove(&id);
             st.mem_refresh.remove(&id);
             st.mem_cached.remove(&id);
+            st.mem_upload.remove(&id);
             std::ptr::write_unaligned(slots[3] as *mut u64, 0);
         }
     }
