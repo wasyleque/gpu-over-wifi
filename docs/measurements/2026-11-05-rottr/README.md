@@ -149,3 +149,9 @@ Merging: 217,919 frames from 6,433,536 fragments (~30 per frame); server `memwri
 (decompression, mirror copy, page-hash tracking), not per call. Client send-queue wait per reply 0.77 → 0.48 ms; wire/raw 16.6 % (run 19: 19.8 %).
 Per frame (~55 ms): server busy ~18 ms (cmds 7.7, memwrite 4.9, memreaddelta 3.7, present encode 2.0), client waits ~25 ms on the server, ~30 ms is client-side CPU (game + interception). Overlapping the two
 (pipelining) is the only large lever left; it needs knowledge of whether the GPU writes host-visible memory (a wait may only return early if no unfetched GPU write can be read).
+
+### Run 22: early return of long `vkWaitSemaphores` (vkd3d: D3D12 UPLOAD-heap contract), deferred replies
+
+Mountain Peak 39.78 (max 88.6), Syria 18.45, Geothermal 19.16, **Overall 26.10** (run 21: 18.24, +43 %; run 5: 10.67, +145 %).
+34,325 waits returned early (68,644 deferred replies drained in order), audit of skipped refreshes: 129,357 skips, 2,022 verified, 0 misses; client wait for the server 25 → 5.9 ms per frame
+(35.2 s over 5,972 frames); server `query` time rose to 7.4 s (the server now does the waiting, overlapped with the client's recording of the next frame). Engine detected as "vkd3d".
