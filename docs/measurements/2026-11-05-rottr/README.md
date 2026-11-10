@@ -122,3 +122,16 @@ send-queue wait per reply 1.62 ms (run 10: 2.11 ms), server-wait per frame ~44.6
 
 Eager on: 13.40 / 12.61 / 12.60; eager off: 12.92 / 13.87. Run-to-run spread is therefore at least ~±4 %, much larger than the 0.01 FPS seen once in runs 6/7; the +3.7 % of run 11
 was not reproducible. Eager push is now off by default (`GPU_ICD_EAGER_PUSH_US=2000` enables it). Deferred server flush reverted: memwrite time per call 8.7 → 7.5 µs but no FPS gain.
+
+### Runs 18-19: zstd with previous-sent content as prefix (`MemWriteZstdPfx`) and hardware CRC32C
+
+Offline measurement (XORSTAT, 25 GB raw): zstd 9,070 MB, zstd of XOR delta 7,785 MB (-14 %), **zstd with the previous content as prefix 5,248 MB (-42 %)**.
+Both sides keep a "last sent here" mirror built from the same write sequence (independent of what the GPU does); the server verifies length and crc32c of the raw bytes.
+
+| run | change | Mountain Peak | Syria | Geothermal | Overall | wire/raw | server memwrite |
+|---|---|---|---|---|---|---|---|
+| 18 | prefix coding, software CRC32C | 19.67 | 10.40 | 10.76 | 13.18 | 17.8 % | 78.7 s |
+| 19 | + hardware CRC32C (SSE4.2) | 22.26 | 12.62 | 14.53 | **16.39** | 19.8 % | 19.1 s |
+
+The byte-at-a-time software CRC32C in `gpu-proto` (~0.5 GB/s) was a hidden cost on both sides (frame CRC of every request and the raw-bytes CRC): replacing it with the SSE4.2 instruction
+removed ~60 s of server time per run and cut the client's send-queue wait from 2.2 to 0.77 ms. Overall 13.87 (run 14, best before) → 16.39 (+18 %).
