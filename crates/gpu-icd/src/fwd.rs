@@ -39,11 +39,15 @@ pub struct DispObj {
     /// PER BUFOR POLECEŃ, a nie per wątek: vkd3d-proton nagrywa jeden bufor na kilku wątkach, a polecenia z wątku A nie mogą wyprzedzić
     /// `vkEndCommandBuffer` wywołanego na wątku B (serwer dostawał `vkCmd*` po zamknięciu bufora i sterownik NVIDIA kończył się segfaultem).
     pending: std::sync::Mutex<Vec<u8>>,
+    /// Dla bufora poleceń: od ostatniego `Begin`/`Reset` nagrano polecenie, które może zapisać bufor przez transfer (kopia, wypełnienie,
+    /// aktualizacja, wykonanie buforów wtórnych itd.; patrz `xfer_table`). Pamięci, do których GPU pisze tylko tak, nie wymagają
+    /// odświeżania po pracy bez takich poleceń.
+    xfer_write: std::sync::atomic::AtomicBool,
 }
 
 impl DispObj {
     pub(crate) fn new(id: u64) -> DispObj {
-        DispObj { loader_data: 0, id, inst: 0, pending: std::sync::Mutex::new(Vec::new()) }
+        DispObj { loader_data: 0, id, inst: 0, pending: std::sync::Mutex::new(Vec::new()), xfer_write: std::sync::atomic::AtomicBool::new(false) }
     }
 
     /// Dopisuje zakodowane polecenie; zwraca, czy bufor osiągnął próg opróżnienia.
@@ -156,6 +160,8 @@ pub struct Flags {
     pub no_refresh_uncached: bool,
     /// Skan odwzorowanej pamięci przy każdym `vkQueueSubmit` (dawne zachowanie) zamiast odroczonego do wysłania partii.
     pub eager_scan: bool,
+    /// `GPU_ICD_NO_XFER_TRACK=1`: odświeżaj pamięci tylko-transferowe po każdej pracy (dawne zachowanie).
+    pub no_xfer_track: bool,
     /// Odczyt leniwy pamięci HOST_CACHED (domyślnie włączony; `GPU_ICD_NO_LAZY=1` wyłącza).
     pub lazy: bool,
     /// Spekulatywne odpowiedzi `vkAllocateDescriptorSets` z księgowości puli po stronie klienta (domyślnie włączone; `GPU_ICD_NO_DESC_SPEC=1`
@@ -177,6 +183,7 @@ pub fn flags() -> &'static Flags {
     F.get_or_init(|| Flags {
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
+        no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),
         lazy: std::env::var_os("GPU_ICD_NO_LAZY").is_none(),
         desc_spec: std::env::var_os("GPU_ICD_NO_DESC_SPEC").is_none(),
         locked_wait: std::env::var_os("GPU_ICD_LOCKED_WAIT").is_some(),
@@ -724,6 +731,8 @@ impl InstState {
         self.mems
             .iter()
             .filter(|(i, s)| s.mapped && s.lazy.is_none() && self.mem_refresh.get(i).copied().unwrap_or(true) && self.gpuw.plan(**i) != crate::gpuwrite::Plan::Skip)
+            // Pamięć, do której GPU pisze tylko transferami: bez poleceń transferu w zgłoszonej pracy nic się nie zmieniło.
+            .filter(|(i, _)| self.xfer_dirty || !self.gpuw.transfer_only(**i) || xfer_audit_pick(**i))
             .map(|(i, _)| *i)
             .collect()
     }
@@ -731,6 +740,7 @@ impl InstState {
     /// Wpisuje odpowiedź `MemReadDelta` do lokalnej kopii pamięci `id`; zwraca `true`, gdy serwer ma jeszcze zmiany do wysłania.
     fn apply_delta(&mut self, id: u64, d: &[u8], ticket: u64) -> bool {
         let Some((more, segs)) = gpu_proto::pagediff::decode_segments(d) else { return false };
+        xfer_audit_check(id, !segs.is_empty());
         for (off, body) in segs {
             self.stats.memr_bytes += body.len() as u64;
             // Kopiujemy do istniejącego bufora (aplikacja trzyma wskaźnik z `vkMapMemory`), z pominięciem stron z nowszą odpowiedzią.
@@ -787,6 +797,7 @@ impl InstState {
         for id in self.refresh_ids() {
             self.drain_delta(id);
         }
+        self.xfer_dirty = false;
     }
 }
 
@@ -1108,6 +1119,121 @@ pub fn lock_report() -> String {
 /// Po tylu bajtach bufor poleceń jest przenoszony do wspólnej partii (żeby nie rósł bez końca między `vkEndCommandBuffer`).
 const LOCAL_FLUSH_BYTES: usize = 256 * 1024;
 
+/// Polecenia, które mogą zapisać bufor inaczej niż shaderem: kopie, wypełnienia, aktualizacje, zapisy znaczników, wykonanie buforów wtórnych,
+/// przetwarzanie i budowa struktur. Nazwy dobrane z nadmiarem (zbędne oznaczenie kosztuje tylko odświeżenie); znaczniki czasu zapisują do puli
+/// zapytań, nie do bufora.
+fn xfer_table() -> &'static [bool] {
+    static T: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        COMMANDS
+            .iter()
+            .map(|c| {
+                c.name.starts_with("vkCmd")
+                    && !c.name.starts_with("vkCmdWriteTimestamp")
+                    && !c.name.starts_with("vkCmdWriteAccelerationStructuresProperties")
+                    && ["Copy", "Fill", "Update", "Write", "Execute", "Preprocess", "Build", "Decode", "Encode", "Convert"].iter().any(|k| c.name.contains(k))
+            })
+            .collect()
+    })
+}
+
+/// Audyt śledzenia zapisów transferem: co 64. pominięte odświeżenie pamięci tylko-transferowej i tak jest wykonane; niepusta różnica = śledzenie
+/// przeoczyło zapis (błąd do zgłoszenia w logu; dane i tak trafiają do pamięci aplikacji).
+static AUDIT_IDS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+static AUDIT_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUDIT_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUDIT_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn xfer_audit_pick(id: u64) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !AUDIT_TICK.fetch_add(1, Relaxed).is_multiple_of(64) {
+        return false;
+    }
+    let mut g = AUDIT_IDS.lock().unwrap_or_else(|e| e.into_inner());
+    if !g.contains(&id) {
+        g.push(id);
+    }
+    true
+}
+
+fn xfer_audit_check(id: u64, changed: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut g = AUDIT_IDS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = g.iter().position(|x| *x == id) {
+        g.swap_remove(p);
+        let done = AUDIT_DONE.fetch_add(1, Relaxed) + 1;
+        if changed {
+            let miss = AUDIT_MISS.fetch_add(1, Relaxed) + 1;
+            if miss <= 20 {
+                eprintln!("gpu-icd: AUDYT TRANSFERÓW: pamięć {id:#x} zmieniona mimo braku poleceń zapisu (przeoczenie śledzenia nr {miss} z {done} sprawdzeń)");
+            }
+        }
+    }
+}
+
+/// Audyt śledzenia zapisów transferem: (sprawdzenia, przeoczenia).
+pub fn xfer_audit_stats() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (AUDIT_DONE.load(Relaxed), AUDIT_MISS.load(Relaxed))
+}
+
+/// Zapisuje w buforze poleceń, czy ostatnie nagranie mogło zapisać bufor transferem; `Begin`/`Reset` zaczynają od zera.
+///
+/// # Safety
+/// `cb` to uchwyt bufora poleceń (wskaźnik na `DispObj`) albo 0.
+unsafe fn note_cb_write(op: u16, name: &str, cb: u64) {
+    if cb == 0 {
+        return;
+    }
+    let obj = &*(cb as *const DispObj);
+    if matches!(name, "vkBeginCommandBuffer" | "vkResetCommandBuffer") {
+        obj.xfer_write.store(false, std::sync::atomic::Ordering::Relaxed);
+    } else if xfer_table().get(op as usize).copied().unwrap_or(true) {
+        obj.xfer_write.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Czy praca zgłoszona `vkQueueSubmit`/`vkQueueSubmit2` mogła zapisać bufor transferem. Wszystko, czego nie umiemy odczytać: tak.
+///
+/// # Safety
+/// `slots` z wywołania aplikacji zgodnego z sygnaturą: wskaźniki i liczniki struktur zgłoszenia muszą być ważne.
+unsafe fn submit_may_write(name: &str, slots: &[u64]) -> bool {
+    use std::ptr::read_unaligned as rd;
+    if slots.len() < 4 || slots[2] == 0 {
+        return slots.get(1).copied().unwrap_or(1) != 0;
+    }
+    let (count, infos) = (slots[1] as usize, slots[2] as *const u8);
+    if count > 4096 {
+        return true;
+    }
+    let v2 = name.starts_with("vkQueueSubmit2");
+    for i in 0..count {
+        // VkSubmitInfo (72 B): commandBufferCount @40, pCommandBuffers @48. VkSubmitInfo2 (64 B): commandBufferInfoCount @32, pCommandBufferInfos @40.
+        let (base, n, list) = if v2 {
+            let b = infos.add(i * 64);
+            (b, rd(b.add(32) as *const u32) as usize, rd(b.add(40) as *const u64))
+        } else {
+            let b = infos.add(i * 72);
+            (b, rd(b.add(40) as *const u32) as usize, rd(b.add(48) as *const u64))
+        };
+        let _ = base;
+        if n == 0 {
+            continue;
+        }
+        if list == 0 || n > 4096 {
+            return true;
+        }
+        for k in 0..n {
+            // VkCommandBufferSubmitInfo (32 B): commandBuffer @16.
+            let cb = if v2 { rd((list as *const u8).add(k * 32 + 16) as *const u64) } else { rd((list as *const u8).add(k * 8) as *const u64) };
+            if cb == 0 || (*(cb as *const DispObj)).xfer_write.load(std::sync::atomic::Ordering::Relaxed) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Które polecenia mogą iść szybką ścieżką: `vkCmd*` bez wyniku i bez parametrów wyjściowych, klasy FireAndForget. Żadne z nich nie ma
 /// obsługi po nazwie w `exec` (wszystkie wyjątki to `vkCreate*`, `vkAllocate*`, `vkBind*`, `vkQueueSubmit*` itd.).
 fn fast_table() -> &'static [bool] {
@@ -1179,6 +1305,7 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
     if matches!(cmd.name, "vkBeginCommandBuffer" | "vkResetCommandBuffer") {
         drop((*cb).take());
     }
+    note_cb_write(op, cmd.name, slots[0]);
     // SAFETY: uchwyt bufora poleceń to wskaźnik na obiekt ICD żyjący do `vkFreeCommandBuffers`/zniszczenia puli.
     if (*cb).push(&bytes) {
         let data = (*cb).take();
@@ -1346,10 +1473,16 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         "vkEndCommandBuffer" => drain_cb(&mut st, slots[0]),
         // Początek nowego nagrywania albo reset: zaległości z przerwanego nagrywania (np. po `vkResetCommandPool`) są śmieciami i
         // nie mogą trafić do strumienia przed nowym `Begin` (serwer dostałby `vkCmd*` dla bufora, który nie nagrywa).
-        "vkBeginCommandBuffer" | "vkResetCommandBuffer" if slots[0] != 0 => drop((*(slots[0] as *const DispObj)).take()),
+        "vkBeginCommandBuffer" | "vkResetCommandBuffer" if slots[0] != 0 => {
+            note_cb_write(op, cmd.name, slots[0]);
+            drop((*(slots[0] as *const DispObj)).take())
+        }
         // Każde inne `vkCmd*`, które nie poszło szybką ścieżką, wchodzi do wspólnej partii natychmiast, więc zaległe polecenia TEGO bufora
         // muszą je poprzedzić (kolejność nagrywania w obrębie bufora).
-        n if n.starts_with("vkCmd") && slots[0] != 0 && params.first().is_some_and(|p| p.type_name == "VkCommandBuffer") => drain_cb(&mut st, slots[0]),
+        n if n.starts_with("vkCmd") && slots[0] != 0 && params.first().is_some_and(|p| p.type_name == "VkCommandBuffer") => {
+            note_cb_write(op, cmd.name, slots[0]);
+            drain_cb(&mut st, slots[0])
+        }
         _ => {}
     }
     if cmd.name == "vkCreateGraphicsPipelines" && flags().trace {
@@ -1479,6 +1612,8 @@ fn periodic_stats(stats: &Stats) {
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         let (n, q, r) = crate::link::wait_split();
+        let (ad, am) = xfer_audit_stats();
+        eprintln!("[gpu-icd] audyt śledzenia zapisów transferem: {ad} sprawdzeń, {am} przeoczeń");
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
@@ -1834,6 +1969,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
             st.scan_pending = true;
         }
         st.gpu_dirty = true;
+        if flags().no_xfer_track || submit_may_write(cmd.name, slots) {
+            st.xfer_dirty = true;
+        }
         st.submit_gen += 1;
     }
     let mut e = Encoder::new();
@@ -2232,6 +2370,7 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
             // zgłosił pracę, jego zapisy GPU nie były objęte tym odświeżeniem, więc stan "brudny" zostaje.
             if st.submit_gen == p.submit_gen {
                 st.gpu_dirty = false;
+                st.xfer_dirty = false;
             }
         } else {
             st.read_mapped();
@@ -2538,6 +2677,18 @@ mod memreq_target_tests {
             if t[op] {
                 assert!(c.name.starts_with("vkCmd") || matches!(c.name, "vkBeginCommandBuffer" | "vkResetCommandBuffer"), "{}", c.name);
             }
+        }
+    }
+
+    #[test]
+    fn transfer_write_commands_are_marked_and_draws_are_not() {
+        let t = xfer_table();
+        let on = |n: &str| COMMANDS.iter().position(|c| c.name == n).map(|i| t[i]).unwrap_or_else(|| panic!("brak {n}"));
+        for n in ["vkCmdCopyBuffer", "vkCmdCopyBuffer2", "vkCmdFillBuffer", "vkCmdUpdateBuffer", "vkCmdCopyImageToBuffer2", "vkCmdCopyQueryPoolResults", "vkCmdExecuteCommands", "vkCmdBuildAccelerationStructuresKHR"] {
+            assert!(on(n), "{n}");
+        }
+        for n in ["vkCmdDraw", "vkCmdDrawIndexed", "vkCmdBindPipeline", "vkCmdDispatch", "vkCmdPipelineBarrier2", "vkCmdWriteTimestamp", "vkBeginCommandBuffer", "vkQueueSubmit"] {
+            assert!(!on(n), "{n}");
         }
     }
 

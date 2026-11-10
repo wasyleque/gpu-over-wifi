@@ -9,6 +9,9 @@ use std::collections::HashMap;
 /// Każdy inny bit (też nieznany, w tym SHADER_DEVICE_ADDRESS, który pozwala pisać przez wskaźnik) oznacza możliwy zapis.
 const READ_ONLY_BUFFER_USAGE: u32 = 0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x100;
 
+/// VK_BUFFER_USAGE_TRANSFER_DST_BIT.
+const TRANSFER_DST: u32 = 0x2;
+
 pub fn usage_is_read_only(usage: u32) -> bool {
     usage != 0 && usage & !READ_ONLY_BUFFER_USAGE == 0
 }
@@ -28,6 +31,8 @@ pub enum Plan {
 struct MemUse {
     /// Przypisano coś, czego zakresu nie umiemy określić (obraz, nieznany bufor).
     whole: bool,
+    /// Przypisano bufor, który GPU może zapisać także inaczej niż transferem (storage, adres urządzenia, nieznane użycie).
+    other: bool,
     ranges: Vec<(u64, u64)>,
     /// Diagnostyka (do logu): pierwsze bufory przypisane do pamięci jako (przesunięcie, rozmiar, flagi użycia).
     sample: Vec<(u64, u64, u32)>,
@@ -60,6 +65,9 @@ impl GpuWrites {
                 e.sample.push((offset, size, usage));
             }
         }
+        if !matches!(self.bufs.get(&buffer), Some(&(_, usage)) if usage != 0 && usage & !(READ_ONLY_BUFFER_USAGE | TRANSFER_DST) == 0) {
+            e.other = true;
+        }
         match self.bufs.get(&buffer) {
             Some(&(_, usage)) if usage_is_read_only(usage) => {}
             Some(&(size, _)) if size > 0 => e.ranges.push((offset, size)),
@@ -77,6 +85,11 @@ impl GpuWrites {
             None => "brak powiązań".into(),
             Some(e) => format!("obrazy:{} bufory(offset,rozmiar,użycie): {:x?}", e.whole, e.sample),
         }
+    }
+
+    /// Do pamięci przypisano wyłącznie bufory, które GPU może zapisać tylko poleceniami transferu (użycie: bity tylko do odczytu i TRANSFER_DST).
+    pub fn transfer_only(&self, memory: u64) -> bool {
+        self.mems.get(&memory).is_some_and(|e| !e.whole && !e.other)
     }
 
     pub fn plan(&self, memory: u64) -> Plan {
@@ -122,6 +135,25 @@ mod tests {
         g.bind_buffer(1, 12, 73728 + 100); // nakłada się: scalane
         // (65536, 8192) + (73728, 4096) + (73828, 4096) -> jeden zakres od 65536 do 73828 + 4096.
         assert_eq!(g.plan(1), Plan::Ranges(vec![(65536, 73828 + 4096 - 65536)]));
+    }
+
+    #[test]
+    fn transfer_only_memories_are_recognised_by_usage() {
+        let mut g = GpuWrites::default();
+        g.buffer_created(1, 4096, 0x1 | 0x2 | 0x4); // jak bufory vkd3d: transfer + teksel uniform
+        g.buffer_created(2, 4096, 0x20 | 0x2); // storage
+        g.buffer_created(3, 4096, 0x2 | 0x20000); // adres urządzenia
+        g.bind_buffer(10, 1, 0);
+        assert!(g.transfer_only(10));
+        g.bind_buffer(11, 1, 0);
+        g.bind_buffer(11, 2, 4096);
+        assert!(!g.transfer_only(11), "storage");
+        g.bind_buffer(12, 3, 0);
+        assert!(!g.transfer_only(12), "adres urządzenia");
+        g.bind_image(13);
+        assert!(!g.transfer_only(13) && !g.transfer_only(99));
+        g.bind_buffer(14, 77, 0); // nieznany bufor
+        assert!(!g.transfer_only(14));
     }
 
     #[test]

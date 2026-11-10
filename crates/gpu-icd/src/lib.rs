@@ -106,6 +106,8 @@ struct InstState {
     plans_logged: std::collections::HashSet<u64>,
     /// Od ostatniego odświeżenia pamięci był `vkQueueSubmit`, więc GPU mogło ją zmienić.
     gpu_dirty: bool,
+    /// Od ostatniego odświeżenia zgłoszono pracę z poleceniem, które może zapisać bufor transferem (pamięci tylko-transferowe wymagają wtedy odświeżenia).
+    xfer_dirty: bool,
     /// Był `vkQueueSubmit` od ostatniego skanu odwzorowanej pamięci: skan (zapisy na serwer) następuje tuż przed wysłaniem partii, patrz `settle_memory`.
     scan_pending: bool,
     /// Licznik zgłoszeń `vkQueueSubmit`: wątek czekający bez blokady (patrz `fwd::Pending`) kasuje stan `gpu_dirty` tylko wtedy, gdy nikt inny
@@ -361,6 +363,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             texel: Default::default(),
             plans_logged: Default::default(),
             gpu_dirty: false,
+            xfer_dirty: false,
             scan_pending: false,
             submit_gen: 0,
             templates: HashMap::new(),
