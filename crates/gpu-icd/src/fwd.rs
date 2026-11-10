@@ -543,6 +543,11 @@ impl InstState {
     }
 
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
+        if xorstat_enabled() {
+            if let Some(s) = self.mems.get(&memory) {
+                xorstat_note(s, offset as usize, data);
+            }
+        }
         // Zapis w całości (np. `vkFlushMappedMemoryRanges`, `vkUnmapMemory`) zmienia to, co serwer ma: kopia poprzedniej treści musi to odzwierciedlać.
         if let Some(s) = self.mems.get_mut(&memory) {
             let (off, total) = (offset as usize, s.data.len());
@@ -1029,6 +1034,55 @@ fn dump_sample(memory: u64, data: &[u8]) {
             e.1 += data.len() as u64;
         }
     }
+}
+
+/// Pomiar potencjału kodowania względem poprzedniej treści (`GPU_ICD_XORSTAT=1`, tylko diagnostyka): dla stron, których treść na serwerze znamy
+/// (`prev_ok`), porównuje rozmiar zstd surowych bajtów z rozmiarem zstd różnicy XOR z poprzednią treścią. Nic nie zmienia w ruchu.
+static XOR_RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static XOR_ZSTD_RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static XOR_ZSTD_XOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static XOR_KNOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn xorstat_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_XORSTAT").is_some())
+}
+
+fn xorstat_note(s: &Shadow, offset: usize, data: &[u8]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(prev) = s.prev.as_ref() else { return };
+    let Some(old) = prev.get(offset..offset + data.len()) else { return };
+    // Tylko pełne strony 4 KiB o znanej treści na serwerze; cały zapis w jednej próbce (do 64 KiB), żeby zachować rozmiary bloków jak na łączu.
+    let first = offset.div_ceil(4096);
+    let mut xor = data.to_vec();
+    let mut known = 0u64;
+    for p in 0..data.len() / 4096 {
+        let page = first + p;
+        if page * 4096 < offset || page >= s.prev_ok.len() || !s.prev_ok[page] {
+            continue;
+        }
+        let at = page * 4096 - offset;
+        if at + 4096 > data.len() {
+            continue;
+        }
+        for i in 0..4096 {
+            xor[at + i] = data[at + i] ^ old[at + i];
+        }
+        known += 4096;
+    }
+    XOR_RAW.fetch_add(data.len() as u64, Relaxed);
+    XOR_KNOWN.fetch_add(known, Relaxed);
+    for chunk in 0..data.len().div_ceil(MEM_CHUNK) {
+        let (a, b) = (chunk * MEM_CHUNK, ((chunk + 1) * MEM_CHUNK).min(data.len()));
+        XOR_ZSTD_RAW.fetch_add(zstd::bulk::compress(&data[a..b], 1).map_or(b - a, |v| v.len()) as u64, Relaxed);
+        XOR_ZSTD_XOR.fetch_add(zstd::bulk::compress(&xor[a..b], 1).map_or(b - a, |v| v.len()) as u64, Relaxed);
+    }
+}
+
+/// (surowo, z tego strony o znanej treści, zstd surowych, zstd po XOR).
+pub fn xorstat() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (XOR_RAW.load(Relaxed), XOR_KNOWN.load(Relaxed), XOR_ZSTD_RAW.load(Relaxed), XOR_ZSTD_XOR.load(Relaxed))
 }
 
 fn dump_enabled() -> bool {
@@ -1645,6 +1699,10 @@ fn periodic_stats(stats: &Stats) {
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         let (n, q, r) = crate::link::wait_split();
         let (ad, am, asx) = xfer_audit_stats();
+        if xorstat_enabled() {
+            let (r, k, z, x) = xorstat();
+            eprintln!("[gpu-icd] XORSTAT: surowo {} MB, strony o znanej treści {} MB, zstd surowych {} MB, zstd po XOR {} MB", r >> 20, k >> 20, z >> 20, x >> 20);
+        }
         eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}", stats.eager_pushes);
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
