@@ -6,11 +6,11 @@ Cel użytkownika: używać karty graficznej serwera tak, jakby była zamontowana
 
 ## 1. Dwa różne mechanizmy (i dlaczego nie są tym samym)
 
-| | A. Strumieniowanie obrazu | B. Zdalne wywołania API grafiki ("wirtualny GPU", styl WiCi) |
+| | A. Strumieniowanie obrazu | B. Zdalne wywołania API grafiki ("wirtualny GPU") |
 |---|---|---|
 | Gdzie działa gra | **na serwerze** | **na laptopie** |
 | Co płynie przez sieć | skompresowane wideo + wejście | polecenia Vulkan/DX/GL + dane (rzędu setek Mb/s) |
-| Gotowe narzędzia | Sunshine + Moonlight | brak utrzymywanych (WiCi ma własny, zamknięty sterownik) |
+| Gotowe narzędzia | Sunshine + Moonlight | brak utrzymywanych otwartych (istnieją tylko komercyjne, zamknięte) |
 | Wysiłek | dni | miesiące–lata (sterownik/warstwa Vulkan, predykcja, kompresja) |
 | Opóźnienie | ~20–35 ms (koniec-do-końca) | zależy od sprytu protokołu; RTT sieci zabija naiwną wersję |
 

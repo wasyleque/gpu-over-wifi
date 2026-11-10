@@ -32,7 +32,7 @@ Znaczące liczby: 2,1 mln zapisów pamięci i 20 tys. `vkWaitSemaphores` na prze
 - Odroczenie `vkFlushMappedMemoryRanges` na serwerze: brak zysku.
 - Różnica XOR z poprzednią treścią: tylko −14%; prefiks zstd daje −42%.
 
-## Techniki z dokumentacji WiCi (działający produkt tego typu; liczby od producenta)
+## Techniki znanych rozwiązań tego typu (liczby od producentów)
 Model kosztu: T = T_lokalne + N·RTT + D/przepustowość (N = liczba obiegów, D = bajty). Techniki: (1) grupowanie funkcji w partie wysyłane bez czekania na odpowiedź;
 (2) cache po zawartości (hash-first, serwer trzyma dane z poprzednich sesji, klient wysyła tylko hash); (3) trace replay: powtarzalny ciąg wywołań (np. ta sama klatka co poprzednia)
 serwer wykonuje według śladu, a klient zwraca sukces lokalnie i weryfikuje później; (4) referencje zamiast kopii, rezydencja zasobów na serwerze; (5) predykcja odpowiedzi
@@ -43,6 +43,6 @@ klatka wraca tylko do prezentacji lokalnie, nie jest zamiennikiem zdalnego Vulka
 1. Gdzie jest największy zysk w zmniejszeniu czasu klatki przy powyższych liczbach (szeregowe etapy klient→serwer→GPU→serwer→klient, 7 oczekiwań na semafor na klatkę)?
 2. Jak potokować pracę (serwer wykonuje klatkę N, gdy klient już nagrywa N+1) bez spekulacji, którą trzeba cofać? Co jest bezpieczne, a co wymaga weryfikacji?
 3. Czy `vkWaitSemaphores` na wartość timeline semafora, którą dopiero zgłosi późniejsze `vkQueueSubmit`, można obsłużyć lokalnie lub zwolnić wcześniej? Jak weryfikować?
-4. Ile z technik WiCi (trace replay, predykcja odpowiedzi) można zastosować do vkd3d-proton, w którym ok. 1000 rysowań na klatkę ma powtarzalną strukturę?
+4. Ile z tych technik (trace replay, predykcja odpowiedzi) można zastosować do vkd3d-proton, w którym ok. 1000 rysowań na klatkę ma powtarzalną strukturę?
 5. Co jeszcze zmniejsza bajty (nie powtarzać: zstd, prefiks, delta XOR, cache po zawartości)?
 Odpowiadaj konkretnie: pomysł, dlaczego zadziała, jak zweryfikować poprawność, ryzyko, oczekiwany zysk w ms na klatkę.

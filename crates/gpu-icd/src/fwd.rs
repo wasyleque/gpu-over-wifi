@@ -1296,11 +1296,13 @@ fn thread_cpu_report() -> String {
     v.iter().take(10).map(|(n, (t, c))| format!("{n} x{c}: {t:.1}")).collect::<Vec<_>>().join("; ")
 }
 
-/// Czy aplikacja to vkd3d-proton (`pEngineName` = "vkd3d").
+/// Czy aplikacja używa vkd3d-proton albo DXVK (`pEngineName` = "vkd3d" / "DXVK").
 static ENGINE_VKD3D: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_engine(name: &str) {
-    if name.starts_with("vkd3d") {
+    // vkd3d-proton (D3D12) i DXVK (D3D9-11): w obu GPU zapisuje pamięć host-visible tylko w stertach z cache (readback, staging), a pamięć bez cache
+    // (UPLOAD / dynamiczne bufory) jest dla GPU tylko do odczytu; poprawność każdej gry sprawdza audyt (patrz `contract_active`).
+    if name.starts_with("vkd3d") || name.starts_with("DXVK") {
         ENGINE_VKD3D.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if flags().periodic {

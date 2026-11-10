@@ -150,8 +150,14 @@ Merging: 217,919 frames from 6,433,536 fragments (~30 per frame); server `memwri
 Per frame (~55 ms): server busy ~18 ms (cmds 7.7, memwrite 4.9, memreaddelta 3.7, present encode 2.0), client waits ~25 ms on the server, ~30 ms is client-side CPU (game + interception). Overlapping the two
 (pipelining) is the only large lever left; it needs knowledge of whether the GPU writes host-visible memory (a wait may only return early if no unfetched GPU write can be read).
 
-### Run 22: early return of long `vkWaitSemaphores` (vkd3d: D3D12 UPLOAD-heap contract), deferred replies
+### Run 22: early return of long `vkWaitSemaphores` (D3D UPLOAD/dynamic-heap contract), deferred replies
 
 Mountain Peak 39.78 (max 88.6), Syria 18.45, Geothermal 19.16, **Overall 26.10** (run 21: 18.24, +43 %; run 5: 10.67, +145 %).
 34,325 waits returned early (68,644 deferred replies drained in order), audit of skipped refreshes: 129,357 skips, 2,022 verified, 0 misses; client wait for the server 25 → 5.9 ms per frame
-(35.2 s over 5,972 frames); server `query` time rose to 7.4 s (the server now does the waiting, overlapped with the client's recording of the next frame). Engine detected as "vkd3d".
+(35.2 s over 5,972 frames); server `query` time rose to 7.4 s (the server now does the waiting, overlapped with the client's recording of the next frame). Engines seen by the ICD: "DXVK" and "vkd3d"; thread names (`dxvk-cs`, `dxvk-queue`) show the game renders through DXVK (D3D11), the vkd3d instance is a probe.
+
+### Run 23 (same build plus per-thread CPU report)
+
+Mountain Peak 37.80 (max 84.9), Syria 17.85, Geothermal 18.74, **Overall 25.08** (run 22: 26.10; spread of identical builds ~±4 %). Early-returned waits: 44,963; audit: 212,927 skips, 3,327 verified, 0 misses.
+CPU time per thread name over the whole log (two benchmark passes, 8,988 frames): `ROTTR.exe` x15 147 s, `dxvk-cs` 97 s, `dxvk-queue` 80 s, `gpu-icd-frame` (compression) 2 x 63 s, `gpu-icd-video` 58 s, `gpu-icd-send` 28 s.
+No single thread is saturated (each ≤ ~25 % of wall time); the remaining limit is the serial chain game → dxvk-cs → dxvk-queue → interception → server.

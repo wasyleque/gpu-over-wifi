@@ -2,15 +2,15 @@
 
 Status: obowiązujący. Zastępuje ścieżkę "Venus przez sieć" i streaming (oba odrzucone: patrz AGENTS.md).
 
-## 1. Cel i kryterium sukcesu (z transkrypcji NetworkChuck / WiCi One)
-Aplikacja (gra) działa na laptopie; widzi lokalny, "prawdziwy" GPU; renderuje na karcie serwera przez sieć. Mierzalne cele przeniesione z filmu:
+## 1. Cel i kryterium sukcesu (z materiałów referencyjnych)
+Aplikacja (gra) działa na laptopie; widzi lokalny, "prawdziwy" GPU; renderuje na karcie serwera przez sieć. Mierzalne cele przeniesione z materiałów referencyjnych:
 - ruch poleceń: z ~8 GB/s (surowo) do ≤ ~400 Mb/s;
-- gra AAA (Cyberpunk, przez Proton) płynnie (~90 FPS w filmie przez Wi-Fi 1,5 ms RTT; u nas kabel, RTT 0,55 ms);
+- gra AAA (Cyberpunk, przez Proton) płynnie (~90 FPS w materiałach przez Wi-Fi 1,5 ms RTT; u nas kabel, RTT 0,55 ms);
 - żadnych specjalnych wersji gier; aplikacja nie wie, że GPU jest zdalny.
-**Zasada: bez kompromisów w architekturze** — wszystkie cztery triki są obowiązkowe, a streaming gry z serwera nie jest ścieżką zastępczą. Uwaga uczciwości: film jest sponsorowany, a produkt zamknięty — liczby traktujemy jako cel do zmierzenia, nie fakt. Każdy etap kończy się pomiarem, a odchylenie od celu jest raportowane, nie ukrywane.
+**Zasada: bez kompromisów w architekturze** — wszystkie cztery triki są obowiązkowe, a streaming gry z serwera nie jest ścieżką zastępczą. Uwaga uczciwości: produkt referencyjny jest zamknięty, a materiały reklamowe — liczby traktujemy jako cel do zmierzenia, nie fakt. Każdy etap kończy się pomiarem, a odchylenie od celu jest raportowane, nie ukrywane.
 
-## 2. Cztery triki z filmu → nasza realizacja
-| # | Trik WiCi | Realizacja |
+## 2. Cztery techniki z materiałów referencyjnych → nasza realizacja
+| # | Technika | Realizacja |
 |---|---|---|
 | 1 | polecenia grupowane, kompresowane, wysyłane **bez czekania na odpowiedź** | klasyfikacja poleceń (§3): 69% powierzchni API jest asynchroniczne z definicji; strumień jednokierunkowy, partie, kompresja zstd z kontekstem strumieniowym |
 | 2 | dane tylko jako **różnice** | pamięć cieniowa (shadow memory) + śledzenie zmian stron; wysyłane tylko zmienione fragmenty, dodatkowo dyferencjowanie względem poprzedniej klatki |
@@ -54,5 +54,5 @@ Optymistyczne tworzenie oznacza, że nieudane `vkCreate*` na serwerze (np. brak 
 - **M4 Partie i kompresja; tworzenie optymistyczne.**
 - **M5 Wideo zamiast surowych klatek** (kodowanie na serwerze, dekodowanie VA-API na laptopie). Wymaga decyzji: Vulkan Video vs NVENC przez CUDA — pomiar opóźnienia obu.
 - **M6 Pipeline klatek i spekulacja** (ukrycie rund-trip), pacing klatek.
-- **M7 Gra przez Proton/DXVK:** cel ≤ 400 Mb/s i stabilne FPS; porównanie z deklaracjami z filmu.
+- **M7 Gra przez Proton/DXVK:** cel ≤ 400 Mb/s i stabilne FPS; porównanie z deklaracjami producenta referencyjnego.
 - **M8 Klient Windows** (osobny projekt: ICD Windows + gra DirectX).

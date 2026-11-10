@@ -42,7 +42,7 @@ Kryterium: zapis liczb przed/po w tym pliku.
 Telemetria (na token, warstwy ekspertów): GGUF 783 ms (oczekiwanie na dysk 599 ms = 77%); **pack 377 ms (197 ms = 52%)** — pack skrócił czekanie na dysk 3x; obliczenia ~140 ms bez zmian; trafienia VRAM ~68%, RAM ~20-24%, dysk ~8-13%.
 
 ## Wnioski
-- **Expert pack to jedyna zmiana z istotnym efektem** (+36-41%). Odpowiada trikowi "przepakowanie plików modelu pod SSD" z transkrypcji.
+- **Expert pack to jedyna zmiana z istotnym efektem** (+36-41%). Odpowiada trikowi "przepakowanie plików modelu pod SSD" z materiałów referencyjnych.
 - Pozostałe ~50% czasu to czekanie na jeden dysk. Następny skok da sprzęt: RAID0 z dwóch Kingstonów po wymianie wadliwego (odczyt ~2x) — wtedy przebudować/skopiować model i pack na macierz.
 - Wdrożenie: hub `mode = "launch"` (patrz `docs/hub.example.toml`), pack 269 GiB w `/srv/models/DeepSeek-V4.1-Flash-1017/model.expert-pack`, plik ustawień `~/gpu-hub/inferssd-settings.ssd`. Budowa packa: 9 min 8 s (~650 MB/s).
 - Rozumowanie wyłączać parametrem żądania `chat_template_kwargs.enable_thinking=false` dla generowania dokumentów i kodu.

@@ -126,7 +126,7 @@ vaSyncSurface(dpy, surface)
 ## 4. Plan pomiaru
 
 1. **Bitrate vs jakość.** Sceny: (a) `vkcube` (prosta, dużo płaskich obszarów — LZ4 wygrywa, HEVC też), (b) scena z teksturą (np. `vkcube` z teksturowaną kostką lub prosty render z teksturą 4K — **nie gra**, żeby pomiar był powtarzalny). Metryki: PSNR, SSIM (liczone na klatkach po dekodowaniu vs referencja z serwera przed kodowaniem), bitrate (Mbps), rozmiar klatki IDR vs P. **Cel:** 1080p60, ≤ 400 Mb/s **łącznie** (wideo + polecenia + różnice pamięci). Przy 60 FPS i 400 Mb/s → ~830 KB/klatkę → ~6,6 Mb/klatkę → HEVC 1080p przy ~6–8 Mbps na klatkę to **bardzo dobry budżet** (typowy streaming 1080p60 to 6–10 Mbps **na sekundę**, my mamy 6,6 Mb **na klatkę** — czyli ~400 Mbps to dużo). **Wniosek: 400 Mb/s jest osiągalne z zapasem; prawdziwym celem jest ≤ 100 Mb/s dla komfortu.** Zmierz i raportuj.
-2. **Opóźnienie szkło-do-szkła.** Kamera 240 fps na ekranie + znaczniki; docelowo PTP. Składniki: capture→encode_done (serwer), sieć (RTT), recv→present (klient). Cel: < 20 ms end-to-end (WiCi deklaruje płynność przy 1,5 ms RTT; my mamy 0,2 ms).
+2. **Opóźnienie szkło-do-szkła.** Kamera 240 fps na ekranie + znaczniki; docelowo PTP. Składniki: capture→encode_done (serwer), sieć (RTT), recv→present (klient). Cel: < 20 ms end-to-end (producent referencyjny deklaruje płynność przy 1,5 ms RTT; my mamy 0,2 ms).
 3. **CPU klienta.** `perf stat` na procesie ICD: % CPU na dekodowanie (VA-API sprzętowe powinno być < 5% na 1080p60), konwersja NV12→BGRA (CPU w M5a — zmierzyć, czy nie zjada rdzenia; jeśli tak, priorytetyzować dmabuf), present.
 4. **Regresja:** ten sam test na Raw/LZ4/HEVC — tabela bitrate/opóźnienie/CPU.
 

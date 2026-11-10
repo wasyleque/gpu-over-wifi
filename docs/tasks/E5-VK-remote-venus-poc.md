@@ -24,12 +24,12 @@ Cel użytkownika: gra działa lokalnie na laptopie (Linux), a GPU jest "po sieci
 - Serwer: `sudo apt install -y virgl-server vulkan-tools socat`
 
 ## Zasady
-Venus/virglrenderer: MIT. Nie kopiować kodu WiCi. Wynik PoC zapisać w AGENTS.md z liczbami.
+Venus/virglrenderer: MIT. Nie kopiować kodu produktu referencyjnego. Wynik PoC zapisać w AGENTS.md z liczbami.
 
-## Cel funkcjonalny: odtworzyć to, co pokazało WiCi (transkrypcja filmu NetworkChuck)
-Gra działa na laptopie, karta jest zdalna, obraz wraca skompresowany. Z filmu: fałszywy sterownik GPU na kliencie + cztery triki, dzięki którym z ~8 GB/s ruchu zrobiło się ~400 Mb/s i 92 FPS w Cyberpunku przez Wi-Fi (RTT 1,5 ms; u nas kabel, RTT 0,55 ms).
+## Cel funkcjonalny: odtworzyć to, co pokazuje produkt referencyjny
+Gra działa na laptopie, karta jest zdalna, obraz wraca skompresowany. Z materiałów: fałszywy sterownik GPU na kliencie + cztery triki, dzięki którym z ~8 GB/s ruchu zrobiło się ~400 Mb/s i 92 FPS w Cyberpunku przez Wi-Fi (RTT 1,5 ms; u nas kabel, RTT 0,55 ms).
 
-| Element WiCi | Nasz odpowiednik | Stan |
+| Element referencyjny | Nasz odpowiednik | Stan |
 |---|---|---|
 | fałszywy sterownik GPU | Venus (`vulkan-virtio`, Mesa, MIT) | istnieje |
 | zdalne wykonanie | `virgl-server` + Vulkan NVIDIA | istnieje |
@@ -52,6 +52,6 @@ Przebieg: serwer `virgl_test_server --venus --no-virgl --rendernode /dev/dri/ren
 - **Na serwerze lokalnie: DZIAŁA.** `vulkaninfo` przez Venus widzi `Virtio-GPU Venus (NVIDIA GeForce RTX 3090 Ti)`, `driverName = venus`, exit 0. Stos Venus→NVIDIA jest sprawny.
 - **Z laptopa przez tunel (ssh -L gniazdo unix) / socat: PADA.** Handshake przechodzi (serwer loguje "client context created"), potem klient kończy `abort()` wewnątrz libvulkan_virtio.so w `vkCreateInstance`. Zapis bajtów (socat -x) pokazuje: ostatnia wymiana to odpowiedź serwera na komendę 0x12 z 1 dodatkowym bajtem po danych.
 - **Przyczyna (mocny wniosek z dowodu pośredniego, niezweryfikowany na poziomie kodu):** vtest przekazuje zasoby pamięci współdzielonej jako **deskryptory plików przez SCM_RIGHTS** (ten dodatkowy bajt to nośnik). Tunel SSH i socat nie przenoszą deskryptorów, więc klient dostaje błąd. Dowód: ten sam serwer i ten sam klient działają, gdy klient jest na tej samej maszynie.
-- **Wniosek projektowy:** surowy Venus przez sieć jest niemożliwy. Potrzebny jest własny pośrednik, który **emuluje pamięć współdzieloną**: po stronie laptopa tworzy lokalne `memfd` i oddaje je klientowi Venus, po stronie serwera trzyma prawdziwy zasób, a zawartość synchronizuje przez sieć w punktach synchronizacji (przed komendami czytającymi pamięć gościa, przed odpowiedziami zależnymi od wyników hosta). To jest właśnie sedno WiCi (trik 2: tylko różnice; trik 1: grupowanie), nie dodatek. Etap 2 planu staje się więc obowiązkowy i jest głównym ryzykiem projektu.
+- **Wniosek projektowy:** surowy Venus przez sieć jest niemożliwy. Potrzebny jest własny pośrednik, który **emuluje pamięć współdzieloną**: po stronie laptopa tworzy lokalne `memfd` i oddaje je klientowi Venus, po stronie serwera trzyma prawdziwy zasób, a zawartość synchronizuje przez sieć w punktach synchronizacji (przed komendami czytającymi pamięć gościa, przed odpowiedziami zależnymi od wyników hosta). To jest właśnie sedno produktu referencyjnego (technika 2: tylko różnice; trik 1: grupowanie), nie dodatek. Etap 2 planu staje się więc obowiązkowy i jest głównym ryzykiem projektu.
 - Uwaga środowiskowa: wymagało dodania użytkownika serwera do grup `render` i `video` (bez tego NVIDIA Vulkan zwracał ERROR_INITIALIZATION_FAILED).
 - Narzędzia: `socat -x -v` jest dobrym podglądem protokołu; brakujących symboli Mesa (debuginfod Arch nie ma) nie da się odzyskać.
