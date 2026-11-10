@@ -129,6 +129,30 @@ fn fill_buffer_on_the_real_gpu_through_the_command_stream() {
     cmd(&mut batch, "vkCreateFence", &[dev, fci.p(), 0, &fence as *const u64 as u64]);
     b.execute(&batch).unwrap();
 
+    // Zapis z prefiksem: lustro serwera ma poprzednią treść, nowa jest skompresowana względem niej i musi wrócić bajt w bajt.
+    let old: Vec<u8> = (0..SIZE as usize).map(|i| (i * 7 % 251) as u8).collect();
+    b.mem_write(memory, 0, &old).unwrap();
+    let mut new = old.clone();
+    for i in (0..new.len()).step_by(97) {
+        new[i] ^= 0x5A;
+    }
+    let packed = |prefix: &[u8], raw: &[u8]| {
+        let mut c = zstd::zstd_safe::CCtx::create();
+        let mut out: Vec<u8> = Vec::with_capacity(zstd::zstd_safe::compress_bound(raw.len()));
+        c.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(1)).unwrap();
+        c.ref_prefix(prefix).unwrap();
+        c.compress2(&mut out, raw).unwrap();
+        out
+    };
+    let crc = gpu_proto::frame::crc32c(&new);
+    b.mem_write_pfx(memory, 0, SIZE as u32, crc, &packed(&old, &new)).unwrap();
+    assert_eq!(b.mem_read(memory, 0, SIZE as u32).unwrap(), new, "zapis z prefiksem");
+    // Rozbieżne lustro (klient skompresował względem innej treści) albo zły crc to błąd, nie cicha korupcja; pamięć zostaje bez zmian.
+    let wrong: Vec<u8> = old.iter().map(|x| x.wrapping_add(1)).collect();
+    assert!(b.mem_write_pfx(memory, 0, SIZE as u32, crc, &packed(&wrong, &old)).is_err());
+    assert!(b.mem_write_pfx(memory, 0, SIZE as u32, crc ^ 1, &packed(&new, &new)).is_err());
+    assert!(b.mem_write_pfx(memory, 0, SIZE as u32, crc, &[1, 2, 3]).is_err());
+    assert_eq!(b.mem_read(memory, 0, SIZE as u32).unwrap(), new);
     // Zerujemy pamięć, żeby odczyt dowodził pracy GPU, a nie zalegających danych.
     b.mem_write(memory, 0, &vec![0u8; SIZE as usize]).unwrap();
     let mut batch = Vec::new();

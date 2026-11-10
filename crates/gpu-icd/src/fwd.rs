@@ -2207,6 +2207,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         st.mem_refresh.remove(&slots[1]);
         st.mem_cached.remove(&slots[1]);
         st.gpuw.memory_freed(slots[1]);
+        st.client.forget_memory(slots[1]);
     }
 
     st.stats.commands += 1;

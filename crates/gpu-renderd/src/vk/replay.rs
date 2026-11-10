@@ -108,6 +108,9 @@ pub struct Replayer {
     instance: VkInstance,
     fns: HashMap<u16, *const c_void>,
     maps: HashMap<u64, *mut u8>,
+    /// Lustro "ostatnio przesłane w to miejsce" po pamięci (RAM serwera), słownik dla zapisów `MemWriteZstdPfx`: zeros na początku, każdy zapis pamięci
+    /// kopiuje tu swoje bajty, więc jest identyczne z lustrem klienta niezależnie od tego, co GPU zrobiło z pamięcią.
+    mirror: HashMap<u64, Vec<u8>>,
     /// Stan stron pamięci znany klientowi (do odczytu samych różnic).
     pages: HashMap<u64, gpu_proto::pagediff::PageTracker>,
     /// Surowa wartość zwrócona przez ostatnio wykonane polecenie (dla poleceń `Ret::U64`).
@@ -196,7 +199,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new(), copy: Default::default() }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), mirror: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new(), copy: Default::default() }
     }
 
     pub fn registered_handles(&self) -> usize {
@@ -427,6 +430,7 @@ impl Replayer {
         for id in ids {
             self.registry.unregister(*id);
             self.maps.remove(id);
+            self.mirror.remove(id);
             self.pages.remove(id);
             self.copy.mem_types.remove(id);
         }
@@ -471,9 +475,29 @@ impl Replayer {
         }
         // SAFETY: zakres [offset, offset+len) mieści się w odwzorowanej pamięci o rozmiarze `e.size`.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), data.len()) };
+        self.mirror.entry(memory).or_insert_with(|| vec![0u8; e.size as usize])[offset as usize..end as usize].copy_from_slice(data);
         // Klient ma te strony w takim stanie, jaki właśnie wysłał: odczyt różnic nie odeśle ich z powrotem.
         self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_data(offset as usize, data);
         self.range_call("vkFlushMappedMemoryRanges", device, e.real)
+    }
+
+    /// Zapis skompresowany z prefiksem: poprzednia treść tego zakresu z lustra jest słownikiem zstd. Wynik musi mieć dokładnie `raw_len` bajtów i zgodne
+    /// crc32c (rozbieżność lustra klienta i serwera to błąd, nie cicha korupcja).
+    pub fn mem_write_pfx(&mut self, memory: u64, offset: u64, raw_len: u32, raw_crc: u32, data: &[u8]) -> Result<(), i32> {
+        let e = *self.registry.get(memory).filter(|e| e.kind == "VkDeviceMemory").ok_or(ERR_UNKNOWN)?;
+        let end = offset.checked_add(raw_len as u64).filter(|x| *x <= e.size).ok_or(ERR_UNKNOWN)?;
+        let raw = {
+            let mirror = self.mirror.entry(memory).or_insert_with(|| vec![0u8; e.size as usize]);
+            let prefix = &mirror[offset as usize..end as usize];
+            let mut raw: Vec<u8> = Vec::with_capacity(raw_len as usize);
+            let mut dctx = zstd::zstd_safe::DCtx::create();
+            // Pojemność wyjścia ogranicza rozpakowanie (bomba dekompresyjna niemożliwa).
+            if dctx.ref_prefix(prefix).is_err() || dctx.decompress(&mut raw, data).is_err() || raw.len() != raw_len as usize || gpu_proto::frame::crc32c(&raw) != raw_crc {
+                return Err(ERR_UNKNOWN);
+            }
+            raw
+        };
+        self.mem_write(memory, offset, &raw)
     }
 
     /// Zapis kilku fragmentów jednej pamięci jednym odwzorowaniem i jednym `vkFlushMappedMemoryRanges` (patrz `Request::MemWriteRuns`).
@@ -581,6 +605,7 @@ impl Replayer {
                                 call_thunk(unmap, &[e.real, m.real], &[]);
                             }
                             call_thunk(free, &[e.real, m.real, 0], &[]);
+                            self.mirror.remove(&mid);
                             self.registry.unregister(mid);
                         }
                     }
@@ -590,6 +615,7 @@ impl Replayer {
             self.registry.unregister(id);
         }
         self.maps.clear();
+        self.mirror.clear();
     }
 
     fn registry_devices(&self) -> Vec<(u64, Entry)> {

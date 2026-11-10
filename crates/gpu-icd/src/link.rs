@@ -17,7 +17,7 @@ use gpu_renderd::client::{Client, ClientError};
 
 /// Czy serwer odpowie na to żądanie (`Cmds`, `MemWrite*` i `PresentFrame` są ciche, o ile się powiodą).
 pub fn expects_reply(req: &Request) -> bool {
-    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
+    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
 }
 
 struct Turn {
@@ -105,6 +105,8 @@ type RunsInput = (u16, u64, Vec<(u64, u32)>, Vec<(u32, u64)>, Vec<u8>);
 
 enum JobInput {
     Mem(u16, u64, u64, Vec<u8>),
+    /// Zapis z prefiksem: numer ramki, pamięć, przesunięcie, bajty i poprzednia treść tego zakresu (kopia z lustra z chwili zakolejkowania).
+    MemPfx(u16, u64, u64, Vec<u8>, Vec<u8>),
     Runs(RunsInput),
 }
 type JobOutput = Result<Vec<u8>, ()>;
@@ -122,6 +124,7 @@ impl Job {
         if let Some(input) = taken {
             let r = match input {
                 JobInput::Mem(seq, memory, offset, raw) => mem_frame(seq, memory, offset, raw),
+                JobInput::MemPfx(seq, memory, offset, raw, prefix) => mem_frame_pfx(seq, memory, offset, raw, prefix),
                 JobInput::Runs((seq, memory, runs, pages, raw)) => runs_frame(seq, memory, runs, pages, raw),
             }
             .map_err(|_| ());
@@ -250,6 +253,42 @@ fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>
     Ok(frame.encode())
 }
 
+/// Czy zapisy pamięci używają prefiksu z lustra "ostatnio przesłane" (domyślnie tak; `GPU_ICD_NO_PFX=1` wyłącza, a `GPU_ICD_RUNS=1` też, bo tryb
+/// RUNS pisze do pamięci bez aktualizacji lustra serwera).
+fn mem_pfx() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| mem_zstd() && std::env::var_os("GPU_ICD_NO_PFX").is_none() && std::env::var_os("GPU_ICD_RUNS").is_none())
+}
+
+/// Zapis pamięci jako ramka `MemWriteZstdPfx` (zstd z prefiksem = poprzednia treść zakresu), a gdy to nie daje 10% oszczędności, jako surowy
+/// `MemWrite` (serwer i tak kopiuje go do swojego lustra). Obie strony zawsze mają to samo lustro, bo powstaje z tego samego ciągu zapisów.
+fn mem_frame_pfx(seq: u16, memory: u64, offset: u64, raw: Vec<u8>, prefix: Vec<u8>) -> Result<Vec<u8>, ClientError> {
+    let raw_len = raw.len() as u32;
+    let packed = (raw.len() >= 4096)
+        .then(|| {
+            let mut cctx = zstd::zstd_safe::CCtx::create();
+            let mut out: Vec<u8> = Vec::with_capacity(zstd::zstd_safe::compress_bound(raw.len()));
+            let ok = cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(1)).is_ok() && cctx.ref_prefix(&prefix).is_ok();
+            (ok && cctx.compress2(&mut out, &raw).is_ok()).then_some(out)
+        })
+        .flatten()
+        .filter(|c| c.len() * 10 <= raw.len() * 9);
+    let (req, wire) = match packed {
+        Some(c) => {
+            let n = c.len() as u64;
+            (Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc: gpu_proto::frame::crc32c(&raw), data: c }, n)
+        }
+        None => {
+            let n = raw.len() as u64;
+            (Request::MemWrite { memory, offset, data: raw }, n)
+        }
+    };
+    WIRE_TOTAL.fetch_add(wire, std::sync::atomic::Ordering::Relaxed);
+    *WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry(memory).or_insert(0) += wire;
+    let frame = Frame::new(0, flags::CRC, seq, 0, req.encode()).map_err(ClientError::Frame)?;
+    Ok(frame.encode())
+}
+
 /// Zapis fragmentów pamięci jako ramka `MemWriteRuns` (zawsze blok LZ4 sklejonych bajtów).
 fn runs_frame(seq: u16, memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw: Vec<u8>) -> Result<Vec<u8>, ClientError> {
     let data = gpu_proto::video::compress_lz4(&raw);
@@ -284,6 +323,8 @@ pub struct Link {
     direct: Option<Mutex<TcpStream>>,
     /// Ile żądań z odpowiedzią wysłano (numer biletu następnego takiego żądania). Zmieniany tylko pod blokadą instancji.
     sent: u64,
+    /// Lustro "ostatnio przesłane w to miejsce" po pamięci (słownik zstd dla `MemWriteZstdPfx`); rośnie do największego zapisanego końca, reszta to zera.
+    mirror: std::collections::HashMap<u64, Vec<u8>>,
 }
 
 impl Link {
@@ -378,7 +419,7 @@ impl Link {
             workers.push(h);
         }
         let direct = if std::env::var_os("GPU_ICD_SYNC_SEND").is_some() { Some(Mutex::new(direct_stream)) } else { None };
-        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0 })
+        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0, mirror: Default::default() })
     }
 
     /// Opis stanu kolejki odpowiedzi (do diagnostyki zawieszeń).
@@ -413,12 +454,34 @@ impl Link {
     /// robi wątek nadawczy. Wołający oddaje własną kopię bajtów.
     pub fn send_mem(&mut self, memory: u64, offset: u64, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
-        let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some(JobInput::Mem(self.seq, memory, offset, raw))), output: Mutex::new(None), done: Condvar::new() });
+        let input = if mem_pfx() {
+            // Prefiks = kopia lustra z TEJ chwili (kolejne zapisy zmieniają lustro, zanim wątek roboczy skończy kompresję); potem lustro przejmuje nowe bajty.
+            let (off, end) = (offset as usize, offset as usize + raw.len());
+            let m = self.mirror.entry(memory).or_default();
+            if m.len() < end {
+                m.resize(end, 0);
+            }
+            let prefix = m[off..end].to_vec();
+            m[off..end].copy_from_slice(&raw);
+            JobInput::MemPfx(self.seq, memory, offset, raw, prefix)
+        } else {
+            JobInput::Mem(self.seq, memory, offset, raw)
+        };
+        let len = match &input {
+            JobInput::MemPfx(_, _, _, r, _) | JobInput::Mem(_, _, _, r) => r.len(),
+            JobInput::Runs(_) => 0,
+        };
+        let job = Arc::new(Job { len, input: Mutex::new(Some(input)), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
             self.out.work_cv.notify_one();
         }
         self.enqueue_item(Item::Job(job))
+    }
+
+    /// Zwolniona pamięć: lustro nie jest już potrzebne (serwer zdejmuje swoje przy zwolnieniu).
+    pub fn forget_memory(&mut self, memory: u64) {
+        self.mirror.remove(&memory);
     }
 
     /// Zapis fragmentów jednej pamięci (patrz `Request::MemWriteRuns`); kolejność w strumieniu jak w `send_mem`, kompresja w wątku roboczym.
@@ -618,6 +681,8 @@ mod tests {
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let seen2 = seen.clone();
         let srv = std::thread::spawn(move || {
+            // Lustro serwera (jak w gpu-renderd): zera, każdy zapis kopiuje tu swoje bajty.
+            let mut mirror: Vec<u8> = vec![0u8; 4 << 20];
             let (mut s, _) = l.accept().unwrap();
             let mut fr = FrameReader::new();
             let mut buf = vec![0u8; 1 << 16];
@@ -633,13 +698,31 @@ mod tests {
                             let r = Frame::new(0, flags::CRC, f.header.seq, 0, Response::HelloOk { version: gpu_proto::msg::PROTOCOL_VERSION }.encode()).unwrap();
                             s.write_all(&r.encode()).unwrap();
                         }
-                        Request::MemWrite { offset, data, .. } => seen2.lock().unwrap().push((offset, data)),
+                        Request::MemWrite { offset, data, .. } => {
+                            mirror[offset as usize..offset as usize + data.len()].copy_from_slice(&data);
+                            seen2.lock().unwrap().push((offset, data));
+                        }
                         Request::MemWriteLz4 { offset, raw_len, data, .. } => {
                             let raw = gpu_proto::video::decompress_lz4(&data, raw_len as usize).unwrap();
+                            mirror[offset as usize..offset as usize + raw.len()].copy_from_slice(&raw);
                             seen2.lock().unwrap().push((offset, raw));
                         }
                         Request::MemWriteZstd { offset, raw_len, data, .. } => {
                             let raw = zstd::bulk::decompress(&data, raw_len as usize).unwrap();
+                            mirror[offset as usize..offset as usize + raw.len()].copy_from_slice(&raw);
+                            seen2.lock().unwrap().push((offset, raw));
+                        }
+                        Request::MemWriteZstdPfx { offset, raw_len, raw_crc, data, .. } => {
+                            let (o, e) = (offset as usize, offset as usize + raw_len as usize);
+                            let mut raw: Vec<u8> = Vec::with_capacity(raw_len as usize);
+                            {
+                                let mut d = zstd::zstd_safe::DCtx::create();
+                                d.ref_prefix(&mirror[o..e]).unwrap();
+                                d.decompress(&mut raw, &data).unwrap();
+                            }
+                            assert_eq!(raw.len(), raw_len as usize);
+                            assert_eq!(gpu_proto::frame::crc32c(&raw), raw_crc);
+                            mirror[o..e].copy_from_slice(&raw);
                             seen2.lock().unwrap().push((offset, raw));
                         }
                         Request::MemRead { .. } => {

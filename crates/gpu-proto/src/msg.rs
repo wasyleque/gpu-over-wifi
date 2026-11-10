@@ -84,6 +84,10 @@ pub enum Request {
     MemWriteLz4 { memory: u64, offset: u64, raw_len: u32, data: Vec<u8> },
     /// Jak `MemWriteLz4`, ale `data` to ramka zstd (poziom 1; rozpakowanie ma dokładnie `raw_len` bajtów, limit `MAX_BATCH`).
     MemWriteZstd { memory: u64, offset: u64, raw_len: u32, data: Vec<u8> },
+    /// Jak `MemWriteZstd`, ale blok jest skompresowany z prefiksem: poprzednią treścią tego samego zakresu w lustrze "ostatnio przesłane" (`raw_crc`:
+    /// crc32c surowych bajtów, serwer sprawdza go po rozpakowaniu). Lustro po obu stronach powstaje z tego samego ciągu zapisów, więc jest identyczne
+    /// i nie zależy od zawartości pamięci GPU; każdy zapis pamięci (także surowy) aktualizuje lustro.
+    MemWriteZstdPfx { memory: u64, offset: u64, raw_len: u32, raw_crc: u32, data: Vec<u8> },
     /// Zapis kilku rozłącznych fragmentów jednej pamięci (`pages`: skróty całych stron dotkniętych zapisem po jego wykonaniu, żeby serwer nie odsyłał ich jako zmienionych): `runs` to `(przesunięcie, długość)`, a `data` to blok LZ4 sklejonych bajtów wszystkich
     /// fragmentów (po rozpakowaniu dokładnie `raw_len` = suma długości). Klient wysyła tylko linie, które różnią się od poprzednio wysłanej zawartości.
     MemWriteRuns { memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw_len: u32, data: Vec<u8> },
@@ -229,6 +233,14 @@ impl Request {
                 e.put_u64(*memory);
                 e.put_u64(*offset);
                 e.put_u32(*raw_len);
+                e.put_bytes(data);
+            }
+            Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data } => {
+                e.put_u8(21);
+                e.put_u64(*memory);
+                e.put_u64(*offset);
+                e.put_u32(*raw_len);
+                e.put_u32(*raw_crc);
                 e.put_bytes(data);
             }
             Request::MemReadDeltaRanges { memory, ranges, cached } => {
@@ -410,6 +422,17 @@ impl Request {
                 }
                 Request::MemWriteZstd { memory, offset, raw_len, data: data.to_vec() }
             }
+            21 => {
+                let memory = d.get_u64()?;
+                let offset = d.get_u64()?;
+                let raw_len = d.get_u32()?;
+                let raw_crc = d.get_u32()?;
+                let data = d.get_bytes()?;
+                if raw_len as usize > MAX_BATCH || data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("compressed memory write"));
+                }
+                Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data: data.to_vec() }
+            }
             14 => Request::AttachVideo { session: d.get_u64()? },
             15 => {
                 let memory = d.get_u64()?;
@@ -544,6 +567,7 @@ mod tests {
             Request::MemReadDeltaRanges { memory: 9, ranges: vec![], cached: false },
             Request::MemWriteLz4 { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
             Request::MemWriteZstd { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
+            Request::MemWriteZstdPfx { memory: 5, offset: 8192, raw_len: 4096, raw_crc: 0xDEADBEEF, data: vec![1, 2, 3] },
             Request::MemWriteRuns { memory: 6, runs: vec![(0, 64), (192, 128)], pages: vec![(0, 0xABCD)], raw_len: 192, data: vec![9, 9, 9] },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },

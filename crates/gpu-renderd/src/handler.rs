@@ -44,6 +44,10 @@ pub trait GpuBackend {
     fn mem_write(&mut self, _memory: u64, _offset: u64, _data: &[u8]) -> Result<(), i32> {
         Err(ERR_UNKNOWN)
     }
+    /// Zapis skompresowany z prefiksem z lustra "ostatnio przesłane" (patrz `Request::MemWriteZstdPfx`).
+    fn mem_write_pfx(&mut self, _memory: u64, _offset: u64, _raw_len: u32, _raw_crc: u32, _data: &[u8]) -> Result<(), i32> {
+        Err(ERR_UNKNOWN)
+    }
     fn mem_read(&mut self, _memory: u64, _offset: u64, _len: u32) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
     }
@@ -192,7 +196,7 @@ impl<B: GpuBackend> Session<B> {
     }
 
     pub fn handle_request(&mut self, req: Request) -> Option<Response> {
-        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
+        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
         let r = self.handle(req);
         if silent && !matches!(r, Response::Error { .. }) {
             None
@@ -379,6 +383,14 @@ impl<B: GpuBackend> Session<B> {
                         Ok(raw) if raw.len() == raw_len as usize => self.backend.mem_write(memory, offset, &raw),
                         _ => Err(ERR_UNKNOWN),
                     };
+                    if let Some(t) = t {
+                        acct::add(1, t.elapsed());
+                    }
+                    self.note_async(r)
+                }
+                Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data } => {
+                    let t = acct::enabled().then(std::time::Instant::now);
+                    let r = self.backend.mem_write_pfx(memory, offset, raw_len, raw_crc, &data);
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }
