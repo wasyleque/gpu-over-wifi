@@ -37,10 +37,37 @@ pub enum FrameError {
     Poisoned,
 }
 
-/// CRC32C (Castagnoli, wielomian odwrócony 0x82F63B78), implementacja programowa.
+/// CRC32C (Castagnoli, wielomian odwrócony 0x82F63B78). Na x86_64 z SSE4.2 liczone instrukcją sprzętową (kilka GB/s), poza tym tablicą;
+/// wynik jest ten sam (wektory testowe). Wcześniej bajt po bajcie (ok. 0,5 GB/s): sama suma ramek i zapisów pamięci kosztowała kilkadziesiąt sekund na przebieg.
 pub fn crc32c(data: &[u8]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("sse4.2") {
+            // SAFETY: funkcja wymaga SSE4.2, którego obecność sprawdzono w czasie działania.
+            return unsafe { crc32c_hw(data) };
+        }
+    }
+    crc32c_sw(data)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_hw(data: &[u8]) -> u32 {
+    use std::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
+    let (words, rest) = data.as_chunks::<8>();
+    let mut crc = 0xFFFF_FFFFu64;
+    for w in words {
+        crc = _mm_crc32_u64(crc, u64::from_le_bytes(*w));
+    }
+    let mut crc = crc as u32;
+    for &b in rest {
+        crc = _mm_crc32_u8(crc, b);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+fn crc32c_sw(data: &[u8]) -> u32 {
     const TABLE: [u32; 256] = make_table();
-    
     let mut crc = 0xFFFFFFFF;
     for &b in data {
         let table_index = (crc ^ b as u32) & 0xFF;
@@ -227,6 +254,17 @@ impl FrameReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crc32c_hardware_matches_software_for_all_small_lengths_and_alignments() {
+        let data: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        for start in 0..9 {
+            for len in (0..70).chain([255, 256, 257, 4095, 4096, 4097]) {
+                let s = &data[start..start + len];
+                assert_eq!(crc32c(s), crc32c_sw(s), "start {start} len {len}");
+            }
+        }
+    }
 
     #[test]
     fn crc32c_known_vectors() {
