@@ -1276,6 +1276,26 @@ fn xfer_table() -> &'static [bool] {
 
 /// Audyt śledzenia zapisów transferem: co 64. pominięte odświeżenie pamięci tylko-transferowej i tak jest wykonane; niepusta różnica = śledzenie
 /// przeoczyło zapis (błąd do zgłoszenia w logu; dane i tak trafiają do pamięci aplikacji).
+/// Czas procesora zużyty przez wątki procesu wg nazwy wątku (z /proc/self/task): pokazuje, gdzie klient spędza czas (wątki gry, nasz nadawca, kompresja...).
+fn thread_cpu_report() -> String {
+    let tick = 100.0; // _SC_CLK_TCK na Linuksie
+    let mut by: std::collections::BTreeMap<String, (f64, u32)> = Default::default();
+    let Ok(dir) = std::fs::read_dir("/proc/self/task") else { return String::new() };
+    for e in dir.flatten() {
+        let (Ok(comm), Ok(stat)) = (std::fs::read_to_string(e.path().join("comm")), std::fs::read_to_string(e.path().join("stat"))) else { continue };
+        // Pole 2 (nazwa) jest w nawiasach i może zawierać spacje: pola za ostatnim ')' liczone od 3, utime = 14, stime = 15.
+        let Some(rest) = stat.rsplit_once(')').map(|x| x.1) else { continue };
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        let (Some(u), Some(sy)) = (f.get(11).and_then(|v| v.parse::<f64>().ok()), f.get(12).and_then(|v| v.parse::<f64>().ok())) else { continue };
+        let e = by.entry(comm.trim().to_string()).or_insert((0.0, 0));
+        e.0 += (u + sy) / tick;
+        e.1 += 1;
+    }
+    let mut v: Vec<_> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+    v.iter().take(10).map(|(n, (t, c))| format!("{n} x{c}: {t:.1}")).collect::<Vec<_>>().join("; ")
+}
+
 /// Czy aplikacja to vkd3d-proton (`pEngineName` = "vkd3d").
 static ENGINE_VKD3D: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1799,6 +1819,7 @@ fn periodic_stats(stats: &Stats) {
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         let (n, q, r) = crate::link::wait_split();
         eprintln!("[gpu-icd] odświeżenia pamięci wg pamięci (GPU zapisało): {}", refresh_by_mem_report());
+        eprintln!("[gpu-icd] czas CPU wątków procesu (s, wg nazwy): {}", thread_cpu_report());
         let (ad, am, asx) = xfer_audit_stats();
         if xorstat_enabled() {
             let (r, k, z, x, pf) = xorstat();
