@@ -48,6 +48,10 @@ pub trait GpuBackend {
     fn mem_write_pfx(&mut self, _memory: u64, _offset: u64, _raw_len: u32, _raw_crc: u32, _data: &[u8]) -> Result<(), i32> {
         Err(ERR_UNKNOWN)
     }
+    /// Kilka fragmentów jednej pamięci w jednej ramce (patrz `Request::MemWriteRunsPfx`).
+    fn mem_write_runs_pfx(&mut self, _memory: u64, _runs: &[(u64, u32)], _raw_len: u32, _raw_crc: u32, _packed: bool, _data: &[u8]) -> Result<(), i32> {
+        Err(ERR_UNKNOWN)
+    }
     fn mem_read(&mut self, _memory: u64, _offset: u64, _len: u32) -> Result<Vec<u8>, i32> {
         Err(ERR_UNKNOWN)
     }
@@ -196,7 +200,7 @@ impl<B: GpuBackend> Session<B> {
     }
 
     pub fn handle_request(&mut self, req: Request) -> Option<Response> {
-        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
+        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRunsPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
         let r = self.handle(req);
         if silent && !matches!(r, Response::Error { .. }) {
             None
@@ -391,6 +395,14 @@ impl<B: GpuBackend> Session<B> {
                 Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
                     let r = self.backend.mem_write_pfx(memory, offset, raw_len, raw_crc, &data);
+                    if let Some(t) = t {
+                        acct::add(1, t.elapsed());
+                    }
+                    self.note_async(r)
+                }
+                Request::MemWriteRunsPfx { memory, runs, raw_len, raw_crc, packed, data } => {
+                    let t = acct::enabled().then(std::time::Instant::now);
+                    let r = self.backend.mem_write_runs_pfx(memory, &runs, raw_len, raw_crc, packed, &data);
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }

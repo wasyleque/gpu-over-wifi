@@ -88,6 +88,10 @@ pub enum Request {
     /// crc32c surowych bajtów, serwer sprawdza go po rozpakowaniu). Lustro po obu stronach powstaje z tego samego ciągu zapisów, więc jest identyczne
     /// i nie zależy od zawartości pamięci GPU; każdy zapis pamięci (także surowy) aktualizuje lustro.
     MemWriteZstdPfx { memory: u64, offset: u64, raw_len: u32, raw_crc: u32, data: Vec<u8> },
+    /// Kilka fragmentów jednej pamięci w jednej ramce: `runs` to `(przesunięcie, długość)`, `data` to sklejone bajty wszystkich fragmentów (po rozpakowaniu
+    /// dokładnie `raw_len` = suma długości), skompresowane zstd z prefiksem = sklejone poprzednie treści tych zakresów z lustra (gdy `packed`), albo surowe.
+    /// Lustro po obu stronach zmienia się po zapisie wszystkich fragmentów, a `vkFlushMappedMemoryRanges` jest jedno na ramkę.
+    MemWriteRunsPfx { memory: u64, runs: Vec<(u64, u32)>, raw_len: u32, raw_crc: u32, packed: bool, data: Vec<u8> },
     /// Zapis kilku rozłącznych fragmentów jednej pamięci (`pages`: skróty całych stron dotkniętych zapisem po jego wykonaniu, żeby serwer nie odsyłał ich jako zmienionych): `runs` to `(przesunięcie, długość)`, a `data` to blok LZ4 sklejonych bajtów wszystkich
     /// fragmentów (po rozpakowaniu dokładnie `raw_len` = suma długości). Klient wysyła tylko linie, które różnią się od poprzednio wysłanej zawartości.
     MemWriteRuns { memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw_len: u32, data: Vec<u8> },
@@ -241,6 +245,19 @@ impl Request {
                 e.put_u64(*offset);
                 e.put_u32(*raw_len);
                 e.put_u32(*raw_crc);
+                e.put_bytes(data);
+            }
+            Request::MemWriteRunsPfx { memory, runs, raw_len, raw_crc, packed, data } => {
+                e.put_u8(22);
+                e.put_u64(*memory);
+                e.put_u32(runs.len() as u32);
+                for (o, l) in runs {
+                    e.put_u64(*o);
+                    e.put_u32(*l);
+                }
+                e.put_u32(*raw_len);
+                e.put_u32(*raw_crc);
+                e.put_u8(u8::from(*packed));
                 e.put_bytes(data);
             }
             Request::MemReadDeltaRanges { memory, ranges, cached } => {
@@ -433,6 +450,28 @@ impl Request {
                 }
                 Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data: data.to_vec() }
             }
+            22 => {
+                let memory = d.get_u64()?;
+                let n = d.get_u32()? as usize;
+                if n > MAX_WRITE_RUNS || n * 12 > d.remaining() {
+                    return Err(MsgError::LimitExceeded("memory write runs"));
+                }
+                let mut runs = Vec::with_capacity(n);
+                let mut total = 0u64;
+                for _ in 0..n {
+                    let (o, l) = (d.get_u64()?, d.get_u32()?);
+                    total += l as u64;
+                    runs.push((o, l));
+                }
+                let raw_len = d.get_u32()?;
+                let raw_crc = d.get_u32()?;
+                let packed = d.get_u8()? != 0;
+                let data = d.get_bytes()?;
+                if total != raw_len as u64 || raw_len as usize > MAX_BATCH || data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("memory write runs size"));
+                }
+                Request::MemWriteRunsPfx { memory, runs, raw_len, raw_crc, packed, data: data.to_vec() }
+            }
             14 => Request::AttachVideo { session: d.get_u64()? },
             15 => {
                 let memory = d.get_u64()?;
@@ -568,6 +607,7 @@ mod tests {
             Request::MemWriteLz4 { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
             Request::MemWriteZstd { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
             Request::MemWriteZstdPfx { memory: 5, offset: 8192, raw_len: 4096, raw_crc: 0xDEADBEEF, data: vec![1, 2, 3] },
+            Request::MemWriteRunsPfx { memory: 6, runs: vec![(0, 64), (8192, 128)], raw_len: 192, raw_crc: 7, packed: true, data: vec![9, 9] },
             Request::MemWriteRuns { memory: 6, runs: vec![(0, 64), (192, 128)], pages: vec![(0, 0xABCD)], raw_len: 192, data: vec![9, 9, 9] },
             Request::SessionId,
             Request::AttachVideo { session: u64::MAX },

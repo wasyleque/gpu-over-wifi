@@ -153,6 +153,34 @@ fn fill_buffer_on_the_real_gpu_through_the_command_stream() {
     assert!(b.mem_write_pfx(memory, 0, SIZE as u32, crc ^ 1, &packed(&new, &new)).is_err());
     assert!(b.mem_write_pfx(memory, 0, SIZE as u32, crc, &[1, 2, 3]).is_err());
     assert_eq!(b.mem_read(memory, 0, SIZE as u32).unwrap(), new);
+    // Kilka fragmentów w jednej ramce: prefiks to sklejone poprzednie treści fragmentów z lustra.
+    {
+        let runs: Vec<(u64, u32)> = vec![(0, 1000), (2000, 500), (SIZE - 700, 700)];
+        let mut raw2: Vec<u8> = Vec::new();
+        let mut prefix: Vec<u8> = Vec::new();
+        for &(o, l) in &runs {
+            prefix.extend_from_slice(&new[o as usize..o as usize + l as usize]);
+            raw2.extend((0..l).map(|i| (i * 13 % 255) as u8));
+        }
+        let crc2 = gpu_proto::frame::crc32c(&raw2);
+        let packed2 = packed(&prefix, &raw2);
+        b.mem_write_runs_pfx(memory, &runs, raw2.len() as u32, crc2, true, &packed2).unwrap();
+        let mut expect = new.clone();
+        let mut at = 0usize;
+        for &(o, l) in &runs {
+            expect[o as usize..(o + l as u64) as usize].copy_from_slice(&raw2[at..at + l as usize]);
+            at += l as usize;
+        }
+        assert_eq!(b.mem_read(memory, 0, SIZE as u32).unwrap(), expect, "zapis kilku fragmentów z prefiksem");
+        // Surowo (bez kompresji), zła suma, zła długość i fragment poza pamięcią to błędy bez zmiany pamięci.
+        assert!(b.mem_write_runs_pfx(memory, &runs, raw2.len() as u32, crc2 ^ 1, false, &raw2).is_err());
+        assert!(b.mem_write_runs_pfx(memory, &runs, raw2.len() as u32 - 1, crc2, false, &raw2).is_err());
+        assert!(b.mem_write_runs_pfx(memory, &[(SIZE - 10, 20)], 20, 0, false, &[0u8; 20]).is_err());
+        assert_eq!(b.mem_read(memory, 0, SIZE as u32).unwrap(), expect);
+        b.mem_write_runs_pfx(memory, &runs, raw2.len() as u32, crc2, false, &raw2).unwrap();
+        // Przywracamy treść "new" dla dalszej części testu.
+        b.mem_write(memory, 0, &new).unwrap();
+    }
     // Zerujemy pamięć, żeby odczyt dowodził pracy GPU, a nie zalegających danych.
     b.mem_write(memory, 0, &vec![0u8; SIZE as usize]).unwrap();
     let mut batch = Vec::new();

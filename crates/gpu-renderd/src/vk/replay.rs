@@ -468,6 +468,12 @@ impl Replayer {
 
     /// Zapisuje bajty do pamięci urządzenia (przez odwzorowanie); pamięć musi być widoczna dla hosta.
     pub fn mem_write(&mut self, memory: u64, offset: u64, data: &[u8]) -> Result<(), i32> {
+        let (e, device) = self.mem_write_nofl(memory, offset, data)?;
+        self.range_call("vkFlushMappedMemoryRanges", device, e.real)
+    }
+
+    /// Zapis bajtów do odwzorowanej pamięci, lustra i śledzenia stron, bez `vkFlushMappedMemoryRanges` (wołający flushuje po całej serii).
+    fn mem_write_nofl(&mut self, memory: u64, offset: u64, data: &[u8]) -> Result<(Entry, u64), i32> {
         let (ptr, e, device) = self.mapping(memory)?;
         let end = offset.checked_add(data.len() as u64).ok_or(ERR_UNKNOWN)?;
         if end > e.size {
@@ -478,7 +484,49 @@ impl Replayer {
         self.mirror.entry(memory).or_insert_with(|| vec![0u8; e.size as usize])[offset as usize..end as usize].copy_from_slice(data);
         // Klient ma te strony w takim stanie, jaki właśnie wysłał: odczyt różnic nie odeśle ich z powrotem.
         self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_data(offset as usize, data);
-        self.range_call("vkFlushMappedMemoryRanges", device, e.real)
+        Ok((e, device))
+    }
+
+    /// Kilka fragmentów jednej pamięci w jednej ramce: prefiks to sklejone poprzednie treści fragmentów z lustra (przed zapisem któregokolwiek z nich),
+    /// po rozpakowaniu sprawdzane są długość i crc32c; potem fragmenty trafiają do pamięci po kolei, a `vkFlushMappedMemoryRanges` jest jedno.
+    pub fn mem_write_runs_pfx(&mut self, memory: u64, runs: &[(u64, u32)], raw_len: u32, raw_crc: u32, packed: bool, data: &[u8]) -> Result<(), i32> {
+        let e = *self.registry.get(memory).filter(|e| e.kind == "VkDeviceMemory").ok_or(ERR_UNKNOWN)?;
+        let mut total = 0u64;
+        for &(o, l) in runs {
+            total += l as u64;
+            o.checked_add(l as u64).filter(|x| *x <= e.size).ok_or(ERR_UNKNOWN)?;
+        }
+        if total != raw_len as u64 {
+            return Err(ERR_UNKNOWN);
+        }
+        let raw: Vec<u8> = if packed {
+            let mirror = self.mirror.entry(memory).or_insert_with(|| vec![0u8; e.size as usize]);
+            let mut prefix: Vec<u8> = Vec::with_capacity(raw_len as usize);
+            for &(o, l) in runs {
+                prefix.extend_from_slice(&mirror[o as usize..o as usize + l as usize]);
+            }
+            let mut raw: Vec<u8> = Vec::with_capacity(raw_len as usize);
+            let mut dctx = zstd::zstd_safe::DCtx::create();
+            if dctx.ref_prefix(&prefix).is_err() || dctx.decompress(&mut raw, data).is_err() {
+                return Err(ERR_UNKNOWN);
+            }
+            raw
+        } else {
+            data.to_vec()
+        };
+        if raw.len() != raw_len as usize || gpu_proto::frame::crc32c(&raw) != raw_crc {
+            return Err(ERR_UNKNOWN);
+        }
+        let mut at = 0usize;
+        let mut last = None;
+        for &(o, l) in runs {
+            last = Some(self.mem_write_nofl(memory, o, &raw[at..at + l as usize])?);
+            at += l as usize;
+        }
+        match last {
+            Some((e, device)) => self.range_call("vkFlushMappedMemoryRanges", device, e.real),
+            None => Ok(()),
+        }
     }
 
     /// Zapis skompresowany z prefiksem: poprzednia treść tego zakresu z lustra jest słownikiem zstd. Wynik musi mieć dokładnie `raw_len` bajtów i zgodne

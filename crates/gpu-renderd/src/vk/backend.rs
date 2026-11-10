@@ -376,6 +376,10 @@ impl GpuBackend for VulkanBackend {
         self.replay.mem_write(memory, offset, data)
     }
 
+    fn mem_write_runs_pfx(&mut self, memory: u64, runs: &[(u64, u32)], raw_len: u32, raw_crc: u32, packed: bool, data: &[u8]) -> Result<(), i32> {
+        self.replay.mem_write_runs_pfx(memory, runs, raw_len, raw_crc, packed, data)
+    }
+
     fn mem_write_pfx(&mut self, memory: u64, offset: u64, raw_len: u32, raw_crc: u32, data: &[u8]) -> Result<(), i32> {
         self.replay.mem_write_pfx(memory, offset, raw_len, raw_crc, data)
     }

@@ -73,6 +73,8 @@ pub struct Stats {
     /// Odświeżenia pamięci według planu: całe / tylko zakresy (i ile bajtów obejmowały zakresy łącznie).
     pub refresh_whole: u64,
     pub eager_pushes: u64,
+    pub mem_groups: u64,
+    pub mem_group_parts: u64,
     pub refresh_ranged: u64,
     pub refresh_ranged_bytes: u64,
     /// `vkGetDescriptorEXT`: odpowiedzi z cache / z serwera.
@@ -542,7 +544,8 @@ impl InstState {
         }
     }
 
-    fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
+    /// Księgowość zapisu pamięci przed wysłaniem (kopia poprzedniej treści, statystyki, diagnostyka); wysyła zaległe polecenia.
+    fn note_mem_send(&mut self, memory: u64, offset: u64, data: &[u8]) {
         if xorstat_enabled() {
             let len = self.mems.get(&memory).map_or(0, |m| m.data.len());
             xorstat_note(memory, len, offset as usize, data);
@@ -576,12 +579,34 @@ impl InstState {
         let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
         acct.0 += 1;
         acct.1 += data.len() as u64;
+    }
+
+    fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
+        self.note_mem_send(memory, offset, data);
         for (i, chunk) in data.chunks(MEM_CHUNK.min(MAX_BATCH)).enumerate() {
             let at = offset + (i * MEM_CHUNK) as u64;
             // Kompresję LZ4, CRC i kodowanie ramki robi wątek nadawczy (poza blokadą instancji); tu tylko kopia bajtów.
             if self.client.send_mem(memory, at, chunk.to_vec()).is_err() {
                 self.lose();
             }
+        }
+    }
+
+    /// Kilka fragmentów jednej pamięci: gdy kodowanie z prefiksem jest włączone, idą jedną ramką (mniej ramek, zadań kompresji i flushy na serwerze).
+    fn send_mem_group(&mut self, memory: u64, parts: &[(u64, &[u8])]) {
+        if parts.len() < 2 || !crate::link::Link::pfx_enabled() {
+            for (o, d) in parts {
+                self.send_mem(memory, *o, d);
+            }
+            return;
+        }
+        for (o, d) in parts {
+            self.note_mem_send(memory, *o, d);
+        }
+        self.stats.mem_groups += 1;
+        self.stats.mem_group_parts += parts.len() as u64;
+        if self.client.send_mem_group(memory, parts.iter().map(|(o, d)| (*o, d.to_vec())).collect()).is_err() {
+            self.lose();
         }
     }
 
@@ -649,12 +674,30 @@ impl InstState {
             }
             let Some(p) = self.mems.get(&id).map(|s| s.data.as_ptr()) else { continue };
             let t1 = std::time::Instant::now();
+            // Małe fragmenty jednej pamięci składamy w ramki do GROUP_MAX_BYTES (średnio 8 KB na fragment, ok. 750 ramek na klatkę w TR).
+            const GROUP_MAX_BYTES: usize = 256 * 1024;
+            let mut group: Vec<(u64, &[u8])> = Vec::new();
+            let mut group_bytes = 0usize;
             for (a, b) in ranges {
                 // SAFETY: bufor kopii nie zmienia adresu ani rozmiaru po utworzeniu; zakres leży w jego granicach.
                 let data = unsafe { std::slice::from_raw_parts(p.add(a), b - a) };
-                if !self.send_runs(id, a, data) {
-                    self.send_mem(id, a as u64, data);
+                if self.send_runs(id, a, data) {
+                    continue;
                 }
+                if data.len() >= GROUP_MAX_BYTES {
+                    self.send_mem(id, a as u64, data);
+                    continue;
+                }
+                group.push((a as u64, data));
+                group_bytes += data.len();
+                if group_bytes >= GROUP_MAX_BYTES || group.len() >= 512 {
+                    self.send_mem_group(id, &group);
+                    group.clear();
+                    group_bytes = 0;
+                }
+            }
+            if !group.is_empty() {
+                self.send_mem_group(id, &group);
             }
             self.stats.t_memsend_ns += t1.elapsed().as_nanos() as u64;
         }
@@ -1734,7 +1777,7 @@ fn periodic_stats(stats: &Stats) {
             let (r, k, z, x, pf) = xorstat();
             eprintln!("[gpu-icd] XORSTAT: surowo {} MB, strony o znanej treści {} MB, zstd surowych {} MB, zstd po XOR {} MB, zstd z prefiksem poprzedniej treści {} MB", r >> 20, k >> 20, z >> 20, x >> 20, pf >> 20);
         }
-        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}", stats.eager_pushes);
+        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}; zapisy pamięci scalone: {} ramek z {} fragmentów", stats.eager_pushes, stats.mem_groups, stats.mem_group_parts);
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {

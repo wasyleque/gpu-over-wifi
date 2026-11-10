@@ -17,7 +17,7 @@ use gpu_renderd::client::{Client, ClientError};
 
 /// Czy serwer odpowie na to żądanie (`Cmds`, `MemWrite*` i `PresentFrame` są ciche, o ile się powiodą).
 pub fn expects_reply(req: &Request) -> bool {
-    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
+    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRunsPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
 }
 
 struct Turn {
@@ -107,6 +107,8 @@ enum JobInput {
     Mem(u16, u64, u64, Vec<u8>),
     /// Zapis z prefiksem: numer ramki, pamięć, przesunięcie, bajty i poprzednia treść tego zakresu (kopia z lustra z chwili zakolejkowania).
     MemPfx(u16, u64, u64, Vec<u8>, Vec<u8>),
+    /// Kilka fragmentów jednej pamięci: numer ramki, pamięć, fragmenty `(przesunięcie, długość)`, sklejone bajty i sklejone poprzednie treści (z lustra).
+    RunsPfx(u16, u64, Vec<(u64, u32)>, Vec<u8>, Vec<u8>),
     Runs(RunsInput),
 }
 type JobOutput = Result<Vec<u8>, ()>;
@@ -125,6 +127,7 @@ impl Job {
             let r = match input {
                 JobInput::Mem(seq, memory, offset, raw) => mem_frame(seq, memory, offset, raw),
                 JobInput::MemPfx(seq, memory, offset, raw, prefix) => mem_frame_pfx(seq, memory, offset, raw, prefix),
+                JobInput::RunsPfx(seq, memory, runs, raw, prefix) => runs_pfx_frame(seq, memory, runs, raw, prefix),
                 JobInput::Runs((seq, memory, runs, pages, raw)) => runs_frame(seq, memory, runs, pages, raw),
             }
             .map_err(|_| ());
@@ -285,6 +288,31 @@ fn mem_frame_pfx(seq: u16, memory: u64, offset: u64, raw: Vec<u8>, prefix: Vec<u
     };
     WIRE_TOTAL.fetch_add(wire, std::sync::atomic::Ordering::Relaxed);
     *WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry(memory).or_insert(0) += wire;
+    let frame = Frame::new(0, flags::CRC, seq, 0, req.encode()).map_err(ClientError::Frame)?;
+    Ok(frame.encode())
+}
+
+/// Kilka fragmentów jednej pamięci jako jedna ramka `MemWriteRunsPfx` (zstd z prefiksem = sklejone poprzednie treści; surowo, gdy to nie oszczędza 10%).
+fn runs_pfx_frame(seq: u16, memory: u64, runs: Vec<(u64, u32)>, raw: Vec<u8>, prefix: Vec<u8>) -> Result<Vec<u8>, ClientError> {
+    let raw_len = raw.len() as u32;
+    let packed = (raw.len() >= 4096)
+        .then(|| {
+            let mut cctx = zstd::zstd_safe::CCtx::create();
+            let mut out: Vec<u8> = Vec::with_capacity(zstd::zstd_safe::compress_bound(raw.len()));
+            let ok = cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(1)).is_ok() && cctx.ref_prefix(&prefix).is_ok();
+            (ok && cctx.compress2(&mut out, &raw).is_ok()).then_some(out)
+        })
+        .flatten()
+        .filter(|c| c.len() * 10 <= raw.len() * 9);
+    let raw_crc = gpu_proto::frame::crc32c(&raw);
+    let (is_packed, data) = match packed {
+        Some(c) => (true, c),
+        None => (false, raw),
+    };
+    let wire = data.len() as u64 + runs.len() as u64 * 12;
+    WIRE_TOTAL.fetch_add(wire, std::sync::atomic::Ordering::Relaxed);
+    *WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry(memory).or_insert(0) += wire;
+    let req = Request::MemWriteRunsPfx { memory, runs, raw_len, raw_crc, packed: is_packed, data };
     let frame = Frame::new(0, flags::CRC, seq, 0, req.encode()).map_err(ClientError::Frame)?;
     Ok(frame.encode())
 }
@@ -469,9 +497,43 @@ impl Link {
         };
         let len = match &input {
             JobInput::MemPfx(_, _, _, r, _) | JobInput::Mem(_, _, _, r) => r.len(),
-            JobInput::Runs(_) => 0,
+            JobInput::Runs(_) | JobInput::RunsPfx(..) => 0,
         };
         let job = Arc::new(Job { len, input: Mutex::new(Some(input)), output: Mutex::new(None), done: Condvar::new() });
+        if self.direct.is_none() && !self.workers.is_empty() {
+            self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
+            self.out.work_cv.notify_one();
+        }
+        self.enqueue_item(Item::Job(job))
+    }
+
+    /// Czy zapisy pamięci używają prefiksu (i mogą być łączone w ramki `MemWriteRunsPfx`).
+    pub fn pfx_enabled() -> bool {
+        mem_pfx()
+    }
+
+    /// Kilka fragmentów jednej pamięci w jednej ramce (`MemWriteRunsPfx`); `parts` to `(przesunięcie, bajty)`. Prefiks to kopia lustra z chwili wywołania
+    /// (przed zapisem któregokolwiek fragmentu), potem lustro przejmuje nowe bajty; kolejność w strumieniu jak w `send_mem`.
+    pub fn send_mem_group(&mut self, memory: u64, parts: Vec<(u64, Vec<u8>)>) -> Result<(), ClientError> {
+        self.seq = self.seq.wrapping_add(1);
+        let total: usize = parts.iter().map(|p| p.1.len()).sum();
+        let m = self.mirror.entry(memory).or_default();
+        let mut prefix = Vec::with_capacity(total);
+        let mut raw = Vec::with_capacity(total);
+        let mut runs = Vec::with_capacity(parts.len());
+        for (o, d) in &parts {
+            let (off, end) = (*o as usize, *o as usize + d.len());
+            if m.len() < end {
+                m.resize(end, 0);
+            }
+            prefix.extend_from_slice(&m[off..end]);
+            raw.extend_from_slice(d);
+            runs.push((*o, d.len() as u32));
+        }
+        for (o, d) in &parts {
+            m[*o as usize..*o as usize + d.len()].copy_from_slice(d);
+        }
+        let job = Arc::new(Job { len: total, input: Mutex::new(Some(JobInput::RunsPfx(self.seq, memory, runs, raw, prefix))), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
             self.out.work_cv.notify_one();
@@ -712,6 +774,30 @@ mod tests {
                             mirror[offset as usize..offset as usize + raw.len()].copy_from_slice(&raw);
                             seen2.lock().unwrap().push((offset, raw));
                         }
+                        Request::MemWriteRunsPfx { runs, raw_len, raw_crc, packed, data, .. } => {
+                            let raw: Vec<u8> = if packed {
+                                let mut prefix = Vec::new();
+                                for &(o, l) in &runs {
+                                    prefix.extend_from_slice(&mirror[o as usize..o as usize + l as usize]);
+                                }
+                                let mut raw: Vec<u8> = Vec::with_capacity(raw_len as usize);
+                                let mut d = zstd::zstd_safe::DCtx::create();
+                                d.ref_prefix(&prefix).unwrap();
+                                d.decompress(&mut raw, &data).unwrap();
+                                raw
+                            } else {
+                                data
+                            };
+                            assert_eq!(raw.len(), raw_len as usize);
+                            assert_eq!(gpu_proto::frame::crc32c(&raw), raw_crc);
+                            let mut at = 0usize;
+                            for &(o, l) in &runs {
+                                let part = raw[at..at + l as usize].to_vec();
+                                mirror[o as usize..o as usize + l as usize].copy_from_slice(&part);
+                                seen2.lock().unwrap().push((o, part));
+                                at += l as usize;
+                            }
+                        }
                         Request::MemWriteZstdPfx { offset, raw_len, raw_crc, data, .. } => {
                             let (o, e) = (offset as usize, offset as usize + raw_len as usize);
                             let mut raw: Vec<u8> = Vec::with_capacity(raw_len as usize);
@@ -750,6 +836,14 @@ mod tests {
                     _ => (k % 7) as u8,
                 })
                 .collect();
+            if i % 5 == 4 {
+                // Kilka fragmentów w jednej ramce (jedno z nich dobrze kompresowalne, jedno poniżej progu kompresji).
+                let base = i * 4096;
+                let parts: Vec<(u64, Vec<u8>)> = vec![(base, data.iter().take(5000).copied().collect()), (base + 1_000_000, data.iter().rev().take(12_000).copied().collect()), (base + 2_000_000, vec![(i % 251) as u8; 300])];
+                link.send_mem_group(7, parts.clone()).unwrap();
+                sent.extend(parts);
+                continue;
+            }
             link.send_mem(7, i * 4096, data.clone()).unwrap();
             sent.push((i * 4096, data));
         }
