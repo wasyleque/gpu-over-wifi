@@ -1312,7 +1312,9 @@ static ENGINE_VKD3D: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub fn set_engine(name: &str) {
     // vkd3d-proton (D3D12) i DXVK (D3D9-11): w obu GPU zapisuje pamięć host-visible tylko w stertach z cache (readback, staging), a pamięć bez cache
     // (UPLOAD / dynamiczne bufory) jest dla GPU tylko do odczytu; poprawność każdej gry sprawdza audyt (patrz `contract_active`).
-    if name.starts_with("vkd3d") || name.starts_with("DXVK") {
+    // DXVK celowo NIE włącza kontraktu sam: włączony od pierwszej instancji DXVK (start gry) powodował VK_ERROR_DEVICE_LOST przy inicjalizacji swapchaina w TR
+    // (przyczyna nieustalona); wcześniej kontrakt włączała dopiero późniejsza instancja vkd3d (sonda), co działało w przebiegach 22-24.
+    if name.starts_with("vkd3d") {
         ENGINE_VKD3D.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if flags().periodic {

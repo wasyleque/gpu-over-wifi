@@ -62,6 +62,8 @@ impl Shared {
         DEFERRED_DONE.fetch_add(1, Relaxed);
         let code = match r {
             Ok(Response::Data(d)) if kind == 0 => d.get(..4).map_or(0, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            // Odpowiedź `Sync`: błąd asynchroniczny wcześniejszych poleceń (serwer zeruje go po zgłoszeniu, więc nie wolno go zgubić).
+            Ok(Response::Synced { error }) => *error,
             Ok(_) => 0,
             Err(ClientError::Remote(c, _)) => *c,
             Err(_) => -4, // VK_ERROR_DEVICE_LOST: połączenie zerwane
