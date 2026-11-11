@@ -180,3 +180,12 @@ Mountain Peak 40.61, Syria 18.37, Geothermal 19.53, **Overall 26.49** (run 26: 2
 largest client-side wait: the frame is limited by round-trip latency along the chain submit -> server -> present -> video -> client, not by CPU or lock.
 One earlier run of this build ended in a game exit on the third scene without any daemon/ICD error (`ConnectionReset`, no DEVICE_LOST); a rerun with the
 same build completed, so it is treated as a one-off until it repeats.
+
+## Runs 28-29 (diagnostics and a negative result)
+
+Run 28 (`GPU_ICD_DUPSTAT`): wire load in Syria/Geothermal is 85-96 MB/s (commands + memory) on a 1 Gb/s cable (practical TCP ~117 MB/s), i.e. ~4.7 MB per
+frame at ~19 FPS; Mountain Peak 50-80 MB/s. Pages already sent earlier are only ~7% of raw bytes (texture staging memory 0x100077: 15%), i.e. ~4-5% of wire
+bytes, so a content-addressed page cache on the server is not worth its complexity. Texture staging compresses worst (1.6x; the other memories 6-7x).
+
+Run 29 (zstd level 4 instead of 1): **15.16 FPS** (run 27: 26.49). The two frame workers went from ~46 s to ~126 s CPU each and the added compression
+latency sits on the critical path of every frame; level 1 stays the default (`GPU_ICD_ZSTD_LEVEL`).
