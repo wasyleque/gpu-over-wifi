@@ -132,9 +132,10 @@ impl Stats {
         v.sort_by_key(|(_, (_, raw, _))| std::cmp::Reverse(*raw));
         v.iter()
             .take(6)
-            .map(|(id, (n, raw, _))| {
+            .map(|(id, (n, raw, dup))| {
                 let (size, fl) = self.mem_flags.get(id).copied().unwrap_or((0, 0));
-                format!("{:#x} ({} MB, flagi {:#x}) {}x {} MB surowo / {} MB łącze", id, size >> 20, fl, n, raw >> 20, crate::link::wire_of(**id) >> 20)
+                let dups = if dupstat_enabled() { format!(", powtórzone strony {} MB", dup >> 20) } else { String::new() };
+                format!("{:#x} ({} MB, flagi {:#x}) {}x {} MB surowo / {} MB łącze{}", id, size >> 20, fl, n, raw >> 20, crate::link::wire_of(**id) >> 20, dups)
             })
             .collect::<Vec<_>>()
             .join("; ")
@@ -582,9 +583,20 @@ impl InstState {
         if dump_enabled() {
             dump_sample(memory, data);
         }
+        let mut dup = 0u64;
+        if dupstat_enabled() {
+            // Diagnostyka `GPU_ICD_DUPSTAT`: ile bajtów wysyłanych stron (4 KiB od początku fragmentu) już wcześniej wysłaliśmy (potencjał cache zawartości na serwerze).
+            for page in data.chunks_exact(4096) {
+                let h = gpu_proto::pagediff::page_hash(page);
+                if self.seen_pages.len() < 8_000_000 && !self.seen_pages.insert(h) {
+                    dup += 4096;
+                }
+            }
+        }
         let acct = self.stats.send_by_mem.entry(memory).or_insert((0, 0, 0));
         acct.0 += 1;
         acct.1 += data.len() as u64;
+        acct.2 += dup;
     }
 
     fn send_mem(&mut self, memory: u64, offset: u64, data: &[u8]) {
@@ -1103,6 +1115,11 @@ static XOR_ZSTD_RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 static XOR_ZSTD_XOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static XOR_ZSTD_PFX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static XOR_KNOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn dupstat_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_DUPSTAT").is_some())
+}
 
 fn xorstat_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
