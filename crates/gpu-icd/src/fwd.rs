@@ -76,6 +76,9 @@ pub struct Stats {
     pub mem_groups: u64,
     pub early_waits: u64,
     pub t_note_ns: u64,
+    /// Czas pod blokadą instancji: cały `settle_memory` (skan + wysyłka różnic) i wysłanie partii poleceń (`Request::Cmds`) w `flush`.
+    pub t_settle_ns: u64,
+    pub t_cmdsend_ns: u64,
     pub t_group_ns: u64,
     pub mem_group_parts: u64,
     pub refresh_ranged: u64,
@@ -461,9 +464,11 @@ impl InstState {
         let data = std::mem::take(&mut self.batch);
         self.stats.cmd_bytes += data.len() as u64;
         self.stats.cmd_batches += 1;
+        let t = std::time::Instant::now();
         if self.client.send(&Request::Cmds { data }).is_err() {
             self.lose();
         }
+        self.stats.t_cmdsend_ns += t.elapsed().as_nanos() as u64;
     }
 
     /// Wysyła tylko linie 64 B różniące się od kopii poprzedniej treści (`Shadow::prev`), scalone w fragmenty, jednym żądaniem `MemWriteRuns` na kawałek
@@ -662,10 +667,12 @@ impl InstState {
     /// wysyła zaległe polecenia przed każdym zapisem pamięci.
     pub(crate) fn settle_memory(&mut self) {
         self.scan_pending = false;
+        let t = std::time::Instant::now();
         let held = std::mem::take(&mut self.batch);
         self.write_mapped();
         let mut tail = std::mem::replace(&mut self.batch, held);
         self.batch.append(&mut tail);
+        self.stats.t_settle_ns += t.elapsed().as_nanos() as u64;
     }
 
     /// Przed `vkQueueSubmit`: serwer musi zobaczyć wszystko, co aplikacja wpisała w odwzorowaną pamięć.
@@ -1895,7 +1902,7 @@ fn periodic_stats(stats: &Stats) {
             let (r, k, z, x, pf) = xorstat();
             eprintln!("[gpu-icd] XORSTAT: surowo {} MB, strony o znanej treści {} MB, zstd surowych {} MB, zstd po XOR {} MB, zstd z prefiksem poprzedniej treści {} MB", r >> 20, k >> 20, z >> 20, x >> 20, pf >> 20);
         }
-        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}; zapisy pamięci scalone: {} ramek z {} fragmentów; oczekiwania zwrócone wcześniej: {} (odebrane odroczone odpowiedzi {}); wysyłka różnic: księgowość {} ms, grupa {} ms (z tego kopie {} ms)", stats.eager_pushes, stats.mem_groups, stats.mem_group_parts, stats.early_waits, crate::link::DEFERRED_DONE.load(std::sync::atomic::Ordering::Relaxed), stats.t_note_ns / 1_000_000, stats.t_group_ns / 1_000_000, crate::link::GROUP_COPY_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000);
+        eprintln!("[gpu-icd] audyt pominiętych odświeżeń pamięci: {asx} pominięć, {ad} sprawdzeń, {am} przeoczeń; wypchnięć przy End: {}; zapisy pamięci scalone: {} ramek z {} fragmentów; oczekiwania zwrócone wcześniej: {} (odebrane odroczone odpowiedzi {}); wysyłka różnic: księgowość {} ms, grupa {} ms (kopie lustra w wątkach {} ms, surowa kopia pod blokadą {} ms); pod blokadą: settle_memory {} ms, wysłanie poleceń {} ms", stats.eager_pushes, stats.mem_groups, stats.mem_group_parts, stats.early_waits, crate::link::DEFERRED_DONE.load(std::sync::atomic::Ordering::Relaxed), stats.t_note_ns / 1_000_000, stats.t_group_ns / 1_000_000, crate::link::GROUP_COPY_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000, crate::link::GROUP_MIRROR_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000, stats.t_settle_ns / 1_000_000, stats.t_cmdsend_ns / 1_000_000);
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
