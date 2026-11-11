@@ -156,6 +156,118 @@ mod acct {
     }
 }
 
+/// Klatka do zakodowania i wysłania.
+struct EncJob {
+    data: Vec<u8>,
+    seq: u32,
+    width: u16,
+    height: u16,
+    format: gpu_proto::video::PixelFormat,
+    codec: gpu_proto::video::Codec,
+}
+
+enum EncMsg {
+    Frame(EncJob),
+    /// Nowy kanał wideo (nowy swapchain): koder zaczyna od IDR.
+    NewStream(std::sync::mpsc::SyncSender<Vec<u8>>),
+}
+
+/// Jeden wątek na sesję: koduje (H.264/LZ4/surowo) i wysyła ramki na połączenie wideo. Kolejka jest ograniczona (backpressure jak dotąd).
+struct EncPipe {
+    tx: Option<std::sync::mpsc::SyncSender<EncMsg>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EncPipe {
+    fn new(video_tx: std::sync::mpsc::SyncSender<Vec<u8>>) -> EncPipe {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<EncMsg>(3);
+        let handle = std::thread::Builder::new()
+            .name("renderd-encode".into())
+            .spawn(move || {
+                let mut video_tx = video_tx;
+                let mut encoder: Option<gpu_nvenc::encoder::H264Encoder> = None;
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        EncMsg::NewStream(t) => {
+                            video_tx = t;
+                            encoder = None;
+                        }
+                        EncMsg::Frame(job) => encode_and_send(&mut encoder, &video_tx, job),
+                    }
+                }
+            })
+            .ok();
+        EncPipe { tx: Some(tx), handle }
+    }
+
+    fn submit(&self, job: EncJob) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(EncMsg::Frame(job));
+        }
+    }
+
+    fn new_stream(&self, video_tx: std::sync::mpsc::SyncSender<Vec<u8>>) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(EncMsg::NewStream(video_tx));
+        }
+    }
+}
+
+impl Drop for EncPipe {
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn encode_and_send(encoder: &mut Option<gpu_nvenc::encoder::H264Encoder>, video_tx: &std::sync::mpsc::SyncSender<Vec<u8>>, job: EncJob) {
+    use gpu_proto::video::{compress_lz4, Codec, PixelFormat, VideoHeader};
+    let EncJob { data, seq, width, height, format, codec } = job;
+    let t = acct::enabled().then(std::time::Instant::now);
+    let (codec, body) = match codec {
+        Codec::H264 => match encode_h264(encoder, &data, width, height, format == PixelFormat::Rgba8) {
+            Some(b) => (Codec::H264, b),
+            // Brak NVENC albo wymiary poza zakresem kodera: ramka idzie bezstratnie (LZ4), odbiorca czyta kodek z nagłówka.
+            None => (Codec::Lz4, compress_lz4(&data)),
+        },
+        Codec::Lz4 => (Codec::Lz4, compress_lz4(&data)),
+        c => (c, data),
+    };
+    if let Some(t) = t {
+        acct::add(6, t.elapsed());
+    }
+    let header = VideoHeader { swapchain: 0, image_index: 0, seq, width, height, format, codec, payload_len: body.len() as u32 };
+    // Nagłówek sam się waliduje: niepoprawna ramka nie wychodzi z serwera.
+    let hb = header.encode();
+    if VideoHeader::decode(&hb).is_err() {
+        return;
+    }
+    let mut payload = Vec::with_capacity(hb.len() + body.len());
+    payload.extend_from_slice(&hb);
+    payload.extend_from_slice(&body);
+    // Blokuje, gdy odbiorca nie nadąża (backpressure); brak odbiorcy (odłączone wideo) nie jest błędem sesji.
+    let t = acct::enabled().then(std::time::Instant::now);
+    let _ = video_tx.send(payload);
+    if let Some(t) = t {
+        acct::add(7, t.elapsed());
+    }
+}
+
+/// Koduje klatkę kodekiem H.264 (koder powstaje przy pierwszej klatce i jest odtwarzany przy zmianie wymiarów lub formatu).
+fn encode_h264(encoder: &mut Option<gpu_nvenc::encoder::H264Encoder>, data: &[u8], width: u16, height: u16, rgba: bool) -> Option<Vec<u8>> {
+    use gpu_nvenc::encoder::{EncoderConfig, H264Encoder};
+    let mbps: u32 = std::env::var("GPU_RENDERD_H264_MBPS").ok().and_then(|v| v.parse().ok()).filter(|v| (1..=800).contains(v)).unwrap_or(50);
+    let cfg = EncoderConfig { width: width as u32, height: height as u32, fps: 60, bitrate_bps: mbps * 1_000_000, rgba };
+    if encoder.as_ref().map(|e| e.config()) != Some(cfg) {
+        *encoder = None;
+        let nv = gpu_nvenc::api::Nvenc::load().map_err(|e| eprintln!("gpu-renderd: NVENC niedostępny: {e}")).ok()?;
+        *encoder = Some(H264Encoder::new(&nv, cfg).map_err(|e| eprintln!("gpu-renderd: koder H.264: {e}")).ok()?);
+    }
+    encoder.as_mut()?.encode(data, false).map_err(|e| eprintln!("gpu-renderd: kodowanie H.264: {e}")).ok()
+}
+
 pub struct Session<B: GpuBackend> {
     backend: B,
     token: Vec<u8>,
@@ -166,9 +278,8 @@ pub struct Session<B: GpuBackend> {
     async_error: i32,
     /// Identyfikator sesji i nadajnik ramek obrazu na jej połączenie wideo.
     session_id: u64,
-    video_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
-    /// Koder H.264 bieżącego kanału wideo (tworzony przy pierwszej klatce H.264, zerowany przy nowym `SessionId`).
-    encoder: Option<gpu_nvenc::encoder::H264Encoder>,
+    /// Wątek kodujący i wysyłający klatki na połączenie wideo (poza wątkiem poleceń: kodowanie klatki N nie wstrzymuje wykonywania klatki N+1).
+    enc: EncPipe,
 }
 
 impl<B: GpuBackend> Session<B> {
@@ -176,8 +287,7 @@ impl<B: GpuBackend> Session<B> {
         let (session_id, video_tx) = crate::videohub::new_session();
         Session {
             session_id,
-            video_tx,
-            encoder: None,
+            enc: EncPipe::new(video_tx),
             backend,
             token,
             authed: false,
@@ -213,7 +323,7 @@ impl<B: GpuBackend> Session<B> {
     /// Czyta obraz z pamięci urządzenia, koduje (surowo albo LZ4) i wypycha go jako ramkę na połączenie wideo.
     #[allow(clippy::too_many_arguments)]
     fn present_frame(&mut self, memory: u64, len: u32, seq: u32, width: u16, height: u16, format: u8, codec: u8) -> Result<(), i32> {
-        use gpu_proto::video::{compress_lz4, Codec, PixelFormat, VideoHeader};
+        use gpu_proto::video::{Codec, PixelFormat};
         let format = match format {
             1 => PixelFormat::Bgra8,
             2 => PixelFormat::Rgba8,
@@ -238,46 +348,9 @@ impl<B: GpuBackend> Session<B> {
         if data.len() != len as usize {
             return Err(ERR_UNKNOWN);
         }
-        let t = acct::enabled().then(std::time::Instant::now);
-        let (codec, body) = match codec {
-            Codec::H264 => match self.encode_h264(&data, width, height, format == PixelFormat::Rgba8) {
-                Some(b) => (Codec::H264, b),
-                // Brak NVENC albo wymiary poza zakresem kodera: ramka idzie bezstratnie (LZ4), odbiorca czyta kodek z nagłówka.
-                None => (Codec::Lz4, compress_lz4(&data)),
-            },
-            Codec::Lz4 => (Codec::Lz4, compress_lz4(&data)),
-            c => (c, data),
-        };
-        if let Some(t) = t {
-            acct::add(6, t.elapsed());
-        }
-        let header = VideoHeader { swapchain: 0, image_index: 0, seq, width, height, format, codec, payload_len: body.len() as u32 };
-        // Nagłówek sam się waliduje: niepoprawna ramka nie wychodzi z serwera.
-        let hb = header.encode();
-        VideoHeader::decode(&hb).map_err(|_| ERR_UNKNOWN)?;
-        let mut payload = Vec::with_capacity(hb.len() + body.len());
-        payload.extend_from_slice(&hb);
-        payload.extend_from_slice(&body);
-        // Blokuje, gdy odbiorca nie nadąża (backpressure); brak odbiorcy (odłączone wideo) nie jest błędem sesji.
-        let t = acct::enabled().then(std::time::Instant::now);
-        let _ = self.video_tx.send(payload);
-        if let Some(t) = t {
-            acct::add(7, t.elapsed());
-        }
+        // Kodowanie i wysyłka idą w wątku kodującym, w kolejności klatek; tu zostaje tylko odczyt klatki z pamięci GPU.
+        self.enc.submit(EncJob { data, seq, width, height, format, codec });
         Ok(())
-    }
-
-    /// Koduje klatkę kodekiem H.264 (koder powstaje przy pierwszej klatce i jest odtwarzany przy zmianie wymiarów lub formatu).
-    fn encode_h264(&mut self, data: &[u8], width: u16, height: u16, rgba: bool) -> Option<Vec<u8>> {
-        use gpu_nvenc::encoder::{EncoderConfig, H264Encoder};
-        let mbps: u32 = std::env::var("GPU_RENDERD_H264_MBPS").ok().and_then(|v| v.parse().ok()).filter(|v| (1..=800).contains(v)).unwrap_or(50);
-        let cfg = EncoderConfig { width: width as u32, height: height as u32, fps: 60, bitrate_bps: mbps * 1_000_000, rgba };
-        if self.encoder.as_ref().map(|e| e.config()) != Some(cfg) {
-            self.encoder = None;
-            let nv = gpu_nvenc::api::Nvenc::load().map_err(|e| eprintln!("gpu-renderd: NVENC niedostępny: {e}")).ok()?;
-            self.encoder = Some(H264Encoder::new(&nv, cfg).map_err(|e| eprintln!("gpu-renderd: koder H.264: {e}")).ok()?);
-        }
-        self.encoder.as_mut()?.encode(data, false).map_err(|e| eprintln!("gpu-renderd: kodowanie H.264: {e}")).ok()
     }
 
     /// Wykonuje `f` na backendzie i (przy `GPU_RENDERD_STATS`) zalicza czas do rodzaju `kind` (patrz `acct`).
@@ -353,8 +426,7 @@ impl<B: GpuBackend> Session<B> {
                     let (id, tx) = crate::videohub::new_session();
                     crate::videohub::forget(self.session_id);
                     self.session_id = id;
-                    self.video_tx = tx;
-                    self.encoder = None; // nowy strumień zaczyna się od IDR
+                    self.enc.new_stream(tx); // nowy strumień zaczyna się od IDR
                     Response::Handle(id)
                 }
                 Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
@@ -1037,7 +1109,7 @@ mod tests {
         assert_eq!(id, s.session_id());
         let rx = crate::videohub::claim(id).unwrap();
         assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 16, seq: 5, width: 2, height: 2, format: 1, codec: 0 }), None);
-        let payload = rx.try_recv().unwrap();
+        let payload = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         let h = VideoHeader::decode(&payload[..28]).unwrap();
         assert_eq!((h.seq, h.width, h.height, h.format, h.codec, h.payload_len), (5, 2, 2, PixelFormat::Bgra8, Codec::Raw, 16));
         assert_eq!(&payload[28..], &[7u8; 16][..]);
@@ -1054,7 +1126,7 @@ mod tests {
         assert!(rx_a.recv().is_err(), "stary kanał jest zamknięty, więc jego połączenie wideo się kończy");
         let rx_b = crate::videohub::claim(b).unwrap();
         s.handle_request(Request::PresentFrame { memory: 7, len: 4, seq: 1, width: 1, height: 1, format: 2, codec: 0 });
-        assert!(rx_b.try_recv().is_ok(), "ramki idą nowym kanałem");
+        assert!(rx_b.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "ramki idą nowym kanałem");
     }
 
     #[test]
@@ -1078,7 +1150,7 @@ mod tests {
         let Some(Response::Handle(id)) = s.handle_request(Request::SessionId) else { panic!() };
         let rx = crate::videohub::claim(id).unwrap();
         assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 64 * 4, seq: 1, width: 8, height: 8, format: 1, codec: 2 }), None);
-        let payload = rx.try_recv().unwrap();
+        let payload = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         let h = VideoHeader::decode(&payload[..28]).unwrap();
         assert_eq!((h.codec, h.payload_len as usize), (Codec::Lz4, payload.len() - 28));
         assert!(payload.len() - 28 < 64 * 4, "płaski obraz się kompresuje");
@@ -1098,7 +1170,7 @@ mod tests {
         let rx = crate::videohub::claim(id).unwrap();
         // 8x8 jest poniżej minimum NVENC (33), więc niezależnie od maszyny koder odmawia i ramka idzie jako LZ4.
         assert_eq!(s.handle_request(Request::PresentFrame { memory: 7, len: 64 * 4, seq: 1, width: 8, height: 8, format: 1, codec: 3 }), None);
-        let payload = rx.try_recv().unwrap();
+        let payload = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         let h = VideoHeader::decode(&payload[..28]).unwrap();
         assert_eq!(h.codec, Codec::Lz4);
         assert_eq!(decompress_lz4(&payload[28..], 64 * 4).unwrap(), vec![7u8; 64 * 4]);
