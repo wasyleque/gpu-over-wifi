@@ -232,6 +232,13 @@ struct ArenaState {
     used: std::collections::BTreeMap<usize, usize>,
 }
 
+/// Diagnostyka skanów zbiorczych: wywołania, skanowane przedziały i strony, zwrócone zakresy i strony zapisane.
+pub static SCAN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SCAN_EXTENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SCAN_PAGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SCAN_RANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SCAN_DIRTY_PAGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 static ARENA: std::sync::OnceLock<Option<Arena>> = std::sync::OnceLock::new();
 
 /// Arena procesu (tworzona przy pierwszym użyciu); `None`, gdy jądro lub ustawienia (`GPU_ICD_NO_MEMTRACK`) jej nie dopuszczają.
@@ -321,9 +328,14 @@ impl Arena {
             v
         };
         let mut out: Vec<(usize, usize)> = Vec::new();
-        for (o, l) in extents {
+        for &(o, l) in &extents {
+            SCAN_PAGES.fetch_add((l / PAGE) as u64, std::sync::atomic::Ordering::Relaxed);
             out.extend(self.tracker.take_dirty(o, l)?);
         }
+        SCAN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SCAN_EXTENTS.fetch_add(extents.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        SCAN_RANGES.fetch_add(out.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        SCAN_DIRTY_PAGES.fetch_add(out.iter().map(|r| ((r.1 - r.0) / PAGE) as u64).sum::<u64>(), std::sync::atomic::Ordering::Relaxed);
         Some(out)
     }
 
