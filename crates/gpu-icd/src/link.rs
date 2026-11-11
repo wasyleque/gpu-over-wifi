@@ -157,12 +157,72 @@ type RunsInput = (u16, u64, Vec<(u64, u32)>, Vec<(u32, u64)>, Vec<u8>);
 enum JobInput {
     Mem(u16, u64, u64, Vec<u8>),
     /// Zapis z prefiksem: numer ramki, pamięć, przesunięcie, bajty i poprzednia treść tego zakresu (kopia z lustra z chwili zakolejkowania).
-    MemPfx(u16, u64, u64, Vec<u8>, Vec<u8>),
+    MemPfx(u16, u64, u64, Vec<u8>, MirrorTurn),
     /// Kilka fragmentów jednej pamięci: numer ramki, pamięć, fragmenty `(przesunięcie, długość)`, sklejone bajty i sklejone poprzednie treści (z lustra).
-    RunsPfx(u16, u64, Vec<(u64, u32)>, Vec<u8>, Vec<u8>),
+    RunsPfx(u16, u64, Vec<(u64, u32)>, Vec<u8>, MirrorTurn),
     Runs(RunsInput),
 }
 type JobOutput = Result<Vec<u8>, ()>;
+
+/// Lustro "ostatnio przesłane w to miejsce" po pamięci (słownik zstd dla zapisów z prefiksem). Aktualizują je zadania zapisu w KOLEJNOŚCI numerów tur
+/// (numer nadaje wątek wołający pod blokadą instancji, a samo kopiowanie robi wątek roboczy), dzięki czemu kopie bajtów nie wydłużają blokady instancji.
+struct MirrorGate {
+    st: Mutex<MirrorSt>,
+    cv: Condvar,
+    /// Ustawiane przy zamykaniu łącza: czekające zadania rezygnują zamiast czekać na turę, która nie nadejdzie.
+    dead: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct MirrorSt {
+    /// Numer następnej tury do wykonania.
+    next: u64,
+    map: std::collections::HashMap<u64, Vec<u8>>,
+}
+
+/// Tura zadania wobec lustra: numer, pamięci do zapomnienia przed tym zapisem i uchwyt do lustra.
+struct MirrorTurn {
+    turn: u64,
+    forget: Vec<u64>,
+    gate: Arc<MirrorGate>,
+}
+
+impl MirrorTurn {
+    /// Czeka na swoją turę, zbiera prefiks (stare treści zakresów `runs` pamięci `memory`, sklejone), wpisuje do lustra nowe bajty `raw` i oddaje turę następnemu.
+    fn take(self, memory: u64, runs: &[(u64, u32)], raw: &[u8]) -> Result<Vec<u8>, ()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let g = &self.gate;
+        let mut st = g.st.lock().unwrap_or_else(|e| e.into_inner());
+        while st.next != self.turn {
+            if g.dead.load(Relaxed) {
+                return Err(());
+            }
+            st = g.cv.wait_timeout(st, std::time::Duration::from_millis(200)).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        for m in &self.forget {
+            st.map.remove(m);
+        }
+        let t0 = std::time::Instant::now();
+        let mut prefix = Vec::with_capacity(raw.len());
+        let m = st.map.entry(memory).or_default();
+        let mut at = 0usize;
+        for &(o, l) in runs {
+            let (off, end) = (o as usize, o as usize + l as usize);
+            if m.len() < end {
+                m.resize(end, 0);
+            }
+            prefix.extend_from_slice(&m[off..end]);
+            m[off..end].copy_from_slice(&raw[at..at + l as usize]);
+            at += l as usize;
+        }
+        GROUP_COPY_NS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+        st.next += 1;
+        drop(st);
+        g.cv.notify_all();
+        Ok(prefix)
+    }
+}
+
 
 struct Job {
     input: Mutex<Option<JobInput>>,
@@ -177,8 +237,14 @@ impl Job {
         if let Some(input) = taken {
             let r = match input {
                 JobInput::Mem(seq, memory, offset, raw) => mem_frame(seq, memory, offset, raw),
-                JobInput::MemPfx(seq, memory, offset, raw, prefix) => mem_frame_pfx(seq, memory, offset, raw, prefix),
-                JobInput::RunsPfx(seq, memory, runs, raw, prefix) => runs_pfx_frame(seq, memory, runs, raw, prefix),
+                JobInput::MemPfx(seq, memory, offset, raw, turn) => match turn.take(memory, &[(offset, raw.len() as u32)], &raw) {
+                    Ok(prefix) => mem_frame_pfx(seq, memory, offset, raw, prefix),
+                    Err(()) => Err(ClientError::Closed),
+                },
+                JobInput::RunsPfx(seq, memory, runs, raw, turn) => match turn.take(memory, &runs, &raw) {
+                    Ok(prefix) => runs_pfx_frame(seq, memory, runs, raw, prefix),
+                    Err(()) => Err(ClientError::Closed),
+                },
                 JobInput::Runs((seq, memory, runs, pages, raw)) => runs_frame(seq, memory, runs, pages, raw),
             }
             .map_err(|_| ());
@@ -407,7 +473,10 @@ pub struct Link {
     /// Ile żądań z odpowiedzią wysłano (numer biletu następnego takiego żądania). Zmieniany tylko pod blokadą instancji.
     sent: u64,
     /// Lustro "ostatnio przesłane w to miejsce" po pamięci (słownik zstd dla `MemWriteZstdPfx`); rośnie do największego zapisanego końca, reszta to zera.
-    mirror: std::collections::HashMap<u64, Vec<u8>>,
+    mirror: Arc<MirrorGate>,
+    /// Numer tury następnego zapisu z prefiksem (nadawany pod blokadą instancji) i pamięci zwolnione od ostatniej tury.
+    mturn: u64,
+    forget_pending: Vec<u64>,
 }
 
 impl Link {
@@ -502,7 +571,7 @@ impl Link {
             workers.push(h);
         }
         let direct = if std::env::var_os("GPU_ICD_SYNC_SEND").is_some() { Some(Mutex::new(direct_stream)) } else { None };
-        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0, mirror: Default::default() })
+        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0, mirror: Arc::new(MirrorGate { st: Default::default(), cv: Condvar::new(), dead: Default::default() }), mturn: 0, forget_pending: Vec::new() })
     }
 
     /// Opis stanu kolejki odpowiedzi (do diagnostyki zawieszeń).
@@ -538,15 +607,8 @@ impl Link {
     pub fn send_mem(&mut self, memory: u64, offset: u64, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
         let input = if mem_pfx() {
-            // Prefiks = kopia lustra z TEJ chwili (kolejne zapisy zmieniają lustro, zanim wątek roboczy skończy kompresję); potem lustro przejmuje nowe bajty.
-            let (off, end) = (offset as usize, offset as usize + raw.len());
-            let m = self.mirror.entry(memory).or_default();
-            if m.len() < end {
-                m.resize(end, 0);
-            }
-            let prefix = m[off..end].to_vec();
-            m[off..end].copy_from_slice(&raw);
-            JobInput::MemPfx(self.seq, memory, offset, raw, prefix)
+            // Prefiks i aktualizację lustra robi wątek roboczy w kolejności tur (numer nadajemy tu, pod blokadą instancji).
+            JobInput::MemPfx(self.seq, memory, offset, raw, self.next_turn())
         } else {
             JobInput::Mem(self.seq, memory, offset, raw)
         };
@@ -570,34 +632,19 @@ impl Link {
     /// Kilka fragmentów jednej pamięci w jednej ramce (`MemWriteRunsPfx`); `parts` to `(przesunięcie, bajty)`. Prefiks to kopia lustra z chwili wywołania
     /// (przed zapisem któregokolwiek fragmentu), potem lustro przejmuje nowe bajty; kolejność w strumieniu jak w `send_mem`.
     pub fn send_mem_group(&mut self, memory: u64, parts: &[(u64, &[u8])]) -> Result<(), ClientError> {
-        use std::sync::atomic::Ordering::Relaxed;
         self.seq = self.seq.wrapping_add(1);
-        let t0 = std::time::Instant::now();
         let total: usize = parts.iter().map(|p| p.1.len()).sum();
-        let m = self.mirror.entry(memory).or_default();
-        let mut prefix = Vec::with_capacity(total);
+        let t0 = std::time::Instant::now();
         let mut raw = Vec::with_capacity(total);
         let mut runs = Vec::with_capacity(parts.len());
         for (o, d) in parts {
-            let (off, end) = (*o as usize, *o as usize + d.len());
-            if m.len() < end {
-                m.resize(end, 0);
-            }
-            prefix.extend_from_slice(&m[off..end]);
             raw.extend_from_slice(d);
             runs.push((*o, d.len() as u32));
         }
-        let t1 = std::time::Instant::now();
-        // Lustro bierze bajty z `raw` (kopii wysyłanej), a NIE ponownie z `parts`: to żywa pamięć aplikacji, która może się zmienić między dwoma odczytami
-        // (wtedy lustro klienta różniłoby się od tego, co dostał serwer, i następny zapis z prefiksem miałby zły słownik).
-        let mut at = 0usize;
-        for (o, d) in parts {
-            m[*o as usize..*o as usize + d.len()].copy_from_slice(&raw[at..at + d.len()]);
-            at += d.len();
-        }
-        GROUP_COPY_NS.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
-        GROUP_MIRROR_NS.fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
-        let job = Arc::new(Job { len: total, input: Mutex::new(Some(JobInput::RunsPfx(self.seq, memory, runs, raw, prefix))), output: Mutex::new(None), done: Condvar::new() });
+        // Prefiks i lustro: wątek roboczy w kolejności tur, z `raw` (kopii wysyłanej), a NIE z żywej pamięci aplikacji, która mogłaby się zmienić między odczytami.
+        let turn = self.next_turn();
+        GROUP_MIRROR_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        let job = Arc::new(Job { len: total, input: Mutex::new(Some(JobInput::RunsPfx(self.seq, memory, runs, raw, turn))), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
             self.out.work_cv.notify_one();
@@ -607,7 +654,15 @@ impl Link {
 
     /// Zwolniona pamięć: lustro nie jest już potrzebne (serwer zdejmuje swoje przy zwolnieniu).
     pub fn forget_memory(&mut self, memory: u64) {
-        self.mirror.remove(&memory);
+        // Lustro zdejmie najbliższe zadanie w swojej turze (uchwyty pamięci nie wracają, więc zwłoka nie szkodzi).
+        self.forget_pending.push(memory);
+    }
+
+    /// Nadaje numer tury lustra następnemu zapisowi z prefiksem (pod blokadą instancji) i dołącza zaległe zwolnienia pamięci.
+    fn next_turn(&mut self) -> MirrorTurn {
+        let turn = self.mturn;
+        self.mturn += 1;
+        MirrorTurn { turn, forget: std::mem::take(&mut self.forget_pending), gate: self.mirror.clone() }
     }
 
     /// Zapis fragmentów jednej pamięci (patrz `Request::MemWriteRuns`); kolejność w strumieniu jak w `send_mem`, kompresja w wątku roboczym.
@@ -700,6 +755,8 @@ impl Drop for Link {
         if let Some(h) = self.sender.take() {
             let _ = h.join();
         }
+        self.mirror.dead.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.mirror.cv.notify_all();
         self.out.work_closed.store(true, std::sync::atomic::Ordering::SeqCst);
         self.out.work_cv.notify_all();
         for h in self.workers.drain(..) {
