@@ -339,6 +339,12 @@ pub fn wire_of(memory: u64) -> u64 {
 
 /// Czy zapisy pamięci idą kodowane zstd (poziom 1; na ruchu Tomb Raidera o ok. 17% mniej bajtów niż LZ4 przy 2-3x wolniejszym kodowaniu).
 /// `GPU_ICD_MEM_LZ4=1` wraca do LZ4 (np. dla starszego serwera, który nie zna `MemWriteZstd`).
+/// Poziom zstd dla zapisów pamięci (`GPU_ICD_ZSTD_LEVEL`, domyślnie 1): łącze 1 Gb/s jest w ciężkich scenach prawie nasycone, a wątki robocze mają zapas CPU.
+fn zstd_level() -> i32 {
+    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_ZSTD_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|l| (1..=19).contains(l)).unwrap_or(1))
+}
+
 fn mem_zstd() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var_os("GPU_ICD_MEM_LZ4").is_none())
@@ -392,7 +398,7 @@ fn mem_frame_pfx(seq: u16, memory: u64, offset: u64, raw: Vec<u8>, prefix: Vec<u
         .then(|| {
             let mut cctx = zstd::zstd_safe::CCtx::create();
             let mut out: Vec<u8> = Vec::with_capacity(zstd::zstd_safe::compress_bound(raw.len()));
-            let ok = cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(1)).is_ok() && cctx.ref_prefix(&prefix).is_ok();
+            let ok = cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(zstd_level())).is_ok() && cctx.ref_prefix(&prefix).is_ok();
             (ok && cctx.compress2(&mut out, &raw).is_ok()).then_some(out)
         })
         .flatten()
@@ -420,7 +426,7 @@ fn runs_pfx_frame(seq: u16, memory: u64, runs: Vec<(u64, u32)>, raw: Vec<u8>, pr
         .then(|| {
             let mut cctx = zstd::zstd_safe::CCtx::create();
             let mut out: Vec<u8> = Vec::with_capacity(zstd::zstd_safe::compress_bound(raw.len()));
-            let ok = cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(1)).is_ok() && cctx.ref_prefix(&prefix).is_ok();
+            let ok = cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(zstd_level())).is_ok() && cctx.ref_prefix(&prefix).is_ok();
             (ok && cctx.compress2(&mut out, &raw).is_ok()).then_some(out)
         })
         .flatten()
