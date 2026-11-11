@@ -189,3 +189,17 @@ bytes, so a content-addressed page cache on the server is not worth its complexi
 
 Run 29 (zstd level 4 instead of 1): **15.16 FPS** (run 27: 26.49). The two frame workers went from ~46 s to ~126 s CPU each and the added compression
 latency sits on the critical path of every frame; level 1 stays the default (`GPU_ICD_ZSTD_LEVEL`).
+
+## Run 30 (offline encoding analysis of recorded writes)
+
+`GPU_ICD_REC_DIR` recorded 512 MB of consecutive writes (benchmark phase) for the four largest host-cached memories; `crates/gpu-icd/examples/recstat.rs`
+replays them against a mirror exactly like the client (prefix = previous content of the range) and compares encodings (sizes after the first 20% warm-up):
+
+| memory | raw | really changed bytes | zstd1+prefix (today) | zstd3+prefix | XOR+zstd1 | 32-bit byte planes+zstd1+prefix | best of three per record |
+|---|---|---|---|---|---|---|---|
+| 0x1002f6 (16 MB) | 423.7 MB | 63.6 MB (15%) | **34.2 MB** | 33.1 | 50.5 | 38.4 | 33.7 |
+| 0x100954 (32 MB) | 432.8 MB | 135.6 MB (31%) | **79.5 MB** | 77.5 | 117.7 | 83.8 | 77.2 |
+
+The current coding is already the best of the candidates; the alternatives are 10-50% worse, and level 3 would gain ~3% at a CPU cost that run 29 showed to be
+unaffordable. The sent data is ~54-59% of the *really changed* bytes, i.e. the remainder is genuinely new information. Encoding is therefore not a useful lever
+any more; the wire load in the heavy scenes can only fall by sending less new data or by a faster link.
