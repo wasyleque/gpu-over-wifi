@@ -94,6 +94,15 @@ impl CmdTimes {
 static CMD_TIMES: std::sync::LazyLock<std::sync::Mutex<CmdTimes>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(CmdTimes::default()));
 
 /// Ranking poleceń według łącznego czasu wykonania w `Replayer::execute`: `nazwa liczba ms (średnio µs)`, oraz czas dekodowania.
+/// Czas (ns) składników zapisu pamięci: prefiks+rozpakowanie, crc32c, kopia do pamięci odwzorowanej, kopia do lustra, skróty stron, flush.
+pub static MW_NS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+pub fn mw_report() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let v: Vec<u64> = MW_NS.iter().map(|a| a.load(Relaxed) / 1_000_000).collect();
+    format!("zapis pamięci wg składników (ms): rozpakowanie {}, crc {}, kopia do pamięci GPU {}, lustro {}, skróty stron {}, flush {}", v[0], v[1], v[2], v[3], v[4], v[5])
+}
+
 pub fn cmd_times_report() -> String {
     let t = CMD_TIMES.lock().unwrap_or_else(|e| e.into_inner());
     let mut v: Vec<_> = t.by_name.iter().collect();
@@ -479,11 +488,18 @@ impl Replayer {
         if end > e.size {
             return Err(ERR_UNKNOWN);
         }
+        use std::sync::atomic::Ordering::Relaxed;
+        let t0 = std::time::Instant::now();
         // SAFETY: zakres [offset, offset+len) mieści się w odwzorowanej pamięci o rozmiarze `e.size`.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), data.len()) };
+        let t1 = std::time::Instant::now();
         self.mirror.entry(memory).or_insert_with(|| vec![0u8; e.size as usize])[offset as usize..end as usize].copy_from_slice(data);
+        let t2 = std::time::Instant::now();
         // Klient ma te strony w takim stanie, jaki właśnie wysłał: odczyt różnic nie odeśle ich z powrotem.
         self.pages.entry(memory).or_insert_with(|| gpu_proto::pagediff::PageTracker::new(e.size as usize)).mark_data(offset as usize, data);
+        MW_NS[2].fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+        MW_NS[3].fetch_add((t2 - t1).as_nanos() as u64, Relaxed);
+        MW_NS[4].fetch_add(t2.elapsed().as_nanos() as u64, Relaxed);
         Ok((e, device))
     }
 
@@ -503,6 +519,7 @@ impl Replayer {
             eprintln!("gpu-renderd: runs-pfx: suma fragmentów {total} != raw_len {raw_len}");
             return Err(ERR_UNKNOWN);
         }
+        let t_dec = std::time::Instant::now();
         let raw: Vec<u8> = if packed {
             let mirror = self.mirror.entry(memory).or_insert_with(|| vec![0u8; e.size as usize]);
             let mut prefix: Vec<u8> = Vec::with_capacity(raw_len as usize);
@@ -519,7 +536,11 @@ impl Replayer {
         } else {
             data.to_vec()
         };
-        if raw.len() != raw_len as usize || gpu_proto::frame::crc32c(&raw) != raw_crc {
+        MW_NS[0].fetch_add(t_dec.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        let t_crc = std::time::Instant::now();
+        let crc_ok = gpu_proto::frame::crc32c(&raw) == raw_crc;
+        MW_NS[1].fetch_add(t_crc.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        if raw.len() != raw_len as usize || !crc_ok {
             eprintln!("gpu-renderd: runs-pfx: crc/długość (pamięć {memory:#x}, {} fragmentów, packed {packed}, raw {} z {raw_len})", runs.len(), raw.len());
             return Err(ERR_UNKNOWN);
         }
@@ -529,10 +550,13 @@ impl Replayer {
             last = Some(self.mem_write_nofl(memory, o, &raw[at..at + l as usize])?);
             at += l as usize;
         }
-        match last {
+        let t_fl = std::time::Instant::now();
+        let r = match last {
             Some((e, device)) => self.range_call("vkFlushMappedMemoryRanges", device, e.real),
             None => Ok(()),
-        }
+        };
+        MW_NS[5].fetch_add(t_fl.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        r
     }
 
     /// Zapis skompresowany z prefiksem: poprzednia treść tego zakresu z lustra jest słownikiem zstd. Wynik musi mieć dokładnie `raw_len` bajtów i zgodne

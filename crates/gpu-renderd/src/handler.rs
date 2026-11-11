@@ -149,6 +149,7 @@ mod acct {
                 let line: Vec<String> = (0..8).filter(|&k| s.n[k] > 0).map(|k| format!("{} {}x {}ms", NAMES[k], s.n[k], s.us[k] / 1000)).collect();
                 eprintln!("gpu-renderd czas (od startu): {}", line.join(", "));
                 eprintln!("gpu-renderd polecenia wg czasu: {}", crate::vk::replay::cmd_times_report());
+                eprintln!("gpu-renderd {}", crate::vk::replay::mw_report());
             }
             s.last = Some(now);
         }
