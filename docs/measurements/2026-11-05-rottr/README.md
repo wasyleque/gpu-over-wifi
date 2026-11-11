@@ -171,3 +171,12 @@ Regression found and fixed on the way (runs between 24 and 26 ended with `DXGI_E
 twice (once into the frame, once into the client mirror). DXVK writes that memory concurrently, so the client mirror could differ from what the server
 received; the next prefix-coded write then had a different dictionary, the server rejected it (CRC mismatch, error -13) and the game saw DEVICE_LOST.
 The mirror is now filled from the frame's own copy. The daemon now logs the first asynchronous error with the request name.
+
+## Run 27 (mirror update moved to worker threads, in turn order)
+
+Mountain Peak 40.61, Syria 18.37, Geothermal 19.53, **Overall 26.49** (run 26: 26.94; no change). Instance-lock hold fell from ~54 s to ~36 s per run
+(longest hold 62.9 -> 49.9 ms), but FPS did not move: the lock is no longer the limiting factor. Client CPU is far from saturated (300 s run: dxvk-cs
+50 s, each frame worker 46 s, game main ~92 s over 18 threads; no thread above ~17% busy). `WaitSemaphores` 1598 calls x 16 ms = 25.7 s remains the
+largest client-side wait: the frame is limited by round-trip latency along the chain submit -> server -> present -> video -> client, not by CPU or lock.
+One earlier run of this build ended in a game exit on the third scene without any daemon/ICD error (`ConnectionReset`, no DEVICE_LOST); a rerun with the
+same build completed, so it is treated as a one-off until it repeats.
