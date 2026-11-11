@@ -161,3 +161,13 @@ Mountain Peak 39.78 (max 88.6), Syria 18.45, Geothermal 19.16, **Overall 26.10**
 Mountain Peak 37.80 (max 84.9), Syria 17.85, Geothermal 18.74, **Overall 25.08** (run 22: 26.10; spread of identical builds ~±4 %). Early-returned waits: 44,963; audit: 212,927 skips, 3,327 verified, 0 misses.
 CPU time per thread name over the whole log (two benchmark passes, 8,988 frames): `ROTTR.exe` x15 147 s, `dxvk-cs` 97 s, `dxvk-queue` 80 s, `gpu-icd-frame` (compression) 2 x 63 s, `gpu-icd-video` 58 s, `gpu-icd-send` 28 s.
 No single thread is saturated (each ≤ ~25 % of wall time); the remaining limit is the serial chain game → dxvk-cs → dxvk-queue → interception → server.
+
+## Run 26 (fix of a mirror race; correctness, not speed)
+
+Mountain Peak 41.20 (max 74.6), Syria 18.97, Geothermal 19.78, **Overall 26.94** (run 25: 26.10; within noise). Audit: 104,011 skips, 0 misses; no
+asynchronous server errors.
+
+Regression found and fixed on the way (runs between 24 and 26 ended with `DXGI_ERROR_DEVICE_RESET`): `send_mem_group` read the application's live memory
+twice (once into the frame, once into the client mirror). DXVK writes that memory concurrently, so the client mirror could differ from what the server
+received; the next prefix-coded write then had a different dictionary, the server rejected it (CRC mismatch, error -13) and the game saw DEVICE_LOST.
+The mirror is now filled from the frame's own copy. The daemon now logs the first asynchronous error with the request name.
