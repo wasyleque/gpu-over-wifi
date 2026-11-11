@@ -36,6 +36,7 @@ mod wsi;
 mod lazy;
 mod lazymap;
 mod link;
+pub mod route;
 mod watchdog;
 mod shadow;
 #[rustfmt::skip]
@@ -925,6 +926,10 @@ pub unsafe extern "C" fn vk_icdGetInstanceProcAddr(_instance: *mut c_void, name:
     if name.is_null() {
         return std::ptr::null();
     }
+    // Trasa lokalna (`GPU_ICD_ROUTE`): aplikację obsługuje lokalny sterownik, my tylko oddajemy jego wskaźniki.
+    if let Some(local) = route::passthrough() {
+        return local.instance_proc(_instance, name);
+    }
     match CStr::from_ptr(name).to_str() {
         Ok(n) => {
             let p = proc_addr_by_name(n);
@@ -939,11 +944,17 @@ pub unsafe extern "C" fn vk_icdGetInstanceProcAddr(_instance: *mut c_void, name:
 
 #[no_mangle]
 pub unsafe extern "C" fn vk_icdGetPhysicalDeviceProcAddr(_instance: *mut c_void, name: *const c_char) -> *const c_void {
+    if let Some(local) = route::passthrough() {
+        return local.physical_device_proc(_instance, name);
+    }
     vk_icdGetInstanceProcAddr(std::ptr::null_mut(), name)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn vk_icdNegotiateLoaderICDInterfaceVersion(version: *mut u32) -> VkResult {
+    if let Some(local) = route::passthrough() {
+        return local.negotiate(version);
+    }
     match version.as_mut() {
         Some(v) => {
             *v = (*v).min(ICD_INTERFACE_VERSION);

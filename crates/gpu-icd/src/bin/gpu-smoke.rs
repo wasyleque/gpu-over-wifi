@@ -174,7 +174,10 @@ fn swapchain_mode() {
     let mut range = S::new("VkImageSubresourceRange");
     range.u32("aspectMask", 1).u32("levelCount", 1).u32("layerCount", 1);
     let begin = S::new("VkCommandBufferBeginInfo");
-    for frame in 0..3 {
+    // `GPU_SMOKE_FRAMES` i `GPU_SMOKE_FRAME_MS` (przerwa po klatce): dłuższy przebieg bez okna, np. do pomiaru trasy (`GPU_ICD_ROUTE`).
+    let frames: u32 = std::env::var("GPU_SMOKE_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let frame_ms: u64 = std::env::var("GPU_SMOKE_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    for frame in 0..frames {
         let mut idx = 99u32;
         let r = call("vkAcquireNextImageKHR", &[dev, sc, u64::MAX, sem_acq, 0, &mut idx as *mut u32 as u64]);
         if r != 0 || idx as usize >= images.len() {
@@ -210,9 +213,12 @@ fn swapchain_mode() {
         if r != 0 && r != 1_000_001_003 {
             die(&format!("vkQueuePresentKHR (klatka {frame}) = {r}"));
         }
+        if frame_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(frame_ms));
+        }
     }
     call("vkDeviceWaitIdle", &[dev]);
-    println!("OK: 3 klatki narysowane na zdalnej karcie przez swapchain i wyświetlone lokalnie");
+    println!("OK: {frames} klatki narysowane przez swapchain i wyświetlone");
     call("vkDestroySwapchainKHR", &[dev, sc, 0]);
     call("vkDestroyDevice", &[dev, 0]);
     call("vkDestroySurfaceKHR", &[inst as u64, surface, 0]);

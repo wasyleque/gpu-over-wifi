@@ -136,7 +136,7 @@ mod manifest_tests {
 const LIBRARY_DIRS: &[&str] = &["/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/run/host/usr/lib"];
 
 /// Kandydaci na ścieżkę biblioteki sterownika: nazwa z manifestu, a dla samej nazwy (bez `/`) także znane katalogi kontenera.
-fn library_candidates(lib_path: &Path) -> Vec<PathBuf> {
+pub(crate) fn library_candidates(lib_path: &Path) -> Vec<PathBuf> {
     let mut v = vec![lib_path.to_path_buf()];
     if let Some(name) = lib_path.to_str().filter(|n| !n.contains('/')) {
         v.extend(LIBRARY_DIRS.iter().map(|d| Path::new(d).join(name)));
