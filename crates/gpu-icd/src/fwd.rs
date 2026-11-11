@@ -583,6 +583,9 @@ impl InstState {
         if dump_enabled() {
             dump_sample(memory, data);
         }
+        if rec_enabled() && self.stats.mem_flags.get(&memory).is_some_and(|f| f.1 == 7) {
+            rec_write(memory, offset, data);
+        }
         let mut dup = 0u64;
         if dupstat_enabled() {
             // Diagnostyka `GPU_ICD_DUPSTAT`: ile bajtów wysyłanych stron (4 KiB od początku fragmentu) już wcześniej wysłaliśmy (potencjał cache zawartości na serwerze).
@@ -1174,6 +1177,42 @@ fn xorstat_note(memory: u64, mem_len: usize, offset: usize, data: &[u8]) {
 pub fn xorstat() -> (u64, u64, u64, u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
     (XOR_RAW.load(Relaxed), XOR_KNOWN.load(Relaxed), XOR_ZSTD_RAW.load(Relaxed), XOR_ZSTD_XOR.load(Relaxed), XOR_ZSTD_PFX.load(Relaxed))
+}
+
+/// Zapis rekordów `[pamięć u64][przesunięcie u64][długość u32][bajty]` kolejnych zapisów (diagnostyka `GPU_ICD_REC_DIR`, do analizy kodowania poza grą): od
+/// `GPU_ICD_REC_SKIP`-tego zapisu danej pamięci (domyślnie 400000), do 512 MB na pamięć, tylko pamięci host-cached (flagi 0x7).
+fn rec_write(memory: u64, offset: u64, data: &[u8]) {
+    use std::io::Write;
+    type Rec = (std::path::PathBuf, u64, std::collections::HashMap<u64, (u64, u64)>);
+    static STATE: std::sync::Mutex<Option<Rec>> = std::sync::Mutex::new(None);
+    const PER_MEM_MAX: u64 = 512 << 20;
+    let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        let Some(dir) = std::env::var_os("GPU_ICD_REC_DIR") else { return };
+        let skip = std::env::var("GPU_ICD_REC_SKIP").ok().and_then(|v| v.parse().ok()).unwrap_or(400_000);
+        *g = Some((std::path::PathBuf::from(dir), skip, Default::default()));
+    }
+    let Some((dir, skip, per)) = g.as_mut() else { return };
+    let e = per.entry(memory).or_insert((0, 0));
+    e.0 += 1;
+    if e.0 <= *skip || e.1 + data.len() as u64 > PER_MEM_MAX {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("rec-{memory:x}.bin"))) {
+        let mut buf = Vec::with_capacity(20 + data.len());
+        buf.extend_from_slice(&memory.to_le_bytes());
+        buf.extend_from_slice(&offset.to_le_bytes());
+        buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(data);
+        if f.write_all(&buf).is_ok() {
+            e.1 += data.len() as u64;
+        }
+    }
+}
+
+fn rec_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_REC_DIR").is_some())
 }
 
 fn dump_enabled() -> bool {
