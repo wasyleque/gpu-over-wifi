@@ -594,7 +594,7 @@ impl InstState {
         let mut dup = 0u64;
         if dupstat_enabled() {
             // Diagnostyka `GPU_ICD_DUPSTAT`: ile bajtów wysyłanych stron (4 KiB od początku fragmentu) już wcześniej wysłaliśmy (potencjał cache zawartości na serwerze).
-            for page in data.chunks_exact(4096) {
+            for page in data.as_chunks::<4096>().0 {
                 let h = gpu_proto::pagediff::page_hash(page);
                 if self.seen_pages.len() < 8_000_000 && !self.seen_pages.insert(h) {
                     dup += 4096;
@@ -1419,10 +1419,21 @@ fn xfer_audit_bad(id: u64) -> bool {
     AUDIT_BAD.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
 }
 
+fn audit_period(done: u64) -> u64 {
+    static FIXED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    if let Some(n) = *FIXED.get_or_init(|| std::env::var("GPU_ICD_AUDIT_EVERY").ok().and_then(|v| v.parse().ok()).filter(|n| *n >= 1)) {
+        return n;
+    }
+    64u64 << (done / 128).min(5)
+}
+
 fn xfer_audit_pick(id: u64) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     AUDIT_SKIPPED.fetch_add(1, Relaxed);
-    if !AUDIT_TICK.fetch_add(1, Relaxed).is_multiple_of(64) {
+    // Okres audytu rośnie z liczbą wykonanych sprawdzeń (co 128 sprawdzeń podwaja się, od 64 do 2048 pominięć): każde sprawdzenie to blokujące oczekiwanie
+    // z odświeżeniem (ok. 15 ms), a przy 0 przeoczeń w setkach tysięcy pominięć gęsty audyt kosztował ok. 6 ms z każdej klatki TR. `GPU_ICD_AUDIT_EVERY=n` ustala stały okres.
+    let period = audit_period(AUDIT_DONE.load(Relaxed));
+    if !AUDIT_TICK.fetch_add(1, Relaxed).is_multiple_of(period) {
         return false;
     }
     let mut g = AUDIT_IDS.lock().unwrap_or_else(|e| e.into_inner());
@@ -3207,4 +3218,16 @@ mod memreq_target_tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod audit_period_tests {
+    #[test]
+    fn audit_period_backs_off_from_64_to_2048() {
+        assert_eq!(super::audit_period(0), 64);
+        assert_eq!(super::audit_period(127), 64);
+        assert_eq!(super::audit_period(128), 128);
+        assert_eq!(super::audit_period(640), 2048);
+        assert_eq!(super::audit_period(1_000_000), 2048);
+    }
 }
