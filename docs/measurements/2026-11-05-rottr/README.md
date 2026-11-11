@@ -203,3 +203,14 @@ replays them against a mirror exactly like the client (prefix = previous content
 The current coding is already the best of the candidates; the alternatives are 10-50% worse, and level 3 would gain ~3% at a CPU cost that run 29 showed to be
 unaffordable. The sent data is ~54-59% of the *really changed* bytes, i.e. the remainder is genuinely new information. Encoding is therefore not a useful lever
 any more; the wire load in the heavy scenes can only fall by sending less new data or by a faster link.
+
+## Runs 31-32 (where the instance-lock time goes)
+
+Run 31: **26.75 FPS**, run 32: **26.08 FPS** (noise band 26-27 since run 25). New counters, whole run (~4,800 frames): `settle_memory` 42.2 s = practically all of the
+42.1 s the instance lock is held; inside it the page-write scan (`PAGEMAP_SCAN`) is 23-24 s (24-26k scans, ~0.92 ms each, ~5 per frame) and the memory
+differences send 18 s (raw copy 12.6 s); sending the command batch is 0.9 s. One scan covers a single extent of 35,357 pages (138 MB) and returns only
+~457 written pages in ~220 ranges, so its cost is the kernel walk over all mapped pages plus write-protect re-arming/TLB flush, not the amount of data.
+
+Observation across runs 22-32: the lock hold fell from ~54 s to ~36-42 s (and the time under the lock outside the scan by 40%) with no FPS change, so lock
+contention is not what limits the frame rate. Syria and Geothermal run at 85-96 MB/s on the 1 Gb/s cable (link-bound; encoding is already near its limit,
+see run 30), Mountain Peak at 50-80 MB/s (not link-bound, ~40 FPS).
