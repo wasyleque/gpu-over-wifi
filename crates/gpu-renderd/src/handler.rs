@@ -294,9 +294,10 @@ impl<B: GpuBackend> Session<B> {
         self.session_id
     }
 
-    fn note_async(&mut self, r: Result<(), i32>) -> Response {
+    fn note_async(&mut self, what: &str, r: Result<(), i32>) -> Response {
         if let Err(code) = r {
             if self.async_error == 0 {
+                eprintln!("gpu-renderd: pierwszy błąd asynchroniczny {code} w żądaniu {what}");
                 self.async_error = code;
             }
         }
@@ -358,7 +359,7 @@ impl<B: GpuBackend> Session<B> {
                 Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
                 Request::PresentFrame { memory, len, seq, width, height, format, codec } => {
                     let r = self.present_frame(memory, len, seq, width, height, format, codec);
-                    self.note_async(r)
+                    self.note_async("PresentFrame", r)
                 }
                 Request::Cmds { data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -366,7 +367,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(0, t.elapsed());
                     }
-                    self.note_async(r)
+                    self.note_async("Cmds", r)
                 }
                 Request::MemWriteLz4 { memory, offset, raw_len, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -378,7 +379,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }
-                    self.note_async(r)
+                    self.note_async("MemWriteLz4", r)
                 }
                 Request::MemWriteZstd { memory, offset, raw_len, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -390,7 +391,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }
-                    self.note_async(r)
+                    self.note_async("MemWriteZstd", r)
                 }
                 Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -398,7 +399,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }
-                    self.note_async(r)
+                    self.note_async("MemWriteZstdPfx", r)
                 }
                 Request::MemWriteRunsPfx { memory, runs, raw_len, raw_crc, packed, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -406,7 +407,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }
-                    self.note_async(r)
+                    self.note_async("MemWriteRunsPfx", r)
                 }
                 Request::MemWriteRuns { memory, runs, pages, raw_len, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -417,7 +418,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }
-                    self.note_async(r)
+                    self.note_async("MemWriteRuns", r)
                 }
                 Request::MemWrite { memory, offset, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -425,7 +426,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(1, t.elapsed());
                     }
-                    self.note_async(r)
+                    self.note_async("MemWrite", r)
                 }
                 Request::Query { data } => match self.timed(2, |b| b.query(&data)) {
                     Ok(v) => Response::Data(v),
@@ -449,7 +450,7 @@ impl<B: GpuBackend> Session<B> {
                     if let Some(t) = t {
                         acct::add(4, t.elapsed());
                     }
-                    self.note_async(r);
+                    self.note_async("Sync", r);
                     Response::Synced { error: std::mem::take(&mut self.async_error) }
                 }
                 Request::EnumInstanceVersion => match self.backend.instance_version() {

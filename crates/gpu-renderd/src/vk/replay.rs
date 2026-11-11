@@ -494,9 +494,13 @@ impl Replayer {
         let mut total = 0u64;
         for &(o, l) in runs {
             total += l as u64;
-            o.checked_add(l as u64).filter(|x| *x <= e.size).ok_or(ERR_UNKNOWN)?;
+            o.checked_add(l as u64).filter(|x| *x <= e.size).ok_or_else(|| {
+                eprintln!("gpu-renderd: runs-pfx: fragment {o}+{l} poza pamięcią {memory:#x} (rozmiar {})", e.size);
+                ERR_UNKNOWN
+            })?;
         }
         if total != raw_len as u64 {
+            eprintln!("gpu-renderd: runs-pfx: suma fragmentów {total} != raw_len {raw_len}");
             return Err(ERR_UNKNOWN);
         }
         let raw: Vec<u8> = if packed {
@@ -508,6 +512,7 @@ impl Replayer {
             let mut raw: Vec<u8> = Vec::with_capacity(raw_len as usize);
             let mut dctx = zstd::zstd_safe::DCtx::create();
             if dctx.ref_prefix(&prefix).is_err() || dctx.decompress(&mut raw, data).is_err() {
+                eprintln!("gpu-renderd: runs-pfx: rozpakowanie nieudane (pamięć {memory:#x}, {} fragmentów, raw_len {raw_len}, data {} B)", runs.len(), data.len());
                 return Err(ERR_UNKNOWN);
             }
             raw
@@ -515,6 +520,7 @@ impl Replayer {
             data.to_vec()
         };
         if raw.len() != raw_len as usize || gpu_proto::frame::crc32c(&raw) != raw_crc {
+            eprintln!("gpu-renderd: runs-pfx: crc/długość (pamięć {memory:#x}, {} fragmentów, packed {packed}, raw {} z {raw_len})", runs.len(), raw.len());
             return Err(ERR_UNKNOWN);
         }
         let mut at = 0usize;

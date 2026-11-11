@@ -609,6 +609,20 @@ impl Link {
     /// Zapis fragmentów jednej pamięci (patrz `Request::MemWriteRuns`); kolejność w strumieniu jak w `send_mem`, kompresja w wątku roboczym.
     pub fn send_mem_runs(&mut self, memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
+        // Serwer wpisuje te bajty do swojego lustra (każdy zapis pamięci je aktualizuje), więc lustro klienta musi je dostać też: inaczej prefiksy
+        // następnych zapisów z prefiksem się rozjadą (crc niezgodne => błąd asynchroniczny => DEVICE_LOST).
+        if mem_pfx() {
+            let m = self.mirror.entry(memory).or_default();
+            let mut at = 0usize;
+            for &(o, l) in &runs {
+                let (off, end) = (o as usize, o as usize + l as usize);
+                if m.len() < end {
+                    m.resize(end, 0);
+                }
+                m[off..end].copy_from_slice(&raw[at..at + l as usize]);
+                at += l as usize;
+            }
+        }
         let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some(JobInput::Runs((self.seq, memory, runs, pages, raw)))), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
