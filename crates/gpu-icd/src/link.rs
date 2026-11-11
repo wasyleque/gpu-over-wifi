@@ -588,8 +588,12 @@ impl Link {
             runs.push((*o, d.len() as u32));
         }
         let t1 = std::time::Instant::now();
+        // Lustro bierze bajty z `raw` (kopii wysyłanej), a NIE ponownie z `parts`: to żywa pamięć aplikacji, która może się zmienić między dwoma odczytami
+        // (wtedy lustro klienta różniłoby się od tego, co dostał serwer, i następny zapis z prefiksem miałby zły słownik).
+        let mut at = 0usize;
         for (o, d) in parts {
-            m[*o as usize..*o as usize + d.len()].copy_from_slice(d);
+            m[*o as usize..*o as usize + d.len()].copy_from_slice(&raw[at..at + d.len()]);
+            at += d.len();
         }
         GROUP_COPY_NS.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
         GROUP_MIRROR_NS.fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
@@ -609,20 +613,6 @@ impl Link {
     /// Zapis fragmentów jednej pamięci (patrz `Request::MemWriteRuns`); kolejność w strumieniu jak w `send_mem`, kompresja w wątku roboczym.
     pub fn send_mem_runs(&mut self, memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
-        // Serwer wpisuje te bajty do swojego lustra (każdy zapis pamięci je aktualizuje), więc lustro klienta musi je dostać też: inaczej prefiksy
-        // następnych zapisów z prefiksem się rozjadą (crc niezgodne => błąd asynchroniczny => DEVICE_LOST).
-        if mem_pfx() {
-            let m = self.mirror.entry(memory).or_default();
-            let mut at = 0usize;
-            for &(o, l) in &runs {
-                let (off, end) = (o as usize, o as usize + l as usize);
-                if m.len() < end {
-                    m.resize(end, 0);
-                }
-                m[off..end].copy_from_slice(&raw[at..at + l as usize]);
-                at += l as usize;
-            }
-        }
         let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some(JobInput::Runs((self.seq, memory, runs, pages, raw)))), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());
