@@ -1395,6 +1395,9 @@ fn contract_active() -> bool {
 /// odpytywania (`timeout` bliski 0), których wynik zależy od serwera.
 const EARLY_MIN_TIMEOUT_NS: u64 = 500_000_000;
 
+/// Liczniki oczekiwań na semafor wg przyczyny: [wraca wcześniej, odświeżenia pamięci, odpytywanie (timeout 0), brak kontraktu, krótki limit czasu].
+static WAIT_KIND: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
 static AUDIT_IDS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 static AUDIT_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static AUDIT_BAD: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
@@ -1907,6 +1910,10 @@ fn periodic_stats(stats: &Stats) {
             use std::sync::atomic::Ordering::Relaxed;
             let c = crate::memtrack::SCAN_CALLS.load(Relaxed).max(1);
             eprintln!("[gpu-icd] skany zbiorcze: {c}, na skan średnio {} przedziałów, {} stron skanowanych, {} zakresów, {} stron zapisanych", crate::memtrack::SCAN_EXTENTS.load(Relaxed) / c, crate::memtrack::SCAN_PAGES.load(Relaxed) / c, crate::memtrack::SCAN_RANGES.load(Relaxed) / c, crate::memtrack::SCAN_DIRTY_PAGES.load(Relaxed) / c);
+        }
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!("[gpu-icd] oczekiwania na semafor wg przyczyny: wracają wcześniej {}, z odświeżeniem pamięci {}, odpytywanie (limit 0) {}, krótki limit czasu {}, bez kontraktu {}", WAIT_KIND[0].load(Relaxed), WAIT_KIND[1].load(Relaxed), WAIT_KIND[2].load(Relaxed), WAIT_KIND[4].load(Relaxed), WAIT_KIND[3].load(Relaxed));
         }
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
@@ -2445,6 +2452,13 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     // Oczekiwanie na semafor bez limitu czasu wraca do gry od razu, gdy po nim nie ma czego odświeżać z serwera: serwer wykona je w kolejności strumienia
     // (przed każdym późniejszym zapisem pamięci i poleceniem), więc GPU skończy pracę, zanim cokolwiek, co gra zrobi potem, dotrze do niego; odczyty
     // leniwych pamięci (readback) idą żądaniem za oczekiwaniem w tym samym strumieniu. Wynik (sukces) i ewentualny błąd serwera odbiera następny czekający wątek.
+    if cmd.class == CmdClass::Sync && cmd.name.starts_with("vkWaitSemaphores") {
+        // Diagnostyka: czemu to oczekiwanie nie wraca wcześniej (0: wraca, 1: odświeżenia pamięci, 2: limit czasu poniżej progu (odpytywanie), 3: brak kontraktu).
+        use std::sync::atomic::Ordering::Relaxed;
+        let timeout = slots.get(2).copied().unwrap_or(0);
+        let k = if !pre_ids.is_empty() { 1 } else if timeout < EARLY_MIN_TIMEOUT_NS { if timeout == 0 { 2 } else { 4 } } else if !contract_active() { 3 } else { 0 };
+        WAIT_KIND[k].fetch_add(1, Relaxed);
+    }
     if let (Some(t), true) = (ticket, cmd.class == CmdClass::Sync && pre_ids.is_empty() && cmd.name.starts_with("vkWaitSemaphores") && slots.get(2).is_some_and(|t| *t >= EARLY_MIN_TIMEOUT_NS) && contract_active()) {
         st.client.shared().defer(t);
         st.stats.early_waits += 1;
