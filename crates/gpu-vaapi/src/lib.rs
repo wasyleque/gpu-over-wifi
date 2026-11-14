@@ -44,6 +44,8 @@ struct Fns {
     end_picture: unsafe extern "C" fn(Dpy, u32) -> i32,
     sync_surface: unsafe extern "C" fn(Dpy, u32) -> i32,
     derive_image: unsafe extern "C" fn(Dpy, u32, *mut VAImage) -> i32,
+    create_image: unsafe extern "C" fn(Dpy, *mut VAImageFormat, i32, i32, *mut VAImage) -> i32,
+    get_image: unsafe extern "C" fn(Dpy, u32, i32, i32, u32, u32, u32) -> i32,
     destroy_image: unsafe extern "C" fn(Dpy, u32) -> i32,
     map_buffer: unsafe extern "C" fn(Dpy, u32, *mut *mut c_void) -> i32,
     unmap_buffer: unsafe extern "C" fn(Dpy, u32) -> i32,
@@ -98,9 +100,28 @@ pub struct VaDecoder {
 // SAFETY: wyświetlacz VA używany z jednego wątku naraz (wymaga `&mut self`).
 unsafe impl Send for VaDecoder {}
 
+/// W kontenerze Steam Linux Runtime (Proton) `LIBVA_DRIVERS_PATH` obejmuje tylko katalogi `overrides`, gdzie nie ma sterowników
+/// spoza Mesa (np. `nvidia_drv_video.so` z libva-nvidia-driver); host jest widoczny pod `/run/host`. Dopisujemy jego katalogi sterowników.
+fn extend_driver_path() {
+    let extra: Vec<&str> = ["/run/host/usr/lib/dri", "/run/host/usr/lib/x86_64-linux-gnu/dri"].into_iter().filter(|d| std::path::Path::new(d).is_dir()).collect();
+    if extra.is_empty() {
+        return;
+    }
+    let cur = std::env::var("LIBVA_DRIVERS_PATH").unwrap_or_default();
+    let mut parts: Vec<&str> = cur.split(':').filter(|p| !p.is_empty()).collect();
+    for d in extra {
+        if !parts.contains(&d) {
+            parts.push(d);
+        }
+    }
+    // SAFETY: wołane z jednego wątku odbioru wideo przed inicjalizacją libva; nikt inny nie modyfikuje środowiska w tym czasie.
+    unsafe { std::env::set_var("LIBVA_DRIVERS_PATH", parts.join(":")) };
+}
+
 impl VaDecoder {
     /// Otwiera pierwsze działające urządzenie renderujące z obsługą dekodowania H.264 High/Main.
     pub fn new() -> Result<VaDecoder, String> {
+        extend_driver_path();
         let va = Lib::open(&["libva.so.2", "libva.so"])?;
         let drm = Lib::open(&["libva-drm.so.2", "libva-drm.so"])?;
         let f = Fns {
@@ -120,6 +141,8 @@ impl VaDecoder {
             end_picture: sym!(va, "vaEndPicture"),
             sync_surface: sym!(va, "vaSyncSurface"),
             derive_image: sym!(va, "vaDeriveImage"),
+            create_image: sym!(va, "vaCreateImage"),
+            get_image: sym!(va, "vaGetImage"),
             destroy_image: sym!(va, "vaDestroyImage"),
             map_buffer: sym!(va, "vaMapBuffer"),
             unmap_buffer: sym!(va, "vaUnmapBuffer"),
@@ -347,7 +370,22 @@ impl VaDecoder {
     fn read_frame(&mut self, surface: u32, sps: &Sps) -> Result<Frame, String> {
         let mut img = VAImage::default();
         // SAFETY: powierzchnia jest zsynchronizowana; wskaźnik wyjściowy poprawny.
-        self.ck("vaDeriveImage", unsafe { (self.f.derive_image)(self.dpy, surface, &mut img) })?;
+        let st = unsafe { (self.f.derive_image)(self.dpy, surface, &mut img) };
+        if st != 0 {
+            // Sterownik bez vaDeriveImage (np. NVDEC): tworzymy obraz NV12 i kopiujemy do niego powierzchnię przez vaGetImage.
+            let (fw, fh) = (sps.width_mbs * 16, sps.height_mbs * 16);
+            let mut fmt = VAImageFormat { fourcc: VA_FOURCC_NV12, ..Default::default() };
+            img = VAImage::default();
+            // SAFETY: format i wskaźnik wyjściowy poprawne.
+            self.ck("vaCreateImage", unsafe { (self.f.create_image)(self.dpy, &mut fmt, fw as i32, fh as i32, &mut img) })?;
+            // SAFETY: obraz utworzony powyżej ma rozmiar powierzchni.
+            let g = unsafe { (self.f.get_image)(self.dpy, surface, 0, 0, fw, fh, img.image_id) };
+            if g != 0 {
+                // SAFETY: obraz utworzony powyżej.
+                unsafe { (self.f.destroy_image)(self.dpy, img.image_id) };
+                return self.ck("vaGetImage", g).and(Err("vaGetImage".to_string()));
+            }
+        }
         let mut p: *mut c_void = std::ptr::null_mut();
         // SAFETY: bufor obrazu pochodzi z `vaDeriveImage`.
         let st = unsafe { (self.f.map_buffer)(self.dpy, img.buf, &mut p) };

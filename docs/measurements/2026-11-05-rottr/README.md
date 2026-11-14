@@ -214,3 +214,12 @@ differences send 18 s (raw copy 12.6 s); sending the command batch is 0.9 s. One
 Observation across runs 22-32: the lock hold fell from ~54 s to ~36-42 s (and the time under the lock outside the scan by 40%) with no FPS change, so lock
 contention is not what limits the frame rate. Syria and Geothermal run at 85-96 MB/s on the 1 Gb/s cable (link-bound; encoding is already near its limit,
 see run 30), Mountain Peak at 50-80 MB/s (not link-bound, ~40 FPS).
+
+## Run 34 — DESKTOP (Ryzen z GTX 1080 Ti jako klient, 1 GbE bezpośrednio do serwera), audit backoff
+
+First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1920x1080@60). Client build with audit-period backoff (64 -> 2048) plus VA-API NVDEC decode (`vaGetImage` fallback, host driver dir appended to `LIBVA_DRIVERS_PATH` inside Proton's pressure-vessel).
+
+- Mountain Peak 48.52 FPS (min 4.75, max 108.13), Syria 21.15 (min 5.37, max 47.39), Geothermal Valley 21.97 (min 4.02, max 65.41), overall **30.86 FPS** (laptop baseline 26.4).
+- Blocking semaphore waits with memory refresh: 569 (laptop run 33: 2173), i.e. the audit backoff removed ~74% of them. 0 device losses.
+- Two changes at once (faster client CPU and audit backoff), so the gain cannot be split until the same build runs on the laptop.
+- Setup notes: a 4K@30 TV made the game render 3840x2160 and the server rejected the 33 MB frame (`LimitExceeded("frame")`, MAX_BATCH 8 MB); fixed by setting the output to 1920x1080. H.264 decode needs `libva-nvidia-driver`; inside pressure-vessel the host driver is only reachable under `/run/host/usr/lib/dri`.
