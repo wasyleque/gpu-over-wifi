@@ -339,10 +339,10 @@ pub fn wire_of(memory: u64) -> u64 {
 
 /// Czy zapisy pamięci idą kodowane zstd (poziom 1; na ruchu Tomb Raidera o ok. 17% mniej bajtów niż LZ4 przy 2-3x wolniejszym kodowaniu).
 /// `GPU_ICD_MEM_LZ4=1` wraca do LZ4 (np. dla starszego serwera, który nie zna `MemWriteZstd`).
-/// Poziom zstd dla zapisów pamięci (`GPU_ICD_ZSTD_LEVEL`, domyślnie 1): łącze 1 Gb/s jest w ciężkich scenach prawie nasycone, a wątki robocze mają zapas CPU.
+/// Poziom zstd dla zapisów pamięci (`GPU_ICD_ZSTD_LEVEL`, domyślnie 1; ujemne -1..-7 to tryby "fast": szybsze kodowanie kosztem rozmiaru, z prefiksem lustra): łącze 1 Gb/s jest w ciężkich scenach prawie nasycone, a wątki robocze mają zapas CPU.
 fn zstd_level() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("GPU_ICD_ZSTD_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|l| (1..=19).contains(l)).unwrap_or(1))
+    *V.get_or_init(|| std::env::var("GPU_ICD_ZSTD_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|l| (-7..=19).contains(l) && *l != 0).unwrap_or(1))
 }
 
 fn mem_zstd() -> bool {
