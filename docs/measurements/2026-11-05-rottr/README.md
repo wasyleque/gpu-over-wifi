@@ -254,3 +254,10 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 - Profil: wątki kodujące (`ZSTD_compressBlock_fast_extDict`) ~12% CPU łącznie (LZ4: 17-20%), a FPS nie rośnie: hipoteza C1 ("szybszy kompresor z lustrem = FPS jak LZ4") **nie potwierdzona**.
   Wniosek roboczy: przewaga LZ4 na tym kliencie wynika z braku lustra (kopia poprzedniej treści pod blokadą instancji), nie z szybkości kompresora.
 - Obserwacja: Mountain Peak ma minimum 0,2-0,4 FPS w trzech przebiegach (zacięcie na starcie sceny); do zbadania osobno.
+
+### Run 43 — minipc (N6000, 2,5 GbE, dołożony wiatrak zewnętrzny), zstd -3 BEZ prefiksu (`GPU_ICD_ZSTD_LEVEL=-3 GPU_ICD_NO_PFX=1`), build 0.3.14
+
+- Mountain Peak 25.81 FPS (min 10.14, max 64.75), Syria 10.58 (min 4.56, max 19.71), Geothermal 10.40 (min 2.93, max 29.15), overall **14.67 FPS**; 35 GB na łączu.
+- Taktowanie i temperatura (rejestr co 2 s): w grze średnio 2,84 GHz (min 2,70), temp. maks. 73 °C; brak dławienia. Brak punktu odniesienia sprzed wiatraka.
+- Wątki kodujące 65% CPU każdy (razem 130%; LZ4: 52%), proces 295% z 400%. Hipoteza "przewagę LZ4 daje brak lustra" niepotwierdzona (wersja bez lustra tak samo wolna, FPS poniżej LZ4).
+- Następny krok: powtórka bazowa LZ4 przy nowym chłodzeniu (oddzielenie efektu chłodzenia od efektu ustawień).
