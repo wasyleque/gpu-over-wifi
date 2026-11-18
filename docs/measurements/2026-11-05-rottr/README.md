@@ -241,3 +241,9 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 
 - Profil perf (Syria, LZ4): kompresja LZ4 ok. 20% CPU, konwersja NV12 ok. 5%, jądro 17%, kod gry ok. 31%. Wątki kompresji spadają z 51% (zstd) do 26% (LZ4), 3,8% (surowo).
 - Surowe zapisy zmniejszają CPU, ale podwajają bajty i nie podnoszą FPS (limit przesuwa się na łącze/serwer); sama zamiana zstd→LZ4 daje +6 FPS na tym kliencie.
+
+## Run 41 — minipc (N6000, 2,5 GbE), Ghostrunner Demo (UE4, DX11 przez DXVK), max detale, 1080p, build 0.3.13
+
+- Rozgrywka (ok. 135 s, FPS z okien 5 s w logu klienta): **6-33 FPS, średnio ok. 18**. Faza startu/menu na detalach domyślnych: 31-39 FPS; scena o niskim obciążeniu na max detalach: 77-79 FPS. 13 563 klatki, 10,4 GB na łączu (ok. 31 MB/s), opóźnienie klatki 19 ms, 0 wpisów watchdoga.
+- Wymagana poprawka klasyfikacji `vkGetEventStatus` (DeferredResult -> Sync): bez niej UE4 kończyło się `D3D11Query.cpp:348 DXGI_ERROR_INVALID_CALL`, bo DXVK dostawał VK_SUCCESS zamiast VK_EVENT_SET/RESET przy zapytaniach typu EVENT.
+- Pułapka Heroic: `lastUsedLaunchOption` w GamesConfig dokleja argumenty zapamiętanego startu GOG (u nas `-dx12`).

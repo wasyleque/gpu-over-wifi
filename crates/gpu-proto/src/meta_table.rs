@@ -9569,7 +9569,7 @@ pub const COMMANDS: &[CommandMeta] = &[
     CommandMeta { name: "vkGetDrmDisplayEXT", ret: Ret::VkResult, class: CmdClass::Query, supported: true, first: 1739, count: 4 },
     CommandMeta { name: "vkGetDynamicRenderingTilePropertiesQCOM", ret: Ret::VkResult, class: CmdClass::Query, supported: true, first: 1743, count: 3 },
     CommandMeta { name: "vkGetEncodedVideoSessionParametersKHR", ret: Ret::VkResult, class: CmdClass::Query, supported: true, first: 1746, count: 5 },
-    CommandMeta { name: "vkGetEventStatus", ret: Ret::VkResult, class: CmdClass::DeferredResult, supported: true, first: 1751, count: 2 },
+    CommandMeta { name: "vkGetEventStatus", ret: Ret::VkResult, class: CmdClass::Sync, supported: true, first: 1751, count: 2 },
     CommandMeta { name: "vkGetExecutionGraphPipelineNodeIndexAMDX", ret: Ret::VkResult, class: CmdClass::Query, supported: true, first: 1753, count: 4 },
     CommandMeta { name: "vkGetExecutionGraphPipelineScratchSizeAMDX", ret: Ret::VkResult, class: CmdClass::Query, supported: true, first: 1757, count: 3 },
     CommandMeta { name: "vkGetExternalComputeQueueDataNV", ret: Ret::Void, class: CmdClass::Query, supported: true, first: 1760, count: 3 },

@@ -49,7 +49,7 @@ impl Command {
     pub fn class(&self) -> Class {
         let has_out = self.out_params().next().is_some();
         let n = self.name.as_str();
-        if n.starts_with("vkWait") || n.starts_with("vkAcquire") || n.starts_with("vkGetFenceStatus")
+        if n.starts_with("vkWait") || n.starts_with("vkAcquire") || n.starts_with("vkGetFenceStatus") || n.starts_with("vkGetEventStatus")
             || n.starts_with("vkGetSemaphoreCounterValue") || n.starts_with("vkDeviceWaitIdle")
             || n.starts_with("vkQueueWaitIdle")
         {
