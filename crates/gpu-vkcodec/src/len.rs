@@ -86,7 +86,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, CodecError> {
 }
 
 struct Parser<'a> {
-    t: Vec<Tok>,
+    t: &'a [Tok],
     i: usize,
     get: &'a dyn Fn(&str) -> Option<u64>,
 }
@@ -145,6 +145,22 @@ pub fn constant(name: &str) -> Option<u64> {
     }
 }
 
+thread_local! {
+    static TOKEN_CACHE: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<Vec<Tok>>>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Tokeny wyrażenia po normalizacji; wynik pamiętany per wątek (błędy nie są pamiętane).
+fn tokens_cached(expr: &str) -> Result<std::rc::Rc<Vec<Tok>>, CodecError> {
+    TOKEN_CACHE.with(|c| {
+        if let Some(t) = c.borrow().get(expr) {
+            return Ok(t.clone());
+        }
+        let t = std::rc::Rc::new(tokenize(&normalize(expr))?);
+        c.borrow_mut().insert(expr.to_string(), t.clone());
+        Ok(t)
+    })
+}
+
 /// Ocenia wyrażenie `len`. `get` zwraca wartość członka struktury o danej nazwie.
 pub fn eval_len(len: &str, get: &dyn Fn(&str) -> Option<u64>) -> Result<LenSpec, CodecError> {
     let (count_part, nt) = match len.split_once(',') {
@@ -156,9 +172,10 @@ pub fn eval_len(len: &str, get: &dyn Fn(&str) -> Option<u64>) -> Result<LenSpec,
     let count = match count_part {
         None => None,
         Some(e) => {
-            let n = normalize(e);
+            // Normalizacja i tokenizacja zależą tylko od treści wyrażenia (z `vk.xml`), więc robimy je raz na wyrażenie (pamięć podręczna na wątek).
+            let toks = tokens_cached(e)?;
             let lookup = |name: &str| constant(name).or_else(|| get(name));
-            let mut p = Parser { t: tokenize(&n)?, i: 0, get: &lookup };
+            let mut p = Parser { t: &toks, i: 0, get: &lookup };
             let v = p.expr()?;
             if p.i != p.t.len() {
                 return Err(CodecError::BadLen("nadmiar tokenów"));

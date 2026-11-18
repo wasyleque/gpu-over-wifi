@@ -276,3 +276,9 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 - Arena: 11 alokacji, 204 MiB. Gorące (zapis w >=1% skanów) 6 szt. 156 MiB; zimne 3 szt. 32 MiB; nigdy niezapisane 2 szt. 16 MiB. 71 852 skanów (6,0 na klatkę), średnio 38 407 stron (150 MiB)
   skanowanych i 253 strony zapisane na skan; 652 µs na skan w grze (mikrobenchmark dla podobnego obszaru: 136 µs), czyli 3,9 ms skanu na klatkę.
 - Wniosek (A10): pominięcie zimnych i niezapisanych alokacji skróciłoby skan najwyżej o 23% (ok. 1,5% klatki) kosztem ryzyka pominięcia zapisu; w TR niewarte. Do sprawdzenia w innych grach.
+
+### Run 46 — minipc (N6000), LZ4 + `GPU_ICD_SCANSTAT=1`, rozbicie czasu skanu (build 0.3.14+)
+
+- Mountain Peak 21.25 FPS (min 0.21), Syria 15.79, Geothermal 15.23, overall 17.97 (najlepsza stabilna wartość LZ4).
+- Skan areny (cały przebieg): `take_dirty_all` 15,0 s, w tym sam `ioctl(PAGEMAP_SCAN)` 13,9 s w 114 483 wywołaniach (121 µs; ok. 2 wywołań na skan z powodu dziur); przetwarzanie zakresów w pamięciach
+  22,2 s w 535 188 wejściach (41 µs). Skanów 57 862, średnio 38 688 stron skanowanych i 251 zapisanych na skan. 60% czasu skanu to obróbka wyniku, nie sam `ioctl`.

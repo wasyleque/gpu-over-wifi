@@ -85,6 +85,13 @@ Nic nie jest tu odrzucone; każdy pomysł ma plan pomiaru albo uwagę, czego bra
 - **Zgłoszone przez gpt-oss, bez możliwości testu w obecnej architekturze (bez wniosku o wartości):** przeniesienie fizyki gry na serwer (gra jest czarną skrzynką, brak dostępu do logiki), RDMA/RoCE (wymaga innych kart sieciowych),
   "dynamic batching" na serwerze (zmienia semantykę kolejności rysowania, więc najpierw osobna analiza poprawności), key/delta-frame (to robi już kodek H.264), tryb "klient wysyła tylko wejście" (to tryb strumieniowy R1).
 
+## Znalezione i naprawione marnotrawstwo (z profilu)
+
+- **P1 — `eval_len` parsował to samo wyrażenie długości z `vk.xml` przy każdym zakodowanym parametrze** (2026-11-19, Claude, z profilu `perf`: `StrSearcher::new` 1,17% próbek w `dxvk-cs`
+  + 0,34% w `dxvk-queue`, `eval_len` 0,55%). Poprawka: normalizacja i tokenizacja raz na wyrażenie (pamięć podręczna per wątek w `gpu-vkcodec/src/len.rs`); bit w bit ta sama semantyka (testy kodeka i klienta przechodzą). Pomiar efektu: A/B na minipc. · Status: wdrożone, pomiar w toku.
+- **P2 — przetwarzanie pamięci po skanie to 60% czasu skanu** (2026-11-19, Claude, z rozbicia Run 46): `ioctl PAGEMAP_SCAN` 13,9 s (121 µs x 114 tys. wywołań), przetwarzanie zakresów w pamięciach (`changed_within`, skróty stron) 22,2 s
+  (535 tys. wejść po 41 µs). Haszowanie samo to tylko ~1,9% próbek, więc większość to coś innego (odczyty rozproszonych stron aplikacji?). · Status: do rozbicia dalej.
+
 ## Wyniki zmierzonych eksperymentów
 
 - 2026-11-18, minipc N6000: LZ4 zamiast zstd = +6 FPS w Tomb Raiderze (14-17,5 -> ~20 FPS); surowe zapisy przy pustej kolejce = brak zysku (ponad łącze w ciężkich scenach).

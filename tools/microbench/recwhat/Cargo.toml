@@ -1,0 +1,9 @@
+[package]
+name = "recwhat"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+zstd = { version = "0.13", features = ["zdict_builder"] }
+lz4_flex = "0.11"
+[profile.release]
+opt-level = 3
