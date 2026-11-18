@@ -261,3 +261,11 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 - Taktowanie i temperatura (rejestr co 2 s): w grze średnio 2,84 GHz (min 2,70), temp. maks. 73 °C; brak dławienia. Brak punktu odniesienia sprzed wiatraka.
 - Wątki kodujące 65% CPU każdy (razem 130%; LZ4: 52%), proces 295% z 400%. Hipoteza "przewagę LZ4 daje brak lustra" niepotwierdzona (wersja bez lustra tak samo wolna, FPS poniżej LZ4).
 - Następny krok: powtórka bazowa LZ4 przy nowym chłodzeniu (oddzielenie efektu chłodzenia od efektu ustawień).
+
+### Run 44 — minipc (N6000, z wiatrakiem), baza LZ4 (`GPU_ICD_MEM_LZ4=1`), build 0.3.14
+
+- Mountain Peak 21.28 FPS (min 0.20), Syria 15.14 (min 6.65, max 28.57), Geothermal 13.84 (min 7.21), overall 17.28; w grze 3,07 GHz, maks. 68 °C, bez dławienia.
+- **Metryka porównawcza od tego przebiegu: Syria i Geothermal** (stabilne w czterech przebiegach LZ4 przed i po wiatraku: Syria 15,04 / 15,12 / 15,38 / 15,14, Geothermal 14,0 / 14,57 / 14,20 / 13,84,
+  czyli ±0,3 FPS). Mountain Peak ma we wszystkich przebiegach zacięcie startowe (min 0,2-0,4) i jego średnia waha się 16-32 FPS, więc zaniża overall.
+- Wiatrak zewnętrzny nie zmienił wyniku LZ4. Zestawienie Syria / Geothermal dla ustawień zapisów pamięci na tym kliencie:
+  LZ4 15,1 / 13,8-14,6; zstd1+prefiks (domyślny) 10,0-12,8 / 12,8-12,9; zstd -3+prefiks 13,3 / 13,1; zstd -3 bez prefiksu 10,6 / 10,4; LZ4+surowo przy pustej kolejce (próg 2 MB) 14,4 / 14,0.

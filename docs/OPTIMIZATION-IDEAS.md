@@ -11,7 +11,7 @@ Format: **ID — pomysł** (data pomysłu, autor/źródło) · hipoteza · pomia
 - **C1 — zstd w trybie "fast" (poziomy ujemne) z prefiksem lustra** (2026-11-18, Claude, w trakcie konsultacji z DeepSeek) · Hipoteza: na słabym kliencie z szybkim
   łączem (minipc N6000, 2,5 GbE) kodowanie z prefiksem zachowuje niskie bajty na łączu (~7 GB vs 16 GB LZ4), a poziom -3..-7 obniża koszt CPU
   do poziomu LZ4. · Pomiar: `GPU_ICD_ZSTD_LEVEL=-1|-3|-5|-7` (bez `GPU_ICD_MEM_LZ4`), Rise of the Tomb Raider, min. 2 przebiegi, FPS + bajty na łączu + CPU wątków frame.
-  · Status: **zmierzone -3: 14,47 FPS, hipoteza niepotwierdzona** (Run 42); wniosek: przewagę LZ4 daje brak lustra, nie szybkość kompresora. Test rozstrzygający C1b (zstd -3 bez prefiksu, `GPU_ICD_NO_PFX=1`) w toku.
+  · Status: **zmierzone -3: 14,47 FPS, hipoteza niepotwierdzona** (Run 42); wniosek: przewagę LZ4 daje brak lustra, nie szybkość kompresora. C1b (zstd -3 bez prefiksu) zmierzone w Run 43: gorsze (Syria 10,6); LZ4 pozostaje najlepsze na N6000 (Run 44, Syria 15,1). Przyczyna przewagi LZ4 nie jest rozpoznana.
 - **C2 — zastąpienie `lz4_flex` kompresorem C lz4 / trybem fast** (2026-11-18, Claude) · Hipoteza: niższy koszt CPU przy podobnym współczynniku. · Status: do zmierzenia offline.
 - **C3 — kodek różnic bez kompresji (XOR + RLE, SIMD)** (2026-11-18, DeepSeek v4-pro, wariant) · Wcześniejszy pomiar offline (Run 30, 2026-11-0x): XOR+zstd1 o 10-50% gorszy od zstd z prefiksem
   w rozmiarze; nie zmierzono jeszcze kosztu CPU samego XOR+RLE. · Status: do zmierzenia offline (rozmiar i ns/MB).
