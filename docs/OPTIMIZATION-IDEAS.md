@@ -63,6 +63,28 @@ przez kilku klientów (S1 niżej).
 - **A8 — sortowanie zakresów różnic przed pakowaniem** (2026-11-18, DeepSeek) · Pomiar offline na nagraniu zapisów (rozmiar po kodowaniu, liczba ramek). · Status: do zmierzenia.
 - **A9 — VPP na iGPU dla NV12->BGRA** (patrz V1).
 
+## Druga runda konsultacji (2026-11-19: DeepSeek v4-pro z rozumowaniem, gpt-oss na .11; qwen3.8 w toku)
+
+Nic nie jest tu odrzucone; każdy pomysł ma plan pomiaru albo uwagę, czego brakuje do testu.
+
+- **C5 (potwierdzone niezależnie)** — trwały cache zawartości po hashu: DeepSeek zgłosił go jako pomysł #1, gpt-oss jako #1 w innym sformułowaniu; mój wpis C5 powstał z danych (62% bajtów identycznych z poprzednio wysłanymi).
+- **C6 — historia wersji strony i polecenie "rewind"** (DeepSeek #2) · Serwer trzyma 4-8 ostatnich wersji gorących zakresów; gdy strona wraca do wcześniejszej treści (podwójne/potrójne buforowanie, cykliczne uniformy),
+  klient wysyła numer wersji zamiast danych. · Pomiar offline na nagraniu zapisów: odsetek zakresów równych jednej z K poprzednich wersji tego samego zakresu (K=2,4,8). · Status: do zmierzenia.
+- **C7 — słownik zstd wytrenowany na zapisach gry** (z gpt-oss #2, przeformułowany: "kompresja predykcyjna dla typowych formatów") · Słownik per gra lub per format (uniformy, wierzchołki), trenowany offline na nagraniu,
+  wysyłany raz na sesję. · Pomiar offline: rozmiar i koszt CPU z słownikiem vs bez. · Status: do zmierzenia.
+- **A11 — skanuj tylko zasoby użyte w danym submicie** (DeepSeek #5) · Ryzyko: bindless/descriptor buffer ukrywa referencje. Test w trybie cienia: zbierz zbiór pamięci użytych przez polecenia submitu
+  (bind buforów, deskryptory, adresy BDA) i policz, ile zakresów zapisanych przez aplikację leży POZA tym zbiorem (do bezpieczeństwa musi być 0 na wielu grach). · Status: do zbudowania (tryb cienia).
+- **A10b — strefy gorące/zimne z rzadkim skanem pełnym jako siatką bezpieczeństwa** (DeepSeek #4) · Dane TR: 76% obszaru gorące, zysk <=23%; do sprawdzenia w innych grach (Run 45).
+- **R2 — D3D11/D3D12 zdalnie (przeniesienie DXVK/vkd3d na serwer)** (DeepSeek #7) · Duża zmiana architektury. Górna granica zysku z naszych danych: wątki DXVK (`dxvk-cs` ok. 41% rdzenia, `dxvk-queue` ok. 10-13%)
+  to ok. 20% CPU procesu na N6000; strumień wyższego poziomu miałby też mniej bajtów i obiegów. Pomiar do zrobienia przed decyzją: udział DXVK+sterownika w CPU klienta w kilku grach, rozmiar strumienia
+  wywołań D3D11 (np. z `WINEDEBUG`/apitrace) vs obecny strumień Vulkana. · Status: do zmierzenia (studium wykonalności).
+- **A12 — pamięć podręczna powtarzalnych sekwencji poleceń i odtwarzanie na serwerze** (DeepSeek #8) · Pomiar: odsetek klatek, których znormalizowana sekwencja `vkCmd*` powtarza się z poprzednich N klatek
+  (wymaga nagrania strumienia poleceń, jeszcze nie mamy). · Status: do zmierzenia.
+- **V3 — H.265/HEVC dla klatek zamiast H.264** (gpt-oss #8) · Nie dla CPU, tylko dla jakości przy tym samym bitrate ("bez utraty jakości"). Pomiar: PSNR/SSIM i CPU dekodowania VA-API na iGPU N6000 dla obu kodeków. · Status: do zmierzenia.
+- **V1/V2 (ponownie)** — iGPU klienta do konwersji i innych prostych operacji (DeepSeek #9); VPP już w rejestrze.
+- **Zgłoszone przez gpt-oss, bez możliwości testu w obecnej architekturze (bez wniosku o wartości):** przeniesienie fizyki gry na serwer (gra jest czarną skrzynką, brak dostępu do logiki), RDMA/RoCE (wymaga innych kart sieciowych),
+  "dynamic batching" na serwerze (zmienia semantykę kolejności rysowania, więc najpierw osobna analiza poprawności), key/delta-frame (to robi już kodek H.264), tryb "klient wysyła tylko wejście" (to tryb strumieniowy R1).
+
 ## Wyniki zmierzonych eksperymentów
 
 - 2026-11-18, minipc N6000: LZ4 zamiast zstd = +6 FPS w Tomb Raiderze (14-17,5 -> ~20 FPS); surowe zapisy przy pustej kolejce = brak zysku (ponad łącze w ciężkich scenach).
