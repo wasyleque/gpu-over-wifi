@@ -247,3 +247,10 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 - Rozgrywka (ok. 135 s, FPS z okien 5 s w logu klienta): **6-33 FPS, średnio ok. 18**. Faza startu/menu na detalach domyślnych: 31-39 FPS; scena o niskim obciążeniu na max detalach: 77-79 FPS. 13 563 klatki, 10,4 GB na łączu (ok. 31 MB/s), opóźnienie klatki 19 ms, 0 wpisów watchdoga.
 - Wymagana poprawka klasyfikacji `vkGetEventStatus` (DeferredResult -> Sync): bez niej UE4 kończyło się `D3D11Query.cpp:348 DXGI_ERROR_INVALID_CALL`, bo DXVK dostawał VK_SUCCESS zamiast VK_EVENT_SET/RESET przy zapytaniach typu EVENT.
 - Pułapka Heroic: `lastUsedLaunchOption` w GamesConfig dokleja argumenty zapamiętanego startu GOG (u nas `-dx12`).
+
+### Run 42 — minipc (N6000, 2,5 GbE), zstd poziom -3 z prefiksem lustra (`GPU_ICD_ZSTD_LEVEL=-3`), build 0.3.14
+
+- Mountain Peak 16.20 FPS (min 0.20, max 61.21), Syria 13.28 (min 6.38, max 26.01), Geothermal 13.07 (min 4.56, max 35.71), overall **14.47 FPS**; 10,5 GB na łączu.
+- Profil: wątki kodujące (`ZSTD_compressBlock_fast_extDict`) ~12% CPU łącznie (LZ4: 17-20%), a FPS nie rośnie: hipoteza C1 ("szybszy kompresor z lustrem = FPS jak LZ4") **nie potwierdzona**.
+  Wniosek roboczy: przewaga LZ4 na tym kliencie wynika z braku lustra (kopia poprzedniej treści pod blokadą instancji), nie z szybkości kompresora.
+- Obserwacja: Mountain Peak ma minimum 0,2-0,4 FPS w trzech przebiegach (zacięcie na starcie sceny); do zbadania osobno.
