@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Zlecenie implementacji modelowi DeepSeek (API zgodne z OpenAI): wypełnia todo!() w pliku z czerwonymi testami.
 
-Użycie: delegate-deepseek.py <zlecenie.txt> <plik.rs> [plik-tylko-do-odczytu ...] [--model deepseek-flash|deepseek-v4-pro]
+Użycie: delegate-deepseek.py <zlecenie.txt> <plik.rs> [plik-tylko-do-odczytu ...] [--model deepseek-flash|deepseek-v4-pro] [--think]
+Domyślnie rozumowanie modelu jest WYŁĄCZONE (inaczej zjada budżet tokenów i odpowiedź bywa pusta); `--think` włącza je dla trudniejszych zadań.
 Klucz API: plik ~/.config/deepseek/key (uprawnienia 600) albo zmienna DEEPSEEK_API_KEY; nigdy nie jest wypisywany ani zapisywany w repo.
 Wynik trafia do <plik.rs>.llm (NIE nadpisuje pliku): skrypt sprawdza, że moduł testów jest identyczny, liczy zakazane konstrukcje
 (unwrap/expect/panic poza testami) i drukuje statystyki tokenów oraz szacunkowy koszt. Przegląd i kopiowanie robi człowiek.
@@ -17,6 +18,9 @@ PRICE = {"deepseek-flash": (0.15, 0.003, 0.6), "deepseek-v4-pro": (0.66, 0.022, 
 
 args = sys.argv[1:]
 model = DEFAULT_MODEL
+think = "--think" in args
+if think:
+    args.remove("--think")
 if "--model" in args:
     i = args.index("--model"); model = args[i + 1]; del args[i:i + 2]
 if len(args) < 2:
@@ -36,7 +40,8 @@ prompt = open(task).read() + "\nReturn ONLY the complete file in one ```rust blo
 for r in readonly:
     prompt += f"\n=== {r} (read-only context) ===\n```rust\n{open(r).read()}```\n"
 prompt += f"\n=== {target} ===\n```rust\n{src}```\n"
-body = {"model": model, "stream": False, "temperature": 0.1, "max_tokens": 12000,
+body = {"model": model, "stream": False, "temperature": 0.1, "max_tokens": 30000 if think else 12000,
+        "thinking": {"type": "enabled" if think else "disabled"},
         "messages": [{"role": "user", "content": prompt}]}
 t = time.time()
 req = urllib.request.Request(HOST, data=json.dumps(body).encode(),

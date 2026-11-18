@@ -34,17 +34,81 @@ fn convert_band(data: &[u8], y_pitch: usize, y_off: usize, uv_pitch: usize, uv_o
         let sy = oy + y0 + r;
         let yrow = &data[y_off + sy * y_pitch + ox..][..w];
         let uvrow = &data[uv_off + (sy / 2) * uv_pitch..][..uv_pitch];
-        let (pixels, _) = row.as_chunks_mut::<4>();
-        for (x, px) in pixels.iter_mut().enumerate() {
+        let pixels = row.as_chunks_mut::<4>().0;
+
+        // Indeks pierwszej próbki UV dla piksela x=0 to (ox/2)*2.
+        let uv_base = (ox / 2) * 2;
+        // Liczba pełnych par (x, x+1) które dzielą jedną próbkę UV.
+        // Parowanie: piksele (0,1), (2,3), ... względem ox. Gdy ox jest nieparzyste,
+        // piksel 0 ma własną próbkę UV (parę tworzy z pikselem poza zakresem), więc
+        // obsługujemy go osobno, a resztę parujemy od x=1.
+        let start = if ox % 2 == 1 { 1 } else { 0 };
+
+        // Piksel brzegowy (gdy ox nieparzyste): x=0 używa próbki UV o indeksie uv_base.
+        if start == 1 && w > 0 {
+            let c = 298 * (yrow[0] as i32 - 16);
+            let u = uvrow[uv_base] as i32 - 128;
+            let v = uvrow[uv_base + 1] as i32 - 128;
+            let rr = (c + 409 * v + 128) >> 8;
+            let gg = (c - 100 * u - 208 * v + 128) >> 8;
+            let bb = (c + 516 * u + 128) >> 8;
+            let px = &mut pixels[0];
+            px[0] = bb.clamp(0, 255) as u8;
+            px[1] = gg.clamp(0, 255) as u8;
+            px[2] = rr.clamp(0, 255) as u8;
+        }
+
+        // Pary pikseli: każda para dzieli jedną próbkę UV.
+        let pair_count = (w - start) / 2;
+        let y_pairs = &yrow[start..start + pair_count * 2];
+        let px_pairs = &mut pixels[start..start + pair_count * 2];
+        // Próbki UV dla par: indeksy uv_base + (start + 2*k) ... ale start jest 0 lub 1.
+        // Dla pary k (piksele start+2k, start+2k+1), próbka UV to ((ox + start + 2k)/2)*2.
+        // Gdy start=0: (ox/2 + k)*2 = uv_base + 2k.
+        // Gdy start=1: ((ox+1)/2 + k)*2 = uv_base + 2 + 2k (bo ox nieparzyste, (ox+1)/2 = ox/2 + 1).
+        let uv_pair_off = if start == 1 { 2 } else { 0 };
+        let uv_pairs = &uvrow[uv_base + uv_pair_off..];
+
+        for (k, (yp, px)) in y_pairs.chunks_exact(2).zip(px_pairs.chunks_exact_mut(2)).enumerate() {
+            let u = uv_pairs[2 * k] as i32 - 128;
+            let v = uv_pairs[2 * k + 1] as i32 - 128;
+            let du = 516 * u;
+            let dv = 409 * v;
+            let gu = 100 * u;
+            let gv = 208 * v;
+
+            let c0 = 298 * (yp[0] as i32 - 16);
+            let c1 = 298 * (yp[1] as i32 - 16);
+
+            let r0 = (c0 + dv + 128) >> 8;
+            let g0 = (c0 - gu - gv + 128) >> 8;
+            let b0 = (c0 + du + 128) >> 8;
+            let r1 = (c1 + dv + 128) >> 8;
+            let g1 = (c1 - gu - gv + 128) >> 8;
+            let b1 = (c1 + du + 128) >> 8;
+
+            px[0][0] = b0.clamp(0, 255) as u8;
+            px[0][1] = g0.clamp(0, 255) as u8;
+            px[0][2] = r0.clamp(0, 255) as u8;
+            px[1][0] = b1.clamp(0, 255) as u8;
+            px[1][1] = g1.clamp(0, 255) as u8;
+            px[1][2] = r1.clamp(0, 255) as u8;
+        }
+
+        // Ostatni piksel, gdy (w - start) jest nieparzyste.
+        if (w - start) % 2 == 1 {
+            let x = w - 1;
             let c = 298 * (yrow[x] as i32 - 16);
             let uvx = ((ox + x) / 2) * 2;
-            let (u, v) = (uvrow[uvx] as i32 - 128, uvrow[uvx + 1] as i32 - 128);
-            let r = (c + 409 * v + 128) >> 8;
-            let g = (c - 100 * u - 208 * v + 128) >> 8;
-            let b = (c + 516 * u + 128) >> 8;
-            px[0] = b.clamp(0, 255) as u8;
-            px[1] = g.clamp(0, 255) as u8;
-            px[2] = r.clamp(0, 255) as u8;
+            let u = uvrow[uvx] as i32 - 128;
+            let v = uvrow[uvx + 1] as i32 - 128;
+            let rr = (c + 409 * v + 128) >> 8;
+            let gg = (c - 100 * u - 208 * v + 128) >> 8;
+            let bb = (c + 516 * u + 128) >> 8;
+            let px = &mut pixels[x];
+            px[0] = bb.clamp(0, 255) as u8;
+            px[1] = gg.clamp(0, 255) as u8;
+            px[2] = rr.clamp(0, 255) as u8;
         }
     }
 }
