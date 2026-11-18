@@ -223,3 +223,9 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 - Blocking semaphore waits with memory refresh: 569 (laptop run 33: 2173), i.e. the audit backoff removed ~74% of them. 0 device losses.
 - Two changes at once (faster client CPU and audit backoff), so the gain cannot be split until the same build runs on the laptop.
 - Setup notes: a 4K@30 TV made the game render 3840x2160 and the server rejected the 33 MB frame (`LimitExceeded("frame")`, MAX_BATCH 8 MB); fixed by setting the output to 1920x1080. H.264 decode needs `libva-nvidia-driver`; inside pressure-vessel the host driver is only reachable under `/run/host/usr/lib/dri`.
+
+## Run 35 — minipc (Pentium Silver N6000, 4 rdzenie 1,1-3,3 GHz, 16 GB, 2,5 GbE bezpośrednio do serwera), build 0.3.12
+
+- Mountain Peak 20.69 FPS (min 5.72, max 48.85), Syria 9.96 (min 4.64, max 20.43), Geothermal Valley 12.86 (min 4.69, max 27.38), overall **14.15 FPS** (1080p, H.264 przez VA-API iHD).
+- Łącze nie jest ograniczeniem: ok. 7,1 GB na łączu w całym przebiegu (średnio ok. 30 MB/s przy 295 MB/s możliwych); wąskie gardło to procesor klienta (load ok. 3 z 4 rdzeni). Skan pamięci 27,8 s, wysyłka różnic 46,6 s, oczekiwanie na serwer 24,6 s na ok. 5700 klatek.
+- Konfiguracja: VK_DRIVER_FILES = nasz ICD + intel_icd.json, VK_LOADER_DRIVERS_DISABLE=*intel* (bez lokalnego urządzenia w loaderze DXVK nie tworzył instancji Vulkana).
