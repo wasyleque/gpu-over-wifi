@@ -229,3 +229,15 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 - Mountain Peak 20.69 FPS (min 5.72, max 48.85), Syria 9.96 (min 4.64, max 20.43), Geothermal Valley 12.86 (min 4.69, max 27.38), overall **14.15 FPS** (1080p, H.264 przez VA-API iHD).
 - Łącze nie jest ograniczeniem: ok. 7,1 GB na łączu w całym przebiegu (średnio ok. 30 MB/s przy 295 MB/s możliwych); wąskie gardło to procesor klienta (load ok. 3 z 4 rdzeni). Skan pamięci 27,8 s, wysyłka różnic 46,6 s, oczekiwanie na serwer 24,6 s na ok. 5700 klatek.
 - Konfiguracja: VK_DRIVER_FILES = nasz ICD + intel_icd.json, VK_LOADER_DRIVERS_DISABLE=*intel* (bez lokalnego urządzenia w loaderze DXVK nie tworzył instancji Vulkana).
+
+### Runs 36-40 — minipc (N6000), kompresja zapisów pamięci
+
+| konfiguracja | overall | Mountain Peak | Syria | Geothermal | bajty na łączu |
+| --- | --- | --- | --- | --- | --- |
+| zstd 1 + prefiksy (domyślnie), debug | 14.15 / 17.53 | 20.7 / 28.0 | 10.0 / 12.8 | 12.9 / 12.8 | 7.1 GB |
+| `GPU_ICD_MEM_LZ4=1` | 20.68 / 20.08 | 32.3 / 31.3 | 15.1 / 15.0 | 14.6 / 14.0 | 15.9 GB |
+| LZ4 + `GPU_ICD_RAW_BELOW=16` (surowo, gdy kolejka ≤ 16 MB) | 18.27 | 30.6 | 12.1 | 13.3 | 30.0 GB |
+| LZ4 + `GPU_ICD_RAW_BELOW=2` | 20.07 | 32.0 | 14.4 | 14.0 | 25.7 GB |
+
+- Profil perf (Syria, LZ4): kompresja LZ4 ok. 20% CPU, konwersja NV12 ok. 5%, jądro 17%, kod gry ok. 31%. Wątki kompresji spadają z 51% (zstd) do 26% (LZ4), 3,8% (surowo).
+- Surowe zapisy zmniejszają CPU, ale podwajają bajty i nie podnoszą FPS (limit przesuwa się na łącze/serwer); sama zamiana zstd→LZ4 daje +6 FPS na tym kliencie.

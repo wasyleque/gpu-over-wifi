@@ -350,10 +350,21 @@ fn mem_zstd() -> bool {
     *V.get_or_init(|| std::env::var_os("GPU_ICD_MEM_LZ4").is_none())
 }
 
+/// Bajty czekające w kolejce wysyłki (aktualizuje wątek wysyłający i producenci).
+static LINK_BACKLOG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `GPU_ICD_RAW_BELOW=<MB>`: gdy kolejka wysyłki ma nie więcej niż tyle bajtów, łącze nadąża i zapisy pamięci idą bez kompresji (oszczędza CPU
+/// klienta i serwera); gdy kolejka rośnie, wracają do kompresji. Domyślnie 0 = zawsze kompresuj (zachowanie bez zmian).
+fn link_has_headroom() -> bool {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let below = *V.get_or_init(|| std::env::var("GPU_ICD_RAW_BELOW").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) << 20);
+    below > 0 && LINK_BACKLOG.load(std::sync::atomic::Ordering::Relaxed) <= below
+}
+
 /// Zapis pamięci jako ramka: zstd (albo LZ4) tylko gdy oszczędza co najmniej 10% (małe i źle kompresowalne, np. tekstury BCn, idą surowo).
 fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>, ClientError> {
     let raw_len = raw.len() as u32;
-    let packed = (raw.len() >= 4096)
+    let packed = (raw.len() >= 4096 && !link_has_headroom())
         .then(|| {
             if mem_zstd() {
                 zstd::bulk::compress(&raw, 1).ok().map(|c| (true, c))
@@ -513,6 +524,7 @@ impl Link {
                     loop {
                         if let Some(b) = g.queue.pop_front() {
                             g.bytes -= b.queued_len();
+                            LINK_BACKLOG.store(g.bytes, std::sync::atomic::Ordering::Relaxed);
                             o.space.notify_all();
                             break Some(b);
                         }
@@ -702,6 +714,7 @@ impl Link {
             return Err(ClientError::Closed);
         }
         g.bytes += len;
+        LINK_BACKLOG.store(g.bytes, std::sync::atomic::Ordering::Relaxed);
         g.queue.push_back(item);
         self.out.data.notify_one();
         Ok(())
