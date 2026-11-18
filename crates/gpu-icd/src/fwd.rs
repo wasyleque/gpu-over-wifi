@@ -1922,6 +1922,9 @@ fn periodic_stats(stats: &Stats) {
             let c = crate::memtrack::SCAN_CALLS.load(Relaxed).max(1);
             eprintln!("[gpu-icd] skany zbiorcze: {c}, na skan średnio {} przedziałów, {} stron skanowanych, {} zakresów, {} stron zapisanych", crate::memtrack::SCAN_EXTENTS.load(Relaxed) / c, crate::memtrack::SCAN_PAGES.load(Relaxed) / c, crate::memtrack::SCAN_RANGES.load(Relaxed) / c, crate::memtrack::SCAN_DIRTY_PAGES.load(Relaxed) / c);
         }
+        if let Some(r) = crate::memtrack::scan_report() {
+            eprintln!("[gpu-icd] {r}");
+        }
         {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] oczekiwania na semafor wg przyczyny: wracają wcześniej {}, z odświeżeniem pamięci {}, odpytywanie (limit 0) {}, krótki limit czasu {}, bez kontraktu {}", WAIT_KIND[0].load(Relaxed), WAIT_KIND[1].load(Relaxed), WAIT_KIND[2].load(Relaxed), WAIT_KIND[4].load(Relaxed), WAIT_KIND[3].load(Relaxed));

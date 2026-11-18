@@ -6,6 +6,15 @@ Licencja projektu: FSL-1.1-ALv2 (od 0.3.0).
 
 Format: **ID — pomysł** (data pomysłu, autor/źródło) · hipoteza · pomiar · status/wynik.
 
+## Cel i kontekst (2026-11-19)
+
+Klientem docelowym jest słaby komputer (Celeron/Pentium/stary laptop bez karty graficznej); mocny klient z własnym GPU nie potrzebuje zdalnego. Procesor klienta jest budżetem:
+każdy pomiar raportujemy także jako zużycie CPU klienta na klatkę. Gry, w których CPU klienta jest sufitem, dokumentujemy jako granicę. Docelowo: współdzielenie GPU serwera
+przez kilku klientów (S1 niżej).
+
+- **S1 — współdzielenie GPU serwera przez kilku klientów** (2026-11-19, user) · Do zmierzenia: równoległe sesje NVENC (limit sterownika), VRAM przy kilku sesjach i po rozłączeniu,
+  uczciwość szeregowania (FPS każdego klienta przy dwóch grach naraz), łącze serwera. Test: dwie gry naraz (minipc + DESKTOP). · Status: do zmierzenia po przyjściu karty 2,5G do DESKTOPA.
+
 ## Kodowanie zapisów pamięci
 
 - **C1 — zstd w trybie "fast" (poziomy ujemne) z prefiksem lustra** (2026-11-18, Claude, w trakcie konsultacji z DeepSeek) · Hipoteza: na słabym kliencie z szybkim

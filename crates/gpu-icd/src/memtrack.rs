@@ -232,6 +232,34 @@ struct ArenaState {
     used: std::collections::BTreeMap<usize, usize>,
 }
 
+/// Statystyka per przydział areny (`GPU_ICD_SCANSTAT=1`): offset -> (długość, skany z zapisem, strony zapisane). Do oceny, jaka część skanowanego obszaru bywa w ogóle zapisywana.
+static ALLOC_HITS: std::sync::Mutex<Option<std::collections::HashMap<usize, (usize, u64, u64)>>> = std::sync::Mutex::new(None);
+
+fn scanstat_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_SCANSTAT").is_some())
+}
+
+/// Raport: ile przydziałów i MiB w arenie, ile z nich kiedykolwiek miało zapis, rozkład "gorących" i "zimnych" (zapis w mniej niż 1% skanów).
+pub fn scan_report() -> Option<String> {
+    let calls = SCAN_CALLS.load(std::sync::atomic::Ordering::Relaxed).max(1);
+    let g = ALLOC_HITS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.as_ref()?;
+    let mib = |b: usize| b as f64 / 1048576.0;
+    let (mut hot_b, mut cold_b, mut never_b) = (0usize, 0usize, 0usize);
+    let (mut hot_n, mut cold_n, mut never_n) = (0, 0, 0);
+    for &(len, scans, _) in m.values() {
+        if scans == 0 { never_b += len; never_n += 1; } else if scans * 100 >= calls { hot_b += len; hot_n += 1; } else { cold_b += len; cold_n += 1; }
+    }
+    let mut top: Vec<_> = m.iter().map(|(o, v)| (*o, *v)).collect();
+    top.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
+    let tops: Vec<String> = top.iter().take(8).map(|(o, (l, sc, pg))| format!("0x{o:x} ({:.0} MiB) skany z zapisem {sc}/{calls}, stron {pg}", mib(*l))).collect();
+    Some(format!(
+        "przydziały areny po skanach ({calls}): gorące (zapis w >=1% skanów) {hot_n} szt. {:.0} MiB; zimne (<1%) {cold_n} szt. {:.0} MiB; nigdy {never_n} szt. {:.0} MiB; najczęściej zapisywane: {}",
+        mib(hot_b), mib(cold_b), mib(never_b), tops.join("; ")
+    ))
+}
+
 /// Diagnostyka skanów zbiorczych: wywołania, skanowane przedziały i strony, zwrócone zakresy i strony zapisane.
 pub static SCAN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SCAN_EXTENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -336,6 +364,26 @@ impl Arena {
         SCAN_EXTENTS.fetch_add(extents.len() as u64, std::sync::atomic::Ordering::Relaxed);
         SCAN_RANGES.fetch_add(out.len() as u64, std::sync::atomic::Ordering::Relaxed);
         SCAN_DIRTY_PAGES.fetch_add(out.iter().map(|r| ((r.1 - r.0) / PAGE) as u64).sum::<u64>(), std::sync::atomic::Ordering::Relaxed);
+        if scanstat_on() {
+            let g = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            let mut h = ALLOC_HITS.lock().unwrap_or_else(|e| e.into_inner());
+            let m = h.get_or_insert_with(Default::default);
+            for (&o, &l) in &g.used {
+                m.entry(o).or_insert((l, 0, 0)).0 = l;
+            }
+            let mut seen: std::collections::HashSet<usize> = Default::default();
+            for &(a, b) in &out {
+                if let Some((&o, &l)) = g.used.range(..=a).next_back() {
+                    if a < o + l {
+                        let e = m.entry(o).or_insert((l, 0, 0));
+                        e.2 += ((b - a) / PAGE) as u64;
+                        if seen.insert(o) {
+                            e.1 += 1;
+                        }
+                    }
+                }
+            }
+        }
         Some(out)
     }
 
