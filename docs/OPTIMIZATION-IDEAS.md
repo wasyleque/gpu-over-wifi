@@ -33,10 +33,13 @@ Format: **ID — pomysł** (data pomysłu, autor/źródło) · hipoteza · pomia
 - **A3 — spekulatywne zwalnianie semaforów** (2026-11-18, DeepSeek) · Ryzyko poprawności, dlatego test w **trybie cienia**: klient przewiduje wynik i zapisuje przewidywanie,
   ale nadal czeka na serwer; zliczamy trafienia i pomyłki. Dopiero przy 0 pomyłek na wielu grach rozważamy działanie na przewidywaniu (z audytem). Uwaga: częściowo już istnieje
   ("oczekiwania zwrócone wcześniej" dla vkd3d, ~105 tys. na przebieg Cyberpunka). · Status: do zbudowania (tryb cienia).
-- **A4 — soft-dirty (`clear_refs` + bit 55 pagemap) zamiast `PAGEMAP_SCAN`** (2026-11-18, DeepSeek) · Mikrobenchmark: koszt jednego skanu 4-64 MB przy 1-1000 brudnych stronach
-  (dziś ok. 0,92 ms/skan, ~5 na klatkę), oba mechanizmy na tym samym syntetycznym obciążeniu, na N6000 i na Ryzenie. · Status: do zmierzenia.
-- **A5 — userfaultfd write-protect dla małych buforów** (2026-11-18, DeepSeek) · Mikrobenchmark: koszt obsłużonego page-fault vs koszt skanowania przy typowej liczbie
-  zapisów na klatkę (z `GPU_ICD_STATS`). · Status: do zmierzenia.
+- **A4 — soft-dirty (`clear_refs` + bit 55 pagemap) zamiast `PAGEMAP_SCAN`** (2026-11-18, DeepSeek) · Zmierzone (`docs/measurements/2026-11-18-scan`): soft-dirty 25-30x wolniejszy
+  od `PAGEMAP_SCAN` na N6000 i na Ryzenie; przy THP=always nadmiarowe strony (granulacja 2 MiB). · Status: **zmierzone, gorsze od obecnej metody**.
+- **A5 — userfaultfd write-protect** (2026-11-18, DeepSeek) · To jest dokładnie nasza obecna metoda (`memtrack.rs`: uffd WP_ASYNC + `PAGEMAP_SCAN`); najszybsza z czterech zmierzonych
+  (hash 300-400x, memcmp 150-300x wolniejsze). · Status: **wdrożone od dawna; potwierdzone pomiarem**.
+- **A10 — węższy skan: tylko zakresy, które mogą być zmienione, i/lub rzadziej** (2026-11-18, Claude, z wyniku A4/A5) · Koszt skanu `PAGEMAP_SCAN` rośnie z rozmiarem obszaru
+  (~0,5 µs/MiB); w grze ok. 0,9 ms x ~5 na klatkę pod blokadą instancji (23 s z 220 s przebiegu). Pomiar: rozkład rozmiarów zakresów w skanach `take_dirty_all` vs rzeczywiście zmienione
+  strony w grze (nowy licznik), potem prototyp skanujący tylko "gorące" zakresy. · Status: do zmierzenia.
 - **A6 — wysyłka `MSG_ZEROCOPY` / io_uring** (2026-11-18, DeepSeek) · Mikrobenchmark (`tools/microbench/zc`), kabel 2,5G minipc->serwer, 2 GB na próbę, CPU = user+sys procesu:
   `write` 0,27-0,41 s/GB vs `MSG_ZEROCOPY` 0,03-0,10 s/GB (5-10x mniej) przy ramkach >= 512 KB, przepustowość równa (~290 MB/s); przy 64 KB zerocopy wolniejsze (249 vs 292 MB/s).
   Dla ~16-35 GB na przebieg to oszczędność ok. 5 s CPU (~0,5% mocy minipc): **mały zysk, nie tłumaczy 17% jądra z profilu**. io_uring niezmierzone. · Status: zmierzone, wdrożenie niskiego priorytetu (tylko dla dużych ramek).
