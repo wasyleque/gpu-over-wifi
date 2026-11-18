@@ -48,7 +48,8 @@ przez kilku klientów (S1 niżej).
   (hash 300-400x, memcmp 150-300x wolniejsze). · Status: **wdrożone od dawna; potwierdzone pomiarem**.
 - **A10 — węższy skan: tylko zakresy, które mogą być zmienione, i/lub rzadziej** (2026-11-18, Claude, z wyniku A4/A5) · Koszt skanu `PAGEMAP_SCAN` rośnie z rozmiarem obszaru
   (~0,5 µs/MiB); w grze ok. 0,9 ms x ~5 na klatkę pod blokadą instancji (23 s z 220 s przebiegu). Pomiar: rozkład rozmiarów zakresów w skanach `take_dirty_all` vs rzeczywiście zmienione
-  strony w grze (nowy licznik), potem prototyp skanujący tylko "gorące" zakresy. · Status: do zmierzenia.
+  strony w grze (nowy licznik `GPU_ICD_SCANSTAT`), potem prototyp skanujący tylko "gorące" zakresy. · Status: **zmierzone w TR (Run 45)**: 76% obszaru gorące, zysk <=23% skanu (~1,5% klatki); w TR niewarte, do sprawdzenia w innych grach. Nowy trop: 652 µs/skan w grze vs 136 µs w mikrobenchmarku, czyli ~500 µs pracy poza samym `ioctl` (rozbić na składniki).
+- **R1 — model decyzyjny trybu: remoting vs strumień (gra liczona na serwerze)** (2026-11-19, user) · Strumień jako zapas, gdy przewidywany FPS remotingu spada poniżej progu; wejścia: klasa klienta, gra, łącze; uczony na pomiarach z tego repo. Koszt: gra na dysku serwera. Istnieje trasa `GPU_ICD_ROUTE=auto` (lokalna vs zdalna). · Status: do zaprojektowania.
 - **A6 — wysyłka `MSG_ZEROCOPY` / io_uring** (2026-11-18, DeepSeek) · Mikrobenchmark (`tools/microbench/zc`), kabel 2,5G minipc->serwer, 2 GB na próbę, CPU = user+sys procesu:
   `write` 0,27-0,41 s/GB vs `MSG_ZEROCOPY` 0,03-0,10 s/GB (5-10x mniej) przy ramkach >= 512 KB, przepustowość równa (~290 MB/s); przy 64 KB zerocopy wolniejsze (249 vs 292 MB/s).
   Dla ~16-35 GB na przebieg to oszczędność ok. 5 s CPU (~0,5% mocy minipc): **mały zysk, nie tłumaczy 17% jądra z profilu**. io_uring niezmierzone. · Status: zmierzone, wdrożenie niskiego priorytetu (tylko dla dużych ramek).

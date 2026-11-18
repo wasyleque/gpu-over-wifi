@@ -269,3 +269,10 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
   czyli ±0,3 FPS). Mountain Peak ma we wszystkich przebiegach zacięcie startowe (min 0,2-0,4) i jego średnia waha się 16-32 FPS, więc zaniża overall.
 - Wiatrak zewnętrzny nie zmienił wyniku LZ4. Zestawienie Syria / Geothermal dla ustawień zapisów pamięci na tym kliencie:
   LZ4 15,1 / 13,8-14,6; zstd1+prefiks (domyślny) 10,0-12,8 / 12,8-12,9; zstd -3+prefiks 13,3 / 13,1; zstd -3 bez prefiksu 10,6 / 10,4; LZ4+surowo przy pustej kolejce (próg 2 MB) 14,4 / 14,0.
+
+### Run 45 — minipc (N6000), LZ4 + `GPU_ICD_SCANSTAT=1` (rozkład skanów areny), build 0.3.14+
+
+- Mountain Peak 21.16 FPS (min 0.21), Syria 15.47 (min 5.58, max 29.04), Geothermal 15.16 (min 3.79, max 27.21), overall 17.80.
+- Arena: 11 alokacji, 204 MiB. Gorące (zapis w >=1% skanów) 6 szt. 156 MiB; zimne 3 szt. 32 MiB; nigdy niezapisane 2 szt. 16 MiB. 71 852 skanów (6,0 na klatkę), średnio 38 407 stron (150 MiB)
+  skanowanych i 253 strony zapisane na skan; 652 µs na skan w grze (mikrobenchmark dla podobnego obszaru: 136 µs), czyli 3,9 ms skanu na klatkę.
+- Wniosek (A10): pominięcie zimnych i niezapisanych alokacji skróciłoby skan najwyżej o 23% (ok. 1,5% klatki) kosztem ryzyka pominięcia zapisu; w TR niewarte. Do sprawdzenia w innych grach.
