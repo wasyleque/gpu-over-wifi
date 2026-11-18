@@ -37,8 +37,9 @@ Format: **ID — pomysł** (data pomysłu, autor/źródło) · hipoteza · pomia
   (dziś ok. 0,92 ms/skan, ~5 na klatkę), oba mechanizmy na tym samym syntetycznym obciążeniu, na N6000 i na Ryzenie. · Status: do zmierzenia.
 - **A5 — userfaultfd write-protect dla małych buforów** (2026-11-18, DeepSeek) · Mikrobenchmark: koszt obsłużonego page-fault vs koszt skanowania przy typowej liczbie
   zapisów na klatkę (z `GPU_ICD_STATS`). · Status: do zmierzenia.
-- **A6 — wysyłka `MSG_ZEROCOPY` / io_uring** (2026-11-18, DeepSeek) · Mikrobenchmark: CPU na GB przy `write` vs `MSG_ZEROCOPY` vs `io_uring`, kabel 2,5G minipc->serwer,
-  ramki 64 KB-8 MB (jądro to 17-20% CPU klienta). · Status: do zmierzenia.
+- **A6 — wysyłka `MSG_ZEROCOPY` / io_uring** (2026-11-18, DeepSeek) · Mikrobenchmark (`tools/microbench/zc`), kabel 2,5G minipc->serwer, 2 GB na próbę, CPU = user+sys procesu:
+  `write` 0,27-0,41 s/GB vs `MSG_ZEROCOPY` 0,03-0,10 s/GB (5-10x mniej) przy ramkach >= 512 KB, przepustowość równa (~290 MB/s); przy 64 KB zerocopy wolniejsze (249 vs 292 MB/s).
+  Dla ~16-35 GB na przebieg to oszczędność ok. 5 s CPU (~0,5% mocy minipc): **mały zysk, nie tłumaczy 17% jądra z profilu**. io_uring niezmierzone. · Status: zmierzone, wdrożenie niskiego priorytetu (tylko dla dużych ramek).
 - **A7 — pula buforów zamiast świeżych alokacji w wątku wysyłki** (2026-11-18, Claude, z profilu: `clear_pages` i `rep_movs` w `gpu-icd-send`) · Pomiar: perf przed/po. · Status: do zrobienia.
 - **A8 — sortowanie zakresów różnic przed pakowaniem** (2026-11-18, DeepSeek) · Pomiar offline na nagraniu zapisów (rozmiar po kodowaniu, liczba ramek). · Status: do zmierzenia.
 - **A9 — VPP na iGPU dla NV12->BGRA** (patrz V1).
