@@ -23,12 +23,25 @@ Format: **ID — pomysł** (data pomysłu, autor/źródło) · hipoteza · pomia
 - **V1 — konwersja NV12->BGRA przez VA-API VPP na iGPU klienta** (2026-11-18, DeepSeek) · Hipoteza: -3..5% CPU klienta. · Status: do zrobienia.
 - **V2 — szybsza konwersja NV12->BGRA na CPU (auto-wektoryzacja)** (2026-11-18, kod: DeepSeek flash) · Wynik: 8,7 -> 5,6 ms/klatkę 1080p na N6000, bit w bit. · Status: **wdrożone** (0.3.13).
 
-## Architektura (ryzykowne, wymagają osobnych dowodów poprawności)
+## Architektura i system (każdy pomysł ma test; "odrzucone" wolno wpisać dopiero po wyniku)
 
-- **A1 — pipeline bez blokady instancji** · wysokie ryzyko poprawności · status: odłożone do czasu danych z profilu blokad.
-- **A2 — prefetch / diff deskryptorów** · status: do zmierzenia (liczba chybień cache na grę).
-- Odrzucone po analizie (2026-11-18): spekulatywne zwalnianie semaforów (łamie poprawność), userfaultfd-WP (koszt page-fault), MSG_ZEROCOPY (mały zysk),
-  soft-dirty (już używamy PAGEMAP_SCAN).
+- **A1 — pipeline bez blokady instancji (etapy capture/encode/send, kolejki SPSC)** (2026-11-18, DeepSeek) · Wysokie ryzyko poprawności, więc najpierw pomiar górnej granicy zysku:
+  z istniejących liczników (trzymanie blokady 41 s, w tym skan `PAGEMAP_SCAN` 23-24 s, na ~220 s przebiegu) wyliczyć, ile czasu ściany da się odzyskać przy idealnym
+  zrównolegleniu (prawo Amdahla), potem prototyp za przełącznikiem z włączonym audytem lustra (pełne porównanie pamięci co N klatek, 0 przeoczeń). · Status: do zmierzenia.
+- **A2 — prefetch / diff deskryptorów** (2026-11-18, DeepSeek) · Pomiar: liczba chybień cache deskryptorów na grę (TR: 4330 obiegów/przebieg, Cyberpunk: >20 000 przed zawieszeniem)
+  razy 250 µs = górna granica zysku; prototyp: wysyłka szablonu przy tworzeniu PSO. · Status: do zmierzenia.
+- **A3 — spekulatywne zwalnianie semaforów** (2026-11-18, DeepSeek) · Ryzyko poprawności, dlatego test w **trybie cienia**: klient przewiduje wynik i zapisuje przewidywanie,
+  ale nadal czeka na serwer; zliczamy trafienia i pomyłki. Dopiero przy 0 pomyłek na wielu grach rozważamy działanie na przewidywaniu (z audytem). Uwaga: częściowo już istnieje
+  ("oczekiwania zwrócone wcześniej" dla vkd3d, ~105 tys. na przebieg Cyberpunka). · Status: do zbudowania (tryb cienia).
+- **A4 — soft-dirty (`clear_refs` + bit 55 pagemap) zamiast `PAGEMAP_SCAN`** (2026-11-18, DeepSeek) · Mikrobenchmark: koszt jednego skanu 4-64 MB przy 1-1000 brudnych stronach
+  (dziś ok. 0,92 ms/skan, ~5 na klatkę), oba mechanizmy na tym samym syntetycznym obciążeniu, na N6000 i na Ryzenie. · Status: do zmierzenia.
+- **A5 — userfaultfd write-protect dla małych buforów** (2026-11-18, DeepSeek) · Mikrobenchmark: koszt obsłużonego page-fault vs koszt skanowania przy typowej liczbie
+  zapisów na klatkę (z `GPU_ICD_STATS`). · Status: do zmierzenia.
+- **A6 — wysyłka `MSG_ZEROCOPY` / io_uring** (2026-11-18, DeepSeek) · Mikrobenchmark: CPU na GB przy `write` vs `MSG_ZEROCOPY` vs `io_uring`, kabel 2,5G minipc->serwer,
+  ramki 64 KB-8 MB (jądro to 17-20% CPU klienta). · Status: do zmierzenia.
+- **A7 — pula buforów zamiast świeżych alokacji w wątku wysyłki** (2026-11-18, Claude, z profilu: `clear_pages` i `rep_movs` w `gpu-icd-send`) · Pomiar: perf przed/po. · Status: do zrobienia.
+- **A8 — sortowanie zakresów różnic przed pakowaniem** (2026-11-18, DeepSeek) · Pomiar offline na nagraniu zapisów (rozmiar po kodowaniu, liczba ramek). · Status: do zmierzenia.
+- **A9 — VPP na iGPU dla NV12->BGRA** (patrz V1).
 
 ## Wyniki zmierzonych eksperymentów
 
