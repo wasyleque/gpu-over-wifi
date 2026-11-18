@@ -27,7 +27,8 @@ przez kilku klientów (S1 niżej).
 - **C4 — adaptacyjny regulator kodeka (histereza wg kolejki wysyłki i CPU)** (2026-11-18, DeepSeek + user) · Zalążek: `GPU_ICD_RAW_BELOW` (Run 36-40: bez zysku
   przy progu 2/16 MB). · Status: wymaga lepszego sygnału (wykorzystanie łącza w oknie, nie sama kolejka).
 
-- **C5 — trwała pamięć podręczna zawartości (adresowana hashem) na serwerze, wspólna dla sesji i klientów** (2026-11-19, Claude, z danych: 62% wysyłanych bajtów
+- **C5 — trwała pamięć podręczna zawartości** (ZMIERZONE w obrębie sesji 2026-11-19: trafienia 3-32% bajtów, oszczędność 3-26% względem LZ4; między sesjami/klientami jeszcze niezmierzone)
+- *(opis pierwotny)* C5 — trwała pamięć podręczna zawartości (adresowana hashem) na serwerze, wspólna dla sesji i klientów** (2026-11-19, Claude, z danych: 62% wysyłanych bajtów
   identyczne z poprzednio wysłanym w to samo miejsce; ~35% stron to duplikaty wcześniej wysłanych) · Hipoteza: dla zasobów powtarzanych między klatkami, uruchomieniami gry i klientami
   (tekstury, geometria, shadery) klient wysyła najpierw hash strony/zakresu, a serwer odpowiada "mam" albo "wyślij"; drugie uruchomienie i drugi klient oszczędzają bajty i CPU kompresji
   (współdzielenie GPU: S1). Ryzyko: kolizje (użyć 128-bitowego hasha), pamięć/dysk serwera. · Pomiar: offline na nagraniu zapisów (odsetek zakresów już widzianych w poprzedniej
@@ -68,9 +69,9 @@ przez kilku klientów (S1 niżej).
 Nic nie jest tu odrzucone; każdy pomysł ma plan pomiaru albo uwagę, czego brakuje do testu.
 
 - **C5 (potwierdzone niezależnie)** — trwały cache zawartości po hashu: DeepSeek zgłosił go jako pomysł #1, gpt-oss jako #1 w innym sformułowaniu; mój wpis C5 powstał z danych (62% bajtów identycznych z poprzednio wysłanymi).
-- **C6 — historia wersji strony i polecenie "rewind"** (DeepSeek #2) · Serwer trzyma 4-8 ostatnich wersji gorących zakresów; gdy strona wraca do wcześniejszej treści (podwójne/potrójne buforowanie, cykliczne uniformy),
+- **C6 — historia wersji strony i polecenie "rewind"** (ZMIERZONE 2026-11-19: trafienia 1,5-5,5% przy K=8, w TR nieopłacalne) (DeepSeek #2) · Serwer trzyma 4-8 ostatnich wersji gorących zakresów; gdy strona wraca do wcześniejszej treści (podwójne/potrójne buforowanie, cykliczne uniformy),
   klient wysyła numer wersji zamiast danych. · Pomiar offline na nagraniu zapisów: odsetek zakresów równych jednej z K poprzednich wersji tego samego zakresu (K=2,4,8). · Status: do zmierzenia.
-- **C7 — słownik zstd wytrenowany na zapisach gry** (z gpt-oss #2, przeformułowany: "kompresja predykcyjna dla typowych formatów") · Słownik per gra lub per format (uniformy, wierzchołki), trenowany offline na nagraniu,
+- **C7 — słownik zstd wytrenowany na zapisach gry** (ZMIERZONE 2026-11-19, `docs/measurements/2026-11-19-recwhat`: 17,2% surowych vs LZ4 33,6%, +42% CPU kodowania; kandydat do wdrożenia dla klientów z wolnym łączem) (z gpt-oss #2, przeformułowany: "kompresja predykcyjna dla typowych formatów") · Słownik per gra lub per format (uniformy, wierzchołki), trenowany offline na nagraniu,
   wysyłany raz na sesję. · Pomiar offline: rozmiar i koszt CPU z słownikiem vs bez. · Status: do zmierzenia.
 - **A11 — skanuj tylko zasoby użyte w danym submicie** (DeepSeek #5) · Ryzyko: bindless/descriptor buffer ukrywa referencje. Test w trybie cienia: zbierz zbiór pamięci użytych przez polecenia submitu
   (bind buforów, deskryptory, adresy BDA) i policz, ile zakresów zapisanych przez aplikację leży POZA tym zbiorem (do bezpieczeństwa musi być 0 na wielu grach). · Status: do zbudowania (tryb cienia).
