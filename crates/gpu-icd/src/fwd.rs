@@ -114,6 +114,10 @@ pub struct Stats {
     pub frames: u64,
     /// Skanowanie odwzorowanej pamięci przed `vkQueueSubmit`: czas (ns), przeskanowane bajty, wysłane bajty różnic i czas wysyłki.
     pub t_scan_ns: u64,
+    /// Rozbicie skanu: czas `take_dirty_all` (całość) i przetwarzania zakresów w pamięciach (`changed_from_bulk_or_scan`).
+    pub t_scan_bulk_ns: u64,
+    pub t_scan_mem_ns: u64,
+    pub scan_mem_n: u64,
     pub scan_bytes: u64,
     pub t_memsend_ns: u64,
     /// Odświeżanie odwzorowanej pamięci po oczekiwaniu (czas, liczba zapytań) oraz czas samej odpowiedzi serwera na polecenia synchroniczne.
@@ -684,6 +688,7 @@ impl InstState {
         let bulk: Option<Vec<(usize, usize)>> = if ids.iter().any(|i| self.mems.get(i).is_some_and(|s| s.data.arena_offset().is_some())) { crate::memtrack::arena().and_then(|a| a.take_dirty_all()) } else { None };
         if bulk.is_some() {
             let ns = t_bulk.elapsed().as_nanos() as u64;
+            self.stats.t_scan_bulk_ns += ns;
             self.stats.t_scan_ns += ns;
             self.stats.scan_tracked_n += 1;
             self.stats.scan_tracked_ns += ns;
@@ -692,6 +697,8 @@ impl InstState {
             let t0 = std::time::Instant::now();
             let Some(((ranges, tracked, hashed), len)) = self.mems.get_mut(&id).map(|s| (s.changed_from_bulk_or_scan(bulk.as_deref()), s.data.len())) else { continue };
             let ns = t0.elapsed().as_nanos() as u64;
+            self.stats.t_scan_mem_ns += ns;
+            self.stats.scan_mem_n += 1;
             self.stats.t_scan_ns += ns;
             if tracked {
                 self.stats.scan_tracked_ns += ns;
@@ -1921,6 +1928,13 @@ fn periodic_stats(stats: &Stats) {
             use std::sync::atomic::Ordering::Relaxed;
             let c = crate::memtrack::SCAN_CALLS.load(Relaxed).max(1);
             eprintln!("[gpu-icd] skany zbiorcze: {c}, na skan średnio {} przedziałów, {} stron skanowanych, {} zakresów, {} stron zapisanych", crate::memtrack::SCAN_EXTENTS.load(Relaxed) / c, crate::memtrack::SCAN_PAGES.load(Relaxed) / c, crate::memtrack::SCAN_RANGES.load(Relaxed) / c, crate::memtrack::SCAN_DIRTY_PAGES.load(Relaxed) / c);
+        }
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (io_ns, io_n) = (crate::memtrack::IOCTL_NS.load(Relaxed), crate::memtrack::IOCTL_CALLS.load(Relaxed));
+            eprintln!("[gpu-icd] rozbicie skanu: take_dirty_all {:.0} ms (w tym ioctl PAGEMAP_SCAN {:.0} ms w {} wywołaniach, {:.0} µs/wywołanie), przetwarzanie pamięci {:.0} ms w {} wejściach ({:.0} µs/wejście)",
+                stats.t_scan_bulk_ns as f64 / 1e6, io_ns as f64 / 1e6, io_n, io_ns as f64 / 1e3 / io_n.max(1) as f64,
+                stats.t_scan_mem_ns as f64 / 1e6, stats.scan_mem_n, stats.t_scan_mem_ns as f64 / 1e3 / stats.scan_mem_n.max(1) as f64);
         }
         if let Some(r) = crate::memtrack::scan_report() {
             eprintln!("[gpu-icd] {r}");

@@ -27,6 +27,12 @@ przez kilku klientów (S1 niżej).
 - **C4 — adaptacyjny regulator kodeka (histereza wg kolejki wysyłki i CPU)** (2026-11-18, DeepSeek + user) · Zalążek: `GPU_ICD_RAW_BELOW` (Run 36-40: bez zysku
   przy progu 2/16 MB). · Status: wymaga lepszego sygnału (wykorzystanie łącza w oknie, nie sama kolejka).
 
+- **C5 — trwała pamięć podręczna zawartości (adresowana hashem) na serwerze, wspólna dla sesji i klientów** (2026-11-19, Claude, z danych: 62% wysyłanych bajtów
+  identyczne z poprzednio wysłanym w to samo miejsce; ~35% stron to duplikaty wcześniej wysłanych) · Hipoteza: dla zasobów powtarzanych między klatkami, uruchomieniami gry i klientami
+  (tekstury, geometria, shadery) klient wysyła najpierw hash strony/zakresu, a serwer odpowiada "mam" albo "wyślij"; drugie uruchomienie i drugi klient oszczędzają bajty i CPU kompresji
+  (współdzielenie GPU: S1). Ryzyko: kolizje (użyć 128-bitowego hasha), pamięć/dysk serwera. · Pomiar: offline na nagraniu zapisów (odsetek zakresów już widzianych w poprzedniej
+  sesji tej samej gry; `crates/gpu-icd/examples/recstat.rs` jako baza). · Status: do zmierzenia.
+
 ## Klatki i dekodowanie
 
 - **V1 — konwersja NV12->BGRA przez VA-API VPP na iGPU klienta** (2026-11-18, DeepSeek) · Hipoteza: -3..5% CPU klienta. · Status: do zrobienia.

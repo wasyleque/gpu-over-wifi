@@ -197,7 +197,10 @@ impl Tracker {
                 return_mask: PAGE_IS_WRITTEN,
             };
             // SAFETY: `arg` i tablica regionów żyją przez czas wywołania; jądro wypełnia najwyżej `vec_len` wpisów.
+            let t_io = std::time::Instant::now();
             let n = unsafe { ioctl(self.pagemap.as_raw_fd(), PAGEMAP_SCAN, &mut arg as *mut PmScanArg) };
+            IOCTL_NS.fetch_add(t_io.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            IOCTL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if n < 0 {
                 return None;
             }
@@ -259,6 +262,10 @@ pub fn scan_report() -> Option<String> {
         mib(hot_b), mib(cold_b), mib(never_b), tops.join("; ")
     ))
 }
+
+/// Rozbicie czasu skanu: sam `ioctl(PAGEMAP_SCAN)` (ns i liczba wywołań, w tym kolejne porcje przy dziurach).
+pub static IOCTL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static IOCTL_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Diagnostyka skanów zbiorczych: wywołania, skanowane przedziały i strony, zwrócone zakresy i strony zapisane.
 pub static SCAN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
