@@ -282,3 +282,10 @@ First run on the second client (12 threads, wired RTL8111 1 GbE, direct cable, 1
 - Mountain Peak 21.25 FPS (min 0.21), Syria 15.79, Geothermal 15.23, overall 17.97 (najlepsza stabilna wartość LZ4).
 - Skan areny (cały przebieg): `take_dirty_all` 15,0 s, w tym sam `ioctl(PAGEMAP_SCAN)` 13,9 s w 114 483 wywołaniach (121 µs; ok. 2 wywołań na skan z powodu dziur); przetwarzanie zakresów w pamięciach
   22,2 s w 535 188 wejściach (41 µs). Skanów 57 862, średnio 38 688 stron skanowanych i 251 zapisanych na skan. 60% czasu skanu to obróbka wyniku, nie sam `ioctl`.
+
+### Run 47 — minipc (N6000), LZ4 + SCANSTAT, po P1 (pamięć podręczna tokenów `eval_len`), build 0.3.14+
+
+- Mountain Peak 21.35 FPS (min 0.19), Syria 15.99, Geothermal 15.40, overall 18.13; proces 273% CPU, 3,06 GHz (min 2,05), maks. 63 °C; 22,4 GB na łączu.
+- Skan: `take_dirty_all` 14,7 s (ioctl 13,6 s, 106 594 wywołań), przetwarzanie pamięci 23,6 s (489 177 wejść po 48 µs).
+- P1 vs Run 44-46 (ta sama konfiguracja): Syria 15,99 vs 15,14 / 15,47 / 15,79, Geothermal 15,40 vs 13,84 / 15,16 / 15,23. Kierunek zgodny z oczekiwanym zyskiem 1,5-2%, ale w granicach rozrzutu
+  między przebiegami (+-0,3 FPS): nie do odróżnienia od szumu na jednym przebiegu. Kod bez ryzyka poprawności, zostaje.
