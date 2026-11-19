@@ -20,3 +20,16 @@ więc jej czas nie jest miarodajny dla wdrożenia z SIMD.
 2. **C5 (cache zawartości po hashu) w obrębie jednej sesji oszczędza tylko 3-26% względem LZ4**, trafienia 3-32% bajtów (jedna pamięć 32%). **C6 ("rewind", 8 wersji): trafienia 1,5-5,5%**, nieopłacalne w tej grze.
    Nie zmierzono jeszcze C5 między sesjami i klientami (kluczowe dla współdzielenia GPU).
 3. Dobór kodeka do klienta: słaby CPU + szybkie łącze -> LZ4; słaby CPU + wolne łącze (1 GbE) -> słownik (C7); mocny CPU + wolne łącze -> zstd z prefiksem. Dane do profilu klienta (R1).
+
+## Dodatek: słownik wspólny dla wszystkich pamięci gry (C7, uogólnianie między pamięciami)
+
+Słownik 64K wytrenowany na pierwszych 20% rekordów WSZYSTKICH czterech pamięci (`--train-from`), użyty do kodowania każdej z nich (czas kodowania ok. +30-40% względem własnego słownika):
+
+| pamięć | LZ4 (% surowych) | słownik własny | słownik wspólny |
+|---|---|---|---|
+| 0x10004a | 26,1% | 8,6% | 11,3% |
+| 0x100312 | 31,9% | 15,5% | 17,4% |
+| 0x10095d | 35,1% | 17,1% | 22,7% |
+
+Wniosek: jeden słownik na grę daje o 35-57% mniej bajtów niż LZ4 (własny per pamięć: 50-67% mniej), więc protokół nie wymaga dynamicznej dystrybucji słowników:
+wystarczy plik słownika po obu stronach (identyfikator = id słownika zstd). Nie zmierzono jeszcze uogólniania między sesjami/uruchomieniami (potrzebne drugie nagranie).

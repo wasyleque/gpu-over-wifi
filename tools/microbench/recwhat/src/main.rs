@@ -284,35 +284,99 @@ impl AnalysisResult {
     }
 }
 
-fn analyze_stream(stream: &MemoryStream) -> AnalysisResult {
+// Collect warm-up samples from a set of memory streams, evenly across streams,
+// capped at `cap` total samples.
+fn collect_foreign_samples(streams: &[MemoryStream], cap: usize) -> Vec<Vec<u8>> {
+    // For each stream, take first 20% of its records as candidate samples.
+    let mut per_stream: Vec<Vec<Vec<u8>>> = Vec::new();
+    for stream in streams {
+        let warmup = stream.records.len() / 5;
+        let mut samples = Vec::new();
+        for (_, data) in stream.records.iter().take(warmup) {
+            samples.push(data.clone());
+        }
+        per_stream.push(samples);
+    }
+    
+    let total_available: usize = per_stream.iter().map(|s| s.len()).sum();
+    if total_available == 0 {
+        return Vec::new();
+    }
+    
+    let target = cap.min(total_available);
+    let n_streams = per_stream.len();
+    
+    // Evenly distribute target across streams (round-robin to avoid one dominating).
+    let mut result: Vec<Vec<u8>> = Vec::with_capacity(target);
+    let mut indices = vec![0usize; n_streams];
+    let mut remaining = target;
+    
+    // Round-robin pick
+    loop {
+        let mut progressed = false;
+        for s in 0..n_streams {
+            if remaining == 0 {
+                break;
+            }
+            if indices[s] < per_stream[s].len() {
+                result.push(per_stream[s][indices[s]].clone());
+                indices[s] += 1;
+                remaining -= 1;
+                progressed = true;
+            }
+        }
+        if !progressed || remaining == 0 {
+            break;
+        }
+    }
+    
+    result
+}
+
+fn train_dicts(samples: &[Vec<u8>]) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+    if samples.len() < 10 {
+        return (None, None, None);
+    }
+    let d16 = zstd::dict::from_samples(samples, 16 * 1024).ok();
+    let d64 = zstd::dict::from_samples(samples, 64 * 1024).ok();
+    let d112 = zstd::dict::from_samples(samples, 112 * 1024).ok();
+    (d16, d64, d112)
+}
+
+fn analyze_stream(
+    stream: &MemoryStream,
+    foreign_dicts: Option<&(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)>,
+    export_dict_prefix: Option<&str>,
+) -> AnalysisResult {
     let mut result = AnalysisResult::new();
     let mut mirror = vec![0u8; stream.max_offset as usize];
     let warmup = stream.records.len() / 5;
     
-    // Collect warmup samples for dictionary training
-    let mut warmup_samples: Vec<Vec<u8>> = Vec::new();
-    for (_, data) in stream.records.iter().take(warmup) {
-        if warmup_samples.len() < 2000 {
-            warmup_samples.push(data.clone());
+    // Determine dictionaries: foreign if provided, else train from own warm-up.
+    let (dict_16k, dict_64k, dict_112k) = if let Some((d16, d64, d112)) = foreign_dicts {
+        (d16.clone(), d64.clone(), d112.clone())
+    } else {
+        // Collect warmup samples for dictionary training
+        let mut warmup_samples: Vec<Vec<u8>> = Vec::new();
+        for (_, data) in stream.records.iter().take(warmup) {
+            if warmup_samples.len() < 2000 {
+                warmup_samples.push(data.clone());
+            }
+        }
+        train_dicts(&warmup_samples)
+    };
+    
+    // Export 64K dictionary if requested
+    if let Some(prefix) = export_dict_prefix {
+        if let Some(d64) = &dict_64k {
+            let path = format!("{}-64k.dict", prefix);
+            if let Err(e) = std::fs::write(&path, d64) {
+                eprintln!("Warning: failed to write dictionary to {}: {}", path, e);
+            } else {
+                println!("Exported 64K dictionary to {}", path);
+            }
         }
     }
-    
-    // Train dictionaries
-    let dict_16k = if warmup_samples.len() >= 10 {
-        zstd::dict::from_samples(&warmup_samples, 16 * 1024).ok()
-    } else {
-        None
-    };
-    let dict_64k = if warmup_samples.len() >= 10 {
-        zstd::dict::from_samples(&warmup_samples, 64 * 1024).ok()
-    } else {
-        None
-    };
-    let dict_112k = if warmup_samples.len() >= 10 {
-        zstd::dict::from_samples(&warmup_samples, 112 * 1024).ok()
-    } else {
-        None
-    };
     
     let mut cctx_16k = dict_16k.as_ref().map(|d| zstd::bulk::Compressor::with_dictionary(1, d).unwrap());
     let mut cctx_64k = dict_64k.as_ref().map(|d| zstd::bulk::Compressor::with_dictionary(1, d).unwrap());
@@ -705,7 +769,7 @@ fn selftest() {
     
     let mut combined = AnalysisResult::new();
     for stream in &streams {
-        let result = analyze_stream(stream);
+        let result = analyze_stream(stream, None, None);
         combined.add(&result);
     }
     
@@ -855,6 +919,7 @@ fn main() {
     if args.len() < 2 {
         println!("Usage:");
         println!("  recwhat <file> [--mem 0xHEX | --all] [--max-records N]");
+        println!("                 [--train-from <file>[,<file2>,...]] [--export-dict <path_prefix>]");
         println!("  recwhat --gen <out_file> [seed]");
         println!("  recwhat --selftest");
         return;
@@ -882,6 +947,8 @@ fn main() {
     let mut max_records = usize::MAX;
     let mut target_memory: Option<u64> = None;
     let mut all_memories = false;
+    let mut train_from_files: Option<Vec<String>> = None;
+    let mut export_dict_prefix: Option<String> = None;
     
     let mut i = 2;
     while i < args.len() {
@@ -907,6 +974,27 @@ fn main() {
                     i += 1;
                 }
             }
+            "--train-from" => {
+                if i + 1 < args.len() {
+                    let files: Vec<String> = args[i + 1]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    train_from_files = Some(files);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--export-dict" => {
+                if i + 1 < args.len() {
+                    export_dict_prefix = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
             _ => {
                 i += 1;
             }
@@ -923,11 +1011,42 @@ fn main() {
     let streams = group_by_memory(records);
     println!("Found {} memory streams", streams.len());
     
+    // Prepare foreign dictionaries if --train-from was given.
+    let foreign_dicts: Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)> =
+        if let Some(files) = &train_from_files {
+            // Load all records from all listed files, group by memory, collect samples.
+            let mut all_foreign_streams: Vec<MemoryStream> = Vec::new();
+            for f in files {
+                match std::fs::read(f) {
+                    Ok(fdata) => {
+                        let frecs = parse_records(&fdata, usize::MAX);
+                        let fstreams = group_by_memory(frecs);
+                        all_foreign_streams.extend(fstreams);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: failed to read training file {}: {}", f, e);
+                    }
+                }
+            }
+            let samples = collect_foreign_samples(&all_foreign_streams, 3000);
+            println!("Collected {} foreign training samples from {} file(s)", samples.len(), files.len());
+            let (d16, d64, d112) = train_dicts(&samples);
+            Some((d16, d64, d112))
+        } else {
+            None
+        };
+    
+    let train_from_label: String = match &train_from_files {
+        Some(files) => files.join(","),
+        None => "own warm-up".to_string(),
+    };
+    
     if all_memories {
         let mut combined = AnalysisResult::new();
         for stream in &streams {
             println!("\nAnalyzing memory 0x{:x} ({} records)", stream.memory_id, stream.records.len());
-            let result = analyze_stream(stream);
+            println!("C7 dictionaries trained from: {}", train_from_label);
+            let result = analyze_stream(stream, foreign_dicts.as_ref(), export_dict_prefix.as_deref());
             print_results(&result, &format!("Memory 0x{:x}", stream.memory_id));
             combined.add(&result);
         }
@@ -938,7 +1057,8 @@ fn main() {
     } else if let Some(mem_id) = target_memory {
         if let Some(stream) = streams.iter().find(|s| s.memory_id == mem_id) {
             println!("Analyzing memory 0x{:x} ({} records)", mem_id, stream.records.len());
-            let result = analyze_stream(stream);
+            println!("C7 dictionaries trained from: {}", train_from_label);
+            let result = analyze_stream(stream, foreign_dicts.as_ref(), export_dict_prefix.as_deref());
             print_results(&result, &format!("Memory 0x{:x}", mem_id));
         } else {
             println!("Memory 0x{:x} not found", mem_id);
@@ -946,7 +1066,8 @@ fn main() {
     } else if streams.len() == 1 {
         let stream = &streams[0];
         println!("Analyzing memory 0x{:x} ({} records)", stream.memory_id, stream.records.len());
-        let result = analyze_stream(stream);
+        println!("C7 dictionaries trained from: {}", train_from_label);
+        let result = analyze_stream(stream, foreign_dicts.as_ref(), export_dict_prefix.as_deref());
         print_results(&result, &format!("Memory 0x{:x}", stream.memory_id));
     } else {
         println!("Multiple memory streams found. Use --mem to select one or --all to analyze all.");
