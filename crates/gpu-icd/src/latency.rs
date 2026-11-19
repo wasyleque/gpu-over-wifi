@@ -34,6 +34,54 @@ struct State {
 static S: Mutex<Option<State>> = Mutex::new(None);
 static ROOM: Condvar = Condvar::new();
 
+/// Pacing oddawania klatek (`GPU_ICD_PACE=1`, współczynnik `GPU_ICD_PACE_F`, domyślnie 0,9): early-return w `vkWaitSemaphores` pozwala grze wyprzedzić
+/// serwer, a potem gra staje na synchronizacji, więc klatki wychodzą seriami (p95 odstępu 85-115 ms przy medianie 25-30 ms). Klatka, która przychodzi
+/// wyraźnie szybciej niż średni surowy odstęp, jest wstrzymywana do tego odstępu (przed blokadą instancji), więc gra mierzy równe czasy klatek.
+struct Pace {
+    last: Option<Instant>,
+    slept_us: f64,
+    ewma_us: f64,
+}
+
+static PACE: Mutex<Pace> = Mutex::new(Pace { last: None, slept_us: 0.0, ewma_us: 0.0 });
+static PACE_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PACE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn pace_factor() -> Option<f64> {
+    static F: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        std::env::var_os("GPU_ICD_PACE")?;
+        Some(std::env::var("GPU_ICD_PACE_F").ok().and_then(|v| v.parse().ok()).filter(|f| (0.3..=1.2).contains(f)).unwrap_or(0.9))
+    })
+}
+
+/// Wołać przy wejściu w `vkQueuePresentKHR`, ZANIM weźmiemy blokadę instancji (usypia wątek oddający klatkę).
+pub fn pace() {
+    let Some(factor) = pace_factor() else { return };
+    let sleep_us = {
+        let mut p = PACE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let mut sleep = 0.0;
+        if let Some(last) = p.last {
+            // Surowy odstęp gry: czas między wejściami minus to, co sami przespaliśmy poprzednio.
+            let raw = (now.duration_since(last).as_micros() as f64 - p.slept_us).max(0.0);
+            p.ewma_us = if p.ewma_us == 0.0 { raw } else { 0.9 * p.ewma_us + 0.1 * raw.min(4.0 * p.ewma_us) };
+            let target = p.ewma_us * factor;
+            if raw < target {
+                sleep = target - raw;
+            }
+        }
+        p.slept_us = sleep;
+        p.last = Some(now);
+        sleep
+    };
+    if sleep_us >= 100.0 {
+        std::thread::sleep(Duration::from_micros(sleep_us as u64));
+        PACE_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        PACE_US.fetch_add(sleep_us as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
     let mut g = S.lock().unwrap_or_else(|e| e.into_inner());
     f(g.get_or_insert_with(State::default))
@@ -160,6 +208,10 @@ pub fn report_and_reset() -> Option<String> {
         }
         if let Some(t) = spread(&mut s.sivals, "odstępy oddania") {
             out.push_str(&format!("; {t}"));
+        }
+        if pace_factor().is_some() {
+            use std::sync::atomic::Ordering::Relaxed;
+            out.push_str(&format!("; pacing: {} wstrzymań, łącznie {} ms", PACE_N.swap(0, Relaxed), PACE_US.swap(0, Relaxed) / 1000));
         }
         out.push_str(&format!("; hamowanie gry: {} razy, łącznie {:.0} ms", s.waits, s.waited_us as f64 / 1000.0));
         let pending = std::mem::take(&mut s.pending);

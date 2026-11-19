@@ -281,6 +281,7 @@ pub unsafe extern "C" fn acquire_next_image2(_dev: u64, info: *const u8, out: *m
 
 pub unsafe extern "C" fn queue_present(queue: u64, info: *const u8) -> i32 {
     crate::route::frame_tick();
+    crate::latency::pace();
     let (Some(inst), false) = (crate::fwd::instance_of("VkQueue", queue).or_else(state), info.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
     crate::watchdog::set_named("vkQueuePresentKHR", crate::watchdog::WAIT_LOCK);
     let _wd = crate::fwd::WdGuard;
