@@ -304,8 +304,21 @@ fn redirect_stderr_to_log() {
     });
 }
 
+/// Diagnostyka zawieszeń (`GPU_ICD_PTRACE=1`): pozwala dowolnemu procesowi tego samego użytkownika dołączyć debugger (gdb -p) mimo `ptrace_scope=1`,
+/// żeby zdjąć stosy wątków zawieszonej gry bez roota.
+fn allow_debugger_attach() {
+    extern "C" {
+        fn prctl(option: i32, ...) -> i32;
+    }
+    if std::env::var_os("GPU_ICD_PTRACE").is_some() {
+        // SAFETY: PR_SET_PTRACER (0x59616d61) z PR_SET_PTRACER_ANY (-1) nie dotyka pamięci procesu.
+        unsafe { prctl(0x5961_6d61, -1i64 as u64) };
+    }
+}
+
 unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out: *mut *mut InstanceObj) -> VkResult {
     redirect_stderr_to_log();
+    allow_debugger_attach();
     if info.is_null() || out.is_null() {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
