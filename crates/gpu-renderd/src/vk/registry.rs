@@ -2,6 +2,7 @@
 //! Wpis pamięta rodzaj obiektu (typ Vulkana), obiekt nadrzędny (urządzenie) i rozmiar (dla pamięci).
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use gpu_vkcodec::codec::Ctx;
 use gpu_vkcodec::CodecError;
@@ -17,9 +18,29 @@ pub struct Entry {
     pub size: u64,
 }
 
+/// Szybki skrót dla kluczy `u64` (mnożenie przez stałą, jak FxHash): wyszukiwanie uchwytu jest w gorącej ścieżce każdego polecenia
+/// (profil perf: SipHash z `RandomState` ok. 1,5% wątku obsługi). Klucze pochodzą od uwierzytelnionego klienta, więc odporność na kolizje
+/// wymuszane przez atakującego nie jest tu potrzebna.
+#[derive(Default)]
+pub struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Default)]
 pub struct Registry {
-    map: HashMap<u64, Entry>,
+    map: HashMap<u64, Entry, BuildHasherDefault<IdHasher>>,
 }
 
 impl Registry {

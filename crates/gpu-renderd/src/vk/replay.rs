@@ -143,9 +143,18 @@ unsafe impl Send for Replayer {}
 
 /// `GPU_RENDERD_TRACE=<plik>`: dopisuje nazwę każdego polecenia tuż PRZED wykonaniem w sterowniku, więc po awarii sterownika
 /// ostatnia linia wskazuje sprawcę (diagnostyka; wolne, tylko do debugowania).
-fn trace_command(name: &str) {
+fn trace_path() -> Option<&'static String> {
     static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if let Some(path) = PATH.get_or_init(|| std::env::var("GPU_RENDERD_TRACE").ok()) {
+    PATH.get_or_init(|| std::env::var("GPU_RENDERD_TRACE").ok()).as_ref()
+}
+
+/// Czy ślad jest włączony (odczyt zmiennej raz): sprawdzany przy KAŻDYM poleceniu, więc nie może wołać `getenv` ani budować tekstu.
+fn trace_on() -> bool {
+    trace_path().is_some()
+}
+
+fn trace_command(name: &str) {
+    if let Some(path) = trace_path() {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{name}");
@@ -154,7 +163,7 @@ fn trace_command(name: &str) {
 }
 
 fn trace_text(line: &str) {
-    if let Ok(path) = std::env::var("GPU_RENDERD_TRACE") {
+    if let Some(path) = trace_path() {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{line}");
@@ -328,10 +337,10 @@ impl Replayer {
         self.last_name = cmd.name;
         trace_command(cmd.name);
         // Rozmiary rysowań i dispatchy w śladzie: zawieszenie GPU (pętla albo gigantyczny dispatch z nieaktualnych danych) widać po absurdalnych liczbach.
-        if matches!(cmd.name, "vkCmdDispatch" | "vkCmdDraw" | "vkCmdDrawIndexed" | "vkCmdDispatchIndirect" | "vkCmdDrawIndirect" | "vkCmdDrawIndexedIndirect" | "vkCmdDispatchBase") && std::env::var_os("GPU_RENDERD_TRACE").is_some() {
+        if matches!(cmd.name, "vkCmdDispatch" | "vkCmdDraw" | "vkCmdDrawIndexed" | "vkCmdDispatchIndirect" | "vkCmdDrawIndirect" | "vkCmdDrawIndexedIndirect" | "vkCmdDispatchBase") && trace_on() {
             trace_text(&format!("  args {} {:?}", cmd.name, &ints[1.min(ints.len())..ints.len().min(8)]));
         }
-        if std::env::var("GPU_RENDERD_TRACE").is_ok() && (cmd.name == "vkCreateDescriptorPool" || cmd.name == "vkAllocateDescriptorSets") {
+        if trace_on() && (cmd.name == "vkCreateDescriptorPool" || cmd.name == "vkAllocateDescriptorSets") {
             // SAFETY: parametr 1 to wskaźnik na zdekodowaną strukturę w arenie.
             unsafe {
                 let ptr = std::ptr::read_unaligned(args.add(8) as *const u64) as *const u8;
@@ -339,7 +348,7 @@ impl Replayer {
                 trace_text(&format!("  {} {d}", cmd.name));
             }
         }
-        if cmd.name == "vkCreateGraphicsPipelines" && std::env::var("GPU_RENDERD_TRACE").is_ok() {
+        if cmd.name == "vkCreateGraphicsPipelines" && trace_on() {
             // SAFETY: sloty parametrów (8 B każdy) leżą w arenie; parametr 3 to pCreateInfos, 2 to createInfoCount.
             unsafe {
                 let slot = |i: usize| std::ptr::read_unaligned(args.add(i * 8) as *const u64);
@@ -355,10 +364,12 @@ impl Replayer {
             self.copy_forget_memory(ints[0], ints[1]);
         }
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
-        let t0 = std::time::Instant::now();
+        let t0 = trace_on().then(std::time::Instant::now);
         let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
-        trace_text(&format!("  t {} {}us", cmd.name, t0.elapsed().as_micros()));
-        if cmd.name == "vkCreateDescriptorPool" && std::env::var("GPU_RENDERD_TRACE").is_ok() {
+        if let Some(t0) = t0 {
+            trace_text(&format!("  t {} {}us", cmd.name, t0.elapsed().as_micros()));
+        }
+        if cmd.name == "vkCreateDescriptorPool" && trace_on() {
             // SAFETY: parametr 3 to wskaźnik wyjściowy na uchwyt puli (sterownik właśnie go wpisał).
             let pool = unsafe { std::ptr::read_unaligned(std::ptr::read_unaligned(args.add(24) as *const u64) as *const u64) };
             trace_text(&format!("  pool utworzona: {pool:#x}"));
