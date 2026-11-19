@@ -167,6 +167,8 @@ impl Stats {
 /// Flagi diagnostyczne czytane RAZ (zmienne środowiskowe nie zmieniają się w trakcie procesu, a odczyt przy każdym poleceniu
 /// kosztował zauważalnie przy setkach tysięcy poleceń na sekundę).
 pub struct Flags {
+    /// G3: lokalna, monotoniczna odpowiedź na `vkGetSemaphoreCounterValue` z odświeżaniem w tle (`GPU_ICD_SEM_CACHE=1`).
+    pub sem_cache: bool,
     /// G1: spekulacyjny `vkGetDescriptorEXT` zaraz po `vkCreateImageView` (`GPU_ICD_DESC_PREFETCH=1`).
     pub desc_prefetch: bool,
     pub debug: bool,
@@ -203,6 +205,7 @@ pub fn flags() -> &'static Flags {
     static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
     F.get_or_init(|| Flags {
         desc_prefetch: std::env::var_os("GPU_ICD_DESC_PREFETCH").is_some(),
+        sem_cache: std::env::var_os("GPU_ICD_SEM_CACHE").is_some(),
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),
@@ -1918,6 +1921,10 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        if flags().sem_cache {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!("[gpu-icd] licznik semaforów (G3): lokalnie {}, odświeżeń w tle {}, blokująco do serwera {}", SEM_LOCAL.load(Relaxed), SEM_REFRESH.load(Relaxed), SEM_SYNC.load(Relaxed));
+        }
         if flags().desc_prefetch {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] spekulacyjne deskryptory obrazów (G1): wysłano {}, wpisano do cache {}, pominięto (limit w locie) {}; chybienia typu 2/3 wg przyczyny [widok nieznany, inny kształt, ten sam kształt, sampler≠0, nowy kształt]: {:?}; kształtów {}", PREFETCH_SENT.load(Relaxed), PREFETCH_DONE.load(Relaxed), PREFETCH_SKIPPED.load(Relaxed), PREFETCH_MISS_WHY.iter().map(|c| c.load(Relaxed)).collect::<Vec<_>>(), 0);
@@ -2206,6 +2213,103 @@ pub(crate) unsafe fn exec(st: &mut InstState, op: u16, slots: &mut [u64]) -> u64
     exec_with(st, op, slots, false)
 }
 
+/// G3: ostatnia znana wartość semafora czasowego (dolne ograniczenie, monotoniczne): licznik obserwowany przez aplikację nigdy nie maleje.
+struct SemState {
+    value: u64,
+    /// Ile kolejnych odczytów z cache nie zobaczyło zmiany (po 3 następny idzie blokująco do serwera: gwarancja postępu pętli odpytującej).
+    stale: u32,
+    inflight: bool,
+}
+static SEM: std::sync::Mutex<Option<HashMap<u64, SemState>>> = std::sync::Mutex::new(None);
+pub static SEM_LOCAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SEM_REFRESH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SEM_SYNC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn sem_op() -> u16 {
+    static OP: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *OP.get_or_init(|| gpu_proto::meta::find_command("vkGetSemaphoreCounterValue").map_or(u16::MAX, |(op, _)| op))
+}
+
+/// Zapisuje wartość (max z dotychczasową); `fresh` = z odpowiedzi serwera (zeruje licznik odczytów bez zmiany i znacznik odświeżenia w locie).
+fn sem_store(sem: u64, value: u64, fresh: bool) {
+    let mut g = SEM.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    let e = m.entry(sem).or_insert(SemState { value, stale: 0, inflight: false });
+    if value > e.value {
+        e.value = value;
+        e.stale = 0;
+    }
+    if fresh {
+        e.inflight = false;
+    }
+}
+
+fn sem_refresh_failed(sem: u64) {
+    if let Some(e) = SEM.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.get_mut(&sem)) {
+        e.inflight = false;
+        e.stale = 3;
+    }
+}
+
+/// Podnosi znane wartości semaforów po zakończonym `vkWaitSemaphores` (tryb "wszystkie"): aplikacja zaraz zobaczy co najmniej tyle.
+///
+/// # Safety
+/// `info` to `VkSemaphoreWaitInfo` z wywołania aplikacji.
+unsafe fn sem_raise_from_wait(info: u64) {
+    if info == 0 {
+        return;
+    }
+    let p = info as *const u8;
+    if std::ptr::read_unaligned(p.add(16) as *const u32) & 1 != 0 {
+        return; // VK_SEMAPHORE_WAIT_ANY_BIT: nie wiadomo, który
+    }
+    let n = std::ptr::read_unaligned(p.add(20) as *const u32).min(64) as usize;
+    let (sems, vals) = (std::ptr::read_unaligned(p.add(24) as *const u64) as *const u64, std::ptr::read_unaligned(p.add(32) as *const u64) as *const u64);
+    if sems.is_null() || vals.is_null() {
+        return;
+    }
+    for i in 0..n {
+        sem_store(std::ptr::read_unaligned(sems.add(i)), std::ptr::read_unaligned(vals.add(i)), false);
+    }
+}
+
+/// Odpowiedź z cache albo `None` (idź do serwera). Zwraca wartość i czy zlecić odświeżenie.
+fn sem_cache_try(sem: u64) -> Option<(u64, bool)> {
+    let mut g = SEM.lock().unwrap_or_else(|e| e.into_inner());
+    let e = g.as_mut()?.get_mut(&sem)?;
+    if e.stale >= 3 {
+        e.stale = 0;
+        return None;
+    }
+    e.stale += 1;
+    let refresh = !e.inflight;
+    e.inflight = true;
+    Some((e.value, refresh))
+}
+
+/// Odświeżenie licznika w tle: samo zapytanie + Sync, BEZ zaległej partii poleceń (nie wolno jej wysłać bez wcześniejszego skanu pamięci), więc wartość
+/// jest co najwyżej nieaktualna (dolne ograniczenie), nigdy za wysoka.
+///
+/// # Safety
+/// `dev` i `sem` to uchwyty z wywołania aplikacji.
+unsafe fn sem_refresh(st: &mut InstState, op: u16, dev: u64, sem: u64) {
+    let mut tmp = 0u64;
+    let slots: [u64; 3] = [dev, sem, &mut tmp as *mut u64 as u64];
+    let mut e = Encoder::new();
+    if encode_command(op, slots.as_ptr() as *const u8, &mut e, &IcdCtx).is_err() {
+        sem_refresh_failed(sem);
+        return;
+    }
+    let reqs = [Request::Query { data: e.finish() }, Request::Sync];
+    let Ok(ticket) = st.client.send_many(&reqs) else {
+        sem_refresh_failed(sem);
+        return;
+    };
+    PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ticket, Deferred::Sem(sem));
+    st.client.shared().defer(ticket);
+    SEM_REFRESH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// G1: ile spekulacyjnych zapytań o deskryptory wysłano, ile odpowiedzi wpisano do cache, ile pominięto (limit w locie).
 pub static PREFETCH_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PREFETCH_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2216,7 +2320,14 @@ static PREFETCHED_VIEWS: std::sync::Mutex<Option<std::collections::HashMap<u64, 
 pub static PREFETCH_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const PREFETCH_MAX_INFLIGHT: usize = 256;
 /// Bilet zapytania -> (klucz cache, rozmiar deskryptora): odpowiedź odbiera dowolny czekający wątek (`link::finish_deferred`).
-static PREFETCH: std::sync::Mutex<Option<HashMap<u64, (Vec<u8>, usize)>>> = std::sync::Mutex::new(None);
+static PREFETCH: std::sync::Mutex<Option<HashMap<u64, Deferred>>> = std::sync::Mutex::new(None);
+
+enum Deferred {
+    /// Spekulacyjny deskryptor: (klucz cache, rozmiar).
+    Desc(Vec<u8>, usize),
+    /// Odświeżenie licznika semafora czasowego (G3).
+    Sem(u64),
+}
 
 /// G1: po utworzeniu widoku obrazu dosyła do serwera `vkGetDescriptorEXT` dla każdego znanego kształtu zapytania (typ, układ) bez czekania na
 /// odpowiedź. Serwer wykona je w kolejności strumienia (po utworzeniu widoku), a odpowiedź ląduje w cache deskryptorów, zanim gra o nią zapyta:
@@ -2271,7 +2382,7 @@ unsafe fn prefetch_view_descriptors(st: &mut InstState, dev: u64, view: u64) {
         reqs.push(Request::Sync);
         let Ok(base) = st.client.send_many(&reqs) else { return };
         let ticket = base;
-        PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ticket, (key, size as usize));
+        PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ticket, Deferred::Desc(key, size as usize));
         st.client.shared().defer(ticket);
         PREFETCH_SENT.fetch_add(1, Relaxed);
         let mut g = PREFETCHED_VIEWS.lock().unwrap_or_else(|e| e.into_inner());
@@ -2285,20 +2396,43 @@ unsafe fn prefetch_view_descriptors(st: &mut InstState, dev: u64, view: u64) {
 
 /// Odpowiedź na spekulacyjne zapytanie (bilet `ticket`): wpisuje deskryptor do cache. Wołane z `link::finish_deferred` przez wątek, który odbiera odroczone odpowiedzi.
 pub(crate) fn prefetch_reply(ticket: u64, r: &Result<Response, gpu_renderd::client::ClientError>) {
-    let Some((key, size)) = PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(&ticket)) else { return };
-    let Ok(Response::Data(d)) = r else { return };
+    let Some(item) = PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(&ticket)) else { return };
+    let Ok(Response::Data(d)) = r else {
+        if let Deferred::Sem(sem) = item {
+            sem_refresh_failed(sem);
+        }
+        return;
+    };
     let result = d.get(..4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(-1);
+    let (op, size) = match &item {
+        Deferred::Desc(_, size) => (descriptor_op(), *size),
+        Deferred::Sem(_) => (sem_op(), 8),
+    };
     if result < 0 {
+        if let Deferred::Sem(sem) = item {
+            sem_refresh_failed(sem);
+        }
         return;
     }
-    let Some(cmd) = COMMANDS.get(descriptor_op() as usize) else { return };
-    let mut out = vec![0u8; size];
-    let slots: [u64; 4] = [0, 0, size as u64, out.as_mut_ptr() as u64];
+    let Some(cmd) = COMMANDS.get(op as usize) else { return };
+    let mut out = vec![0u8; size.max(8)];
+    let slots: [u64; 4] = [0, 0, if matches!(item, Deferred::Desc(..)) { size as u64 } else { out.as_mut_ptr() as u64 }, out.as_mut_ptr() as u64];
     let mut dec = Decoder::new(d.get(4..).unwrap_or(&[]));
-    // SAFETY: `slots` opisuje bufor `out` o rozmiarze `size`, jak w zwykłej odpowiedzi na to polecenie.
-    if unsafe { decode_out_params(cmd, slots.as_ptr() as *const u8, &mut dec) }.is_ok() {
-        desc_cache_store(key, out);
-        PREFETCH_DONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: `slots` opisuje bufor `out` o rozmiarze co najmniej `size`, jak w zwykłej odpowiedzi na to polecenie.
+    let ok = unsafe { decode_out_params(cmd, slots.as_ptr() as *const u8, &mut dec) }.is_ok();
+    match item {
+        Deferred::Desc(key, _) if ok => {
+            desc_cache_store(key, out);
+            PREFETCH_DONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Deferred::Sem(sem) => {
+            if ok {
+                sem_store(sem, u64::from_le_bytes(out[..8].try_into().unwrap_or([0; 8])), true);
+            } else {
+                sem_refresh_failed(sem);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2337,6 +2471,23 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
             alloc_ctx = Some((pool, layouts));
         }
         _ => {}
+    }
+    // G3: licznik semafora czasowego z lokalnej pamięci (monotonicznej), odświeżany w tle; co 4. odczyt bez zmiany idzie blokująco do serwera.
+    if flags().sem_cache && matches!(cmd.name, "vkGetSemaphoreCounterValue" | "vkGetSemaphoreCounterValueKHR") && slots.len() >= 3 && slots[2] != 0 && !st.device_lost {
+        if let Some((value, refresh)) = sem_cache_try(slots[1]) {
+            std::ptr::write_unaligned(slots[2] as *mut u64, value);
+            SEM_LOCAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if refresh {
+                sem_refresh(st, op, slots[0], slots[1]);
+            }
+            return Step::Done(0);
+        }
+        SEM_SYNC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    // vkSignalSemaphore z hosta podnosi znaną wartość od razu (VkSemaphoreSignalInfo: semaphore @16, value @24).
+    if flags().sem_cache && matches!(cmd.name, "vkSignalSemaphore" | "vkSignalSemaphoreKHR") && slots.len() >= 2 && slots[1] != 0 {
+        let p = slots[1] as *const u8;
+        sem_store(std::ptr::read_unaligned(p.add(16) as *const u64), std::ptr::read_unaligned(p.add(24) as *const u64), false);
     }
     // Wymagania pamięci: identyczne obrazy i bufory dostają odpowiedź z cache, bez obiegu po sieci.
     if let Some(done) = memreq_cached(st, cmd.name, slots) {
@@ -2621,6 +2772,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     }
     if let (Some(t), true) = (ticket, cmd.class == CmdClass::Sync && pre_ids.is_empty() && cmd.name.starts_with("vkWaitSemaphores") && slots.get(2).is_some_and(|t| *t >= EARLY_MIN_TIMEOUT_NS) && contract_active()) {
         st.client.shared().defer(t);
+        if flags().sem_cache {
+            sem_raise_from_wait(slots[1]);
+        }
         st.stats.early_waits += 1;
         if st.gpu_dirty {
             st.lazy_invalidate();
@@ -2766,6 +2920,13 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
     if result >= 0 && decode_out_params(cmd, args, &mut dec).is_err() {
         eprintln!("gpu-icd: nie umiem odczytać odpowiedzi na {}", cmd.name);
         return fail(VK_ERROR_INITIALIZATION_FAILED);
+    }
+    if flags().sem_cache && result >= 0 {
+        if matches!(cmd.name, "vkGetSemaphoreCounterValue" | "vkGetSemaphoreCounterValueKHR") && slots.len() >= 3 && slots[2] != 0 {
+            sem_store(slots[1], std::ptr::read_unaligned(slots[2] as *const u64), true);
+        } else if cmd.name.starts_with("vkWaitSemaphores") && slots.len() >= 2 {
+            sem_raise_from_wait(slots[1]);
+        }
     }
     if let Some(key) = p.query_key.clone() {
         let mut g = QUERY_CACHE.write().unwrap_or_else(|e| e.into_inner());
@@ -3378,5 +3539,33 @@ mod audit_period_tests {
         assert_eq!(super::audit_period(128), 128);
         assert_eq!(super::audit_period(640), 2048);
         assert_eq!(super::audit_period(1_000_000), 2048);
+    }
+}
+
+#[cfg(test)]
+mod sem_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cached_semaphore_value_is_monotonic_and_every_fourth_read_without_change_goes_to_the_server() {
+        let sem = 0xFEED_0001;
+        assert!(sem_cache_try(sem).is_none(), "pierwszy odczyt idzie do serwera");
+        sem_store(sem, 10, true);
+        assert_eq!(sem_cache_try(sem), Some((10, true)), "pierwszy odczyt z cache zleca odświeżenie");
+        assert_eq!(sem_cache_try(sem), Some((10, false)), "odświeżenie już w locie");
+        sem_store(sem, 7, false);
+        assert_eq!(sem_cache_try(sem), Some((10, false)), "niższa wartość nie obniża licznika");
+        assert!(sem_cache_try(sem).is_none(), "po trzech odczytach bez zmiany idzie blokująco");
+        sem_store(sem, 12, true);
+        assert_eq!(sem_cache_try(sem), Some((12, true)), "wzrost zeruje licznik odczytów i odblokowuje następne odświeżenie");
+    }
+
+    #[test]
+    fn a_failed_refresh_forces_the_next_read_to_the_server() {
+        let sem = 0xFEED_0002;
+        sem_store(sem, 5, true);
+        assert!(sem_cache_try(sem).is_some());
+        sem_refresh_failed(sem);
+        assert!(sem_cache_try(sem).is_none());
     }
 }
