@@ -311,7 +311,7 @@ impl<B: GpuBackend> Session<B> {
     }
 
     pub fn handle_request(&mut self, req: Request) -> Option<Response> {
-        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRunsPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
+        let silent = self.authed && matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdDict { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRunsPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. });
         let r = self.handle(req);
         if silent && !matches!(r, Response::Error { .. }) {
             None
@@ -465,6 +465,17 @@ impl<B: GpuBackend> Session<B> {
                         acct::add(1, t.elapsed());
                     }
                     self.note_async("MemWriteZstd", r)
+                }
+                Request::MemWriteZstdDict { memory, offset, raw_len, dict_id, data } => {
+                    let t = acct::enabled().then(std::time::Instant::now);
+                    let r = match dict_decompress(dict_id, &data, raw_len as usize) {
+                        Some(raw) if raw.len() == raw_len as usize => self.backend.mem_write(memory, offset, &raw),
+                        _ => Err(ERR_UNKNOWN),
+                    };
+                    if let Some(t) = t {
+                        acct::add(1, t.elapsed());
+                    }
+                    self.note_async("MemWriteZstdDict", r)
                 }
                 Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data } => {
                     let t = acct::enabled().then(std::time::Instant::now);
@@ -670,6 +681,53 @@ impl<B: GpuBackend> Session<B> {
             let _ = self.backend.destroy_instance(handle);
         }
     }
+}
+
+
+/// Słowniki zstd do `MemWriteZstdDict`: pliki `*.dict` z katalogu `GPU_RENDERD_DICT_DIR` (domyślnie `~/gpu-hub/dicts`), indeksowane identyfikatorem słownika zstd.
+fn dicts() -> &'static std::collections::HashMap<u32, Vec<u8>> {
+    static D: std::sync::OnceLock<std::collections::HashMap<u32, Vec<u8>>> = std::sync::OnceLock::new();
+    D.get_or_init(|| {
+        let dir = std::env::var_os("GPU_RENDERD_DICT_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("gpu-hub/dicts")
+        });
+        let mut m = std::collections::HashMap::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if e.path().extension().is_some_and(|x| x == "dict") {
+                    if let Ok(b) = std::fs::read(e.path()) {
+                        if let Some(id) = zstd::zstd_safe::get_dict_id_from_dict(&b) {
+                            eprintln!("gpu-renderd: słownik zstd {} ({} B) z {}", id.get(), b.len(), e.path().display());
+                            m.insert(id.get(), b);
+                        }
+                    }
+                }
+            }
+        }
+        m
+    })
+}
+
+thread_local! {
+    static DICT_DEC: std::cell::RefCell<std::collections::HashMap<u32, zstd::bulk::Decompressor<'static>>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Rozpakowuje ramkę zstd słownikiem `dict_id`; `None` dla nieznanego słownika albo błędnej ramki. Wynik ma najwyżej `raw_len` bajtów (brak bomby dekompresyjnej).
+fn dict_decompress(dict_id: u32, data: &[u8], raw_len: usize) -> Option<Vec<u8>> {
+    DICT_DEC.with(|c| {
+        let mut c = c.borrow_mut();
+        if !c.contains_key(&dict_id) {
+            let d = zstd::bulk::Decompressor::with_dictionary(dicts().get(&dict_id)?).ok()?;
+            c.insert(dict_id, d);
+        }
+        c.get_mut(&dict_id)?.decompress(data, raw_len).ok()
+    })
+}
+
+/// To samo z dowolnym słownikiem podanym wprost (do testów).
+#[cfg(test)]
+fn dict_decompress_with(dict: &[u8], data: &[u8], raw_len: usize) -> Option<Vec<u8>> {
+    zstd::bulk::Decompressor::with_dictionary(dict).ok()?.decompress(data, raw_len).ok()
 }
 
 #[cfg(test)]
@@ -1267,5 +1325,23 @@ mod tests {
             destroys,
             vec![format!("destroy {a}"), format!("destroy {b}")]
         );
+    }
+
+    #[test]
+    fn dict_roundtrip_and_rejection() {
+        // słownik "surowej treści" (bez nagłówka zstd) wystarcza do sprawdzenia ścieżki kompresja -> dekompresja
+        let dict: Vec<u8> = (0..8192u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let raw: Vec<u8> = dict[1000..5000].iter().chain(dict[200..900].iter()).copied().collect();
+        let mut c = zstd::bulk::Compressor::with_dictionary(1, &dict).unwrap();
+        let packed = c.compress(&raw).unwrap();
+        assert!(packed.len() < raw.len() / 2, "słownik powinien dać dużą oszczędność: {} -> {}", raw.len(), packed.len());
+        assert_eq!(super::dict_decompress_with(&dict, &packed, raw.len()).as_deref(), Some(&raw[..]));
+        // za mała pojemność wyjścia (ochrona przed bombą dekompresyjną) i uszkodzona ramka dają None
+        assert!(super::dict_decompress_with(&dict, &packed, raw.len() - 1).is_none());
+        let mut bad = packed.clone();
+        bad.truncate(bad.len() / 2);
+        assert!(super::dict_decompress_with(&dict, &bad, raw.len()).is_none());
+        // nieznany identyfikator słownika
+        assert!(super::dict_decompress(0xDEAD_BEEF, &packed, raw.len()).is_none());
     }
 }

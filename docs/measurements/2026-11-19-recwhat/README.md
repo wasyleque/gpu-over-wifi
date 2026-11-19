@@ -33,3 +33,10 @@ Słownik 64K wytrenowany na pierwszych 20% rekordów WSZYSTKICH czterech pamięc
 
 Wniosek: jeden słownik na grę daje o 35-57% mniej bajtów niż LZ4 (własny per pamięć: 50-67% mniej), więc protokół nie wymaga dynamicznej dystrybucji słowników:
 wystarczy plik słownika po obu stronach (identyfikator = id słownika zstd). Nie zmierzono jeszcze uogólniania między sesjami/uruchomieniami (potrzebne drugie nagranie).
+
+## Wdrożenie C7 (2026-11-19, za wyłącznikiem)
+
+Klient: `GPU_ICD_DICT=<plik .dict>` (zapisy pamięci kodowane zstd poziom 1 słownikiem; zastępuje lustro/prefiks; LZ4 jako zapas, gdy słownik nic nie oszczędza). Serwer: słowniki `*.dict` z katalogu
+`GPU_RENDERD_DICT_DIR` (domyślnie `~/gpu-hub/dicts`), indeksowane identyfikatorem słownika zstd; nieznany identyfikator = błąd żądania. Nowa wiadomość protokołu `MemWriteZstdDict` (tag 23).
+Słownik dla Tomb Raidera: `recwhat <nagranie> --all --train-from <wszystkie pliki> --export-dict <prefiks>` (64 KiB, wspólny dla wszystkich pamięci gry). Testy: protokół (68+2), daemon (98, w tym
+`dict_roundtrip_and_rejection`), klient (111). Pomiar w grze: oczekiwany kierunek wg `recwhat` to ok. 35-57% mniej bajtów niż LZ4 przy ok. +40% CPU kodowania.

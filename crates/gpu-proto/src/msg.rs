@@ -84,6 +84,9 @@ pub enum Request {
     MemWriteLz4 { memory: u64, offset: u64, raw_len: u32, data: Vec<u8> },
     /// Jak `MemWriteLz4`, ale `data` to ramka zstd (poziom 1; rozpakowanie ma dokładnie `raw_len` bajtów, limit `MAX_BATCH`).
     MemWriteZstd { memory: u64, offset: u64, raw_len: u32, data: Vec<u8> },
+    /// Jak `MemWriteZstd`, ale ramka jest skompresowana słownikiem zstd o identyfikatorze `dict_id` (ten sam plik słownika leży po obu stronach; serwer ładuje
+    /// słowniki z katalogu `GPU_RENDERD_DICT_DIR`). Nieznany `dict_id` kończy się błędem żądania.
+    MemWriteZstdDict { memory: u64, offset: u64, raw_len: u32, dict_id: u32, data: Vec<u8> },
     /// Jak `MemWriteZstd`, ale blok jest skompresowany z prefiksem: poprzednią treścią tego samego zakresu w lustrze "ostatnio przesłane" (`raw_crc`:
     /// crc32c surowych bajtów, serwer sprawdza go po rozpakowaniu). Lustro po obu stronach powstaje z tego samego ciągu zapisów, więc jest identyczne
     /// i nie zależy od zawartości pamięci GPU; każdy zapis pamięci (także surowy) aktualizuje lustro.
@@ -230,6 +233,14 @@ impl Request {
                 e.put_u64(*memory);
                 e.put_u64(*offset);
                 e.put_u32(*raw_len);
+                e.put_bytes(data);
+            }
+            Request::MemWriteZstdDict { memory, offset, raw_len, dict_id, data } => {
+                e.put_u8(23);
+                e.put_u64(*memory);
+                e.put_u64(*offset);
+                e.put_u32(*raw_len);
+                e.put_u32(*dict_id);
                 e.put_bytes(data);
             }
             Request::MemWriteZstd { memory, offset, raw_len, data } => {
@@ -450,6 +461,17 @@ impl Request {
                 }
                 Request::MemWriteZstdPfx { memory, offset, raw_len, raw_crc, data: data.to_vec() }
             }
+            23 => {
+                let memory = d.get_u64()?;
+                let offset = d.get_u64()?;
+                let raw_len = d.get_u32()?;
+                let dict_id = d.get_u32()?;
+                let data = d.get_bytes()?;
+                if raw_len as usize > MAX_BATCH || data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("compressed memory write"));
+                }
+                Request::MemWriteZstdDict { memory, offset, raw_len, dict_id, data: data.to_vec() }
+            }
             22 => {
                 let memory = d.get_u64()?;
                 let n = d.get_u32()? as usize;
@@ -606,6 +628,7 @@ mod tests {
             Request::MemReadDeltaRanges { memory: 9, ranges: vec![], cached: false },
             Request::MemWriteLz4 { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
             Request::MemWriteZstd { memory: 5, offset: 8192, raw_len: 4096, data: vec![1, 2, 3] },
+            Request::MemWriteZstdDict { memory: 5, offset: 8192, raw_len: 4096, dict_id: 0xCAFE, data: vec![1, 2, 3] },
             Request::MemWriteZstdPfx { memory: 5, offset: 8192, raw_len: 4096, raw_crc: 0xDEADBEEF, data: vec![1, 2, 3] },
             Request::MemWriteRunsPfx { memory: 6, runs: vec![(0, 64), (8192, 128)], raw_len: 192, raw_crc: 7, packed: true, data: vec![9, 9] },
             Request::MemWriteRuns { memory: 6, runs: vec![(0, 64), (192, 128)], pages: vec![(0, 0xABCD)], raw_len: 192, data: vec![9, 9, 9] },

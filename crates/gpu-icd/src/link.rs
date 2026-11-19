@@ -17,7 +17,7 @@ use gpu_renderd::client::{Client, ClientError};
 
 /// Czy serwer odpowie na to żądanie (`Cmds`, `MemWrite*` i `PresentFrame` są ciche, o ile się powiodą).
 pub fn expects_reply(req: &Request) -> bool {
-    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRunsPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
+    !matches!(req, Request::Cmds { .. } | Request::MemWrite { .. } | Request::MemWriteLz4 { .. } | Request::MemWriteZstd { .. } | Request::MemWriteZstdDict { .. } | Request::MemWriteZstdPfx { .. } | Request::MemWriteRunsPfx { .. } | Request::MemWriteRuns { .. } | Request::PresentFrame { .. })
 }
 
 struct Turn {
@@ -361,9 +361,49 @@ fn link_has_headroom() -> bool {
     below > 0 && LINK_BACKLOG.load(std::sync::atomic::Ordering::Relaxed) <= below
 }
 
+/// `GPU_ICD_DICT=<plik .dict>`: zapisy pamięci kodowane słownikiem zstd (ten sam plik musi leżeć w katalogu `GPU_RENDERD_DICT_DIR` serwera). Zastępuje lustro/prefiks i LZ4.
+fn mem_dict() -> Option<&'static (u32, Vec<u8>)> {
+    static V: std::sync::OnceLock<Option<(u32, Vec<u8>)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        let path = std::env::var("GPU_ICD_DICT").ok()?;
+        let bytes = std::fs::read(&path).map_err(|e| eprintln!("gpu-icd: słownik {path}: {e}")).ok()?;
+        let id = zstd::zstd_safe::get_dict_id_from_dict(&bytes).map(|i| i.get());
+        if id.is_none() {
+            eprintln!("gpu-icd: {path} nie jest słownikiem zstd z identyfikatorem; ignoruję");
+        }
+        id.map(|i| (i, bytes))
+    })
+    .as_ref()
+}
+
+thread_local! {
+    static DICT_COMP: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Kompresja zstd (poziom 1) słownikiem klienta; `None`, gdy słownika nie ma albo kompresja się nie powiodła.
+fn dict_compress(raw: &[u8]) -> Option<(u32, Vec<u8>)> {
+    let (id, dict) = mem_dict()?;
+    DICT_COMP.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = zstd::bulk::Compressor::with_dictionary(1, dict).ok();
+        }
+        c.as_mut()?.compress(raw).ok().map(|v| (*id, v))
+    })
+}
+
 /// Zapis pamięci jako ramka: zstd (albo LZ4) tylko gdy oszczędza co najmniej 10% (małe i źle kompresowalne, np. tekstury BCn, idą surowo).
 fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>, ClientError> {
     let raw_len = raw.len() as u32;
+    if raw.len() >= 4096 && !link_has_headroom() {
+        if let Some((dict_id, c)) = dict_compress(&raw).filter(|(_, c)| c.len() * 10 <= raw.len() * 9) {
+            let n = c.len() as u64;
+            WIRE_TOTAL.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            *WIRE_BY_MEM.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry(memory).or_insert(0) += n;
+            let frame = Frame::new(0, flags::CRC, seq, 0, Request::MemWriteZstdDict { memory, offset, raw_len, dict_id, data: c }.encode()).map_err(ClientError::Frame)?;
+            return Ok(frame.encode());
+        }
+    }
     let packed = (raw.len() >= 4096 && !link_has_headroom())
         .then(|| {
             if mem_zstd() {
@@ -398,7 +438,7 @@ fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>
 /// RUNS pisze do pamięci bez aktualizacji lustra serwera).
 fn mem_pfx() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| mem_zstd() && std::env::var_os("GPU_ICD_NO_PFX").is_none() && std::env::var_os("GPU_ICD_RUNS").is_none())
+    *V.get_or_init(|| mem_zstd() && mem_dict().is_none() && std::env::var_os("GPU_ICD_NO_PFX").is_none() && std::env::var_os("GPU_ICD_RUNS").is_none())
 }
 
 /// Zapis pamięci jako ramka `MemWriteZstdPfx` (zstd z prefiksem = poprzednia treść zakresu), a gdy to nie daje 10% oszczędności, jako surowy
