@@ -1920,7 +1920,7 @@ fn periodic_stats(stats: &Stats) {
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
         if flags().desc_prefetch {
             use std::sync::atomic::Ordering::Relaxed;
-            eprintln!("[gpu-icd] spekulacyjne deskryptory obrazów (G1): wysłano {}, wpisano do cache {}, pominięto (limit w locie) {}", PREFETCH_SENT.load(Relaxed), PREFETCH_DONE.load(Relaxed), PREFETCH_SKIPPED.load(Relaxed));
+            eprintln!("[gpu-icd] spekulacyjne deskryptory obrazów (G1): wysłano {}, wpisano do cache {}, pominięto (limit w locie) {}; chybienia typu 2/3 wg przyczyny [widok nieznany, inny kształt, ten sam kształt, sampler≠0, nowy kształt]: {:?}; kształtów {}", PREFETCH_SENT.load(Relaxed), PREFETCH_DONE.load(Relaxed), PREFETCH_SKIPPED.load(Relaxed), PREFETCH_MISS_WHY.iter().map(|c| c.load(Relaxed)).collect::<Vec<_>>(), 0);
         }
         let (n, q, r) = crate::link::wait_split();
         eprintln!("[gpu-icd] odświeżenia pamięci wg pamięci (GPU zapisało): {}", refresh_by_mem_report());
@@ -2209,6 +2209,10 @@ pub(crate) unsafe fn exec(st: &mut InstState, op: u16, slots: &mut [u64]) -> u64
 /// G1: ile spekulacyjnych zapytań o deskryptory wysłano, ile odpowiedzi wpisano do cache, ile pominięto (limit w locie).
 pub static PREFETCH_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PREFETCH_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Diagnostyka G1: czemu zapytanie o obraz poszło na serwer mimo spekulacji (0: widok nieznany, 1: znany, inny kształt, 2: znany, ten sam kształt (wyścig albo klucz),
+/// 3: sampler niezerowy, 4: zbyt wiele kształtów).
+pub static PREFETCH_MISS_WHY: [std::sync::atomic::AtomicU64; 5] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+static PREFETCHED_VIEWS: std::sync::Mutex<Option<std::collections::HashMap<u64, Vec<(u32, u32)>>>> = std::sync::Mutex::new(None);
 pub static PREFETCH_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const PREFETCH_MAX_INFLIGHT: usize = 256;
 /// Bilet zapytania -> (klucz cache, rozmiar deskryptora): odpowiedź odbiera dowolny czekający wątek (`link::finish_deferred`).
@@ -2270,6 +2274,12 @@ unsafe fn prefetch_view_descriptors(st: &mut InstState, dev: u64, view: u64) {
         PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ticket, (key, size as usize));
         st.client.shared().defer(ticket);
         PREFETCH_SENT.fetch_add(1, Relaxed);
+        let mut g = PREFETCHED_VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        let m = g.get_or_insert_with(Default::default);
+        if m.len() > 400_000 {
+            m.clear();
+        }
+        m.entry(view).or_default().push((ty, layout));
     }
 }
 
@@ -2427,7 +2437,21 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
                 let shape = (ty, slots[2], sampler, layout);
                 if sampler == 0 && st.desc_shapes.len() < 8 && !st.desc_shapes.contains(&shape) {
                     st.desc_shapes.push(shape);
+                    eprintln!("[gpu-icd] G1: nowy kształt zapytania o deskryptor obrazu: typ {ty}, rozmiar {}, układ {layout}", slots[2]);
                 }
+                let view = std::ptr::read_unaligned(p.add(8) as *const u64);
+                let why = if sampler != 0 {
+                    3
+                } else if !st.desc_shapes.contains(&shape) {
+                    4
+                } else {
+                    match PREFETCHED_VIEWS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&view)) {
+                        None => 0,
+                        Some(v) if v.contains(&(ty, layout)) => 2,
+                        Some(_) => 1,
+                    }
+                };
+                PREFETCH_MISS_WHY[why].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         // Które formaty tekseli i jakie wejścia zostają na serwerze mimo syntezy (do wyboru, co dopisać do tabeli).
