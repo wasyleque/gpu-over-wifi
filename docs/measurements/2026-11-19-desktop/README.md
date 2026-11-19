@@ -54,3 +54,13 @@ Profil perf wątku obsługi `gpu-renderd` w scenie 3 (liczniki GPU_RENDERD_STATS
 | kodowanie LZ4 (`GPU_ICD_MEM_LZ4=1`) | **38,15** | 107–149 ms | na łączu 22,7 GB (×2,1); lz4_flex::decompress_safe = **24,3%** wątku (zstd 12,5%) |
 
 Wniosek: na desktopie z szybkim łączem LZ4 jest GORSZY od zstd+prefiks — dekompresja `lz4_flex` w trybie safe na serwerze kosztuje więcej niż zstd, a bajtów jest dwa razy więcej. Drobne poprawki serwera dały razem ok. +2% FPS; jitter sceny 3 nie zmienił się. Wąskie gardło to praca jednego wątku serwera (crc + dekompresja + hashowanie stron + dekodowanie/odtwarzanie) — kierunek: potok (osobny wątek na odczyt, crc, dekompresję) i mniej powtórek stanu.
+
+## Natywna GTX 1080 Ti vs zdalna RTX 3090 Ti przez LAN (TR, DESKTOP) i dysk
+| konfiguracja | Mountain | Syria | Geothermal | Overall |
+|---|---|---|---|---|
+| natywnie GTX 1080 Ti, 1. przebieg (zimny cache shaderów) | 60,15 | 40,71 | 47,38 | 49,91 |
+| natywnie GTX 1080 Ti, 2. przebieg | 59,97 | 59,86 | 60,11 | **59,99** (limit 60 Hz, płynnie) |
+| zdalnie RTX 3090 Ti przez 2,5 GbE (nasz ICD) | 59,4 | 33,7 | 31,0 | 41,8 |
+
+Dysk (Micron 2450 NVMe, `tools/iosample.py`): natywnie 87 MB odczytu / 32 MB zapisu / 89 ms wstrzymań I/O na przebieg (125 s); przez ICD 6 MB / 42 MB / 148 ms (151 s), szczyt zapisu 21 MB/s. Hipoteza „więcej operacji dyskowych" obalona pomiarem; brak swapowania (pswpout 198 stron od startu).
+Natywnie scena 3 jest płynna (60 FPS stałe), zdalnie szarpie (oddanie p95 85–115 ms przy medianie 25–30 ms). Konsultacja DeepSeek (v4-pro): najlepszy testowalny trop = early-return `vkWaitSemaphores` (gra zaczyna klatkę za wcześnie, potem staje na serwerze); test `GPU_ICD_EARLY_WAIT=0`.
