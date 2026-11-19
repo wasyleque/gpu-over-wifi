@@ -36,6 +36,7 @@ const UFFDIO_API: u64 = 0xc018_aa3f;
 const UFFDIO_REGISTER: u64 = 0xc020_aa00;
 const UFFDIO_WRITEPROTECT: u64 = 0xc018_aa06;
 const UFFDIO_CONTINUE: u64 = 0xc020_aa07;
+const UFFDIO_WAKE: u64 = 0x8010_aa02;
 const UFFDIO_REGISTER_MODE_WP: u64 = 2;
 const UFFDIO_REGISTER_MODE_MINOR: u64 = 4;
 const UFFDIO_WRITEPROTECT_MODE_WP: u64 = 1;
@@ -91,6 +92,8 @@ struct UffdioContinue {
 /// Jak często `fetch` nie dostał blokady instancji w limicie czasu (strona oddana bez pobrania).
 pub static FETCH_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 /// Ile błędów stron obsłużono i ile z nich wymagało obiegu po sieci.
+/// Nieudane `UFFDIO_CONTINUE` (wątek aplikacji zostałby uśpiony w jądrze na zawsze): liczba i ostatni kod errno.
+pub static CONTINUE_FAILS: AtomicU64 = AtomicU64::new(0);
 pub static FAULTS: AtomicU64 = AtomicU64::new(0);
 pub static FAULTS_FETCHED: AtomicU64 = AtomicU64::new(0);
 pub static FETCHED_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -289,6 +292,46 @@ fn handler(hub: Arc<Hub>) {
     }
 }
 
+/// `UFFDIO_CONTINUE` z obsługą błędu. Jego porażka (np. brak strony w pamięci podręcznej stron widoku własnego, gdy pobranie się nie udało) zostawiała
+/// wątek aplikacji uśpiony w `handle_userfault` bez końca (zawieszenie Cyberpunka 2026-11-19, stos: redDispatcher8 w jądrze, gpu-icd-lazy w poll).
+/// Po porażce: dotknięcie strony widoku własnego (odczyt+zapis tej samej wartości wprowadza ją do pamięci podręcznej), ponowienie i na końcu
+/// `UFFDIO_WAKE`, żeby wątek chociaż spróbował ponownie. Porażki idą do logu (pierwsze 8).
+fn cont(hub: &Hub, start: usize, len: usize, own: Option<usize>) {
+    let fd = hub.uffd.as_raw_fd();
+    let mut c = UffdioContinue { start: start as u64, len: len as u64, mode: 0, mapped: 0 };
+    // SAFETY: `c` żyje przez czas wywołania; zakres leży w zarejestrowanym odwzorowaniu.
+    if unsafe { ioctl(fd, UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) } >= 0 {
+        return;
+    }
+    let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    if err == 17 {
+        return; // EEXIST: strona już odwzorowana
+    }
+    let n = CONTINUE_FAILS.fetch_add(1, Ordering::Relaxed);
+    if n < 8 {
+        eprintln!("[gpu-icd] UFFDIO_CONTINUE nie powiodło się: adres {start:#x}, długość {len:#x}, errno {err}, odwzorowano {}", c.mapped);
+    }
+    if let Some(o) = own {
+        let mut p = o;
+        while p < o + len {
+            // SAFETY: adres leży w widoku własnym regionu (ten sam offset co w widoku aplikacji); wpisujemy tę samą wartość.
+            unsafe {
+                let b = p as *mut u8;
+                std::ptr::write_volatile(b, std::ptr::read_volatile(b));
+            }
+            p += PAGE;
+        }
+        let mut c2 = UffdioContinue { start: start as u64, len: len as u64, mode: 0, mapped: 0 };
+        // SAFETY: jak wyżej.
+        if unsafe { ioctl(fd, UFFDIO_CONTINUE, &mut c2 as *mut UffdioContinue) } >= 0 {
+            return;
+        }
+    }
+    let mut range = [start as u64, len as u64];
+    // SAFETY: `range` to `struct uffdio_range`.
+    unsafe { ioctl(fd, UFFDIO_WAKE, range.as_mut_ptr()) };
+}
+
 fn serve_fault(hub: &Hub, addr: usize) {
     FAULTS.fetch_add(1, Ordering::Relaxed);
     let page_addr = addr & !(PAGE - 1);
@@ -337,9 +380,7 @@ fn serve_fault(hub: &Hub, addr: usize) {
                     for p in a / PAGE..b.div_ceil(PAGE) {
                         st.present[p / 64] |= 1 << (p % 64);
                     }
-                    let mut c = UffdioContinue { start: (r.app + a) as u64, len: (b - a) as u64, mode: 0, mapped: 0 };
-                    // SAFETY: zakres leży w zarejestrowanym odwzorowaniu regionu; błędy (np. strona już odwzorowana) są nieszkodliwe.
-                    unsafe { ioctl(hub.uffd.as_raw_fd(), UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) };
+                    cont(hub, r.app + a, b - a, Some(r.own + a));
                     if (a..b).contains(&off) {
                         continue_fault_page = false;
                     }
@@ -352,16 +393,12 @@ fn serve_fault(hub: &Hub, addr: usize) {
             let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
             let p = off / PAGE;
             st.present[p / 64] |= 1 << (p % 64);
-            let mut c = UffdioContinue { start: page_addr as u64, len: PAGE as u64, mode: 0, mapped: 0 };
-            // SAFETY: `c` żyje przez czas wywołania; strona leży w zarejestrowanym zakresie.
-            unsafe { ioctl(hub.uffd.as_raw_fd(), UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) };
+            cont(hub, page_addr, PAGE, Some(r.own + off));
         }
         return;
     }
     // Błąd w nieznanym regionie (już wyrejestrowany): zwolnij wątek, odwzorowując stronę.
-    let mut c = UffdioContinue { start: page_addr as u64, len: PAGE as u64, mode: 0, mapped: 0 };
-    // SAFETY: jak wyżej.
-    unsafe { ioctl(hub.uffd.as_raw_fd(), UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) };
+    cont(hub, page_addr, PAGE, None);
 }
 
 #[cfg(test)]
