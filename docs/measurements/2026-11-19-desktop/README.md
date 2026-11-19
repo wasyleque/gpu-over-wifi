@@ -42,3 +42,15 @@ Nowe statystyki: `odstępy wyświetlenia` i `odstępy oddania` (co 5 s, p50/p95/
 - Obiegi wg poleceń (scena 3, 3 okna ≈15 s): **GetDescriptorEXT 184× = 2973 ms (16 ms/pytanie)**, WaitSemaphores 20× = 1149 ms (57 ms), GetDescriptorSetLayoutSizeEXT 22× = 343 ms. W scenach lekkich: GetDescriptorEXT ≈0,7 ms/pytanie.
 - Wniosek (częściowo zmierzony, częściowo hipoteza): pytanie o deskryptor wraca po 16 ms, bo serwer obsługuje żądania po kolei i odpowiada dopiero po zakończeniu wcześniejszej partii (hipoteza: kolejka za pracą GPU); wątek gry czeka na każde nowe, niewidziane wcześniej, widoki obrazów.
 Kandydaci: **G1** spekulacyjny deskryptor wysyłany w tej samej partii zaraz po utworzeniu widoku obrazu (odpowiedź trafia do cache zanim gra zapyta; gra nie czeka); **P2** tańszy skan (8–9 ms/klatkę w scenie 3); **G2** bufor wyrównujący odstępy wyświetlania po stronie klienta (kosztuje opóźnienie, wygładza tylko wyświetlanie, nie wytwarzanie).
+
+## Pętla optymalizacji serwera (TR, DESKTOP 2,5 GbE) — pomiary 2026-11-19
+Profil perf wątku obsługi `gpu-renderd` w scenie 3 (liczniki GPU_RENDERD_STATS: na klatkę zapisy pamięci 6,7 ms, polecenia 6,5 ms (dekodowanie 49 s z 140 s), zapytania 2,3 ms; 40 mln razy CmdSetDescriptorBufferOffsets2EXT, 14,8 mln CmdBindPipeline na 24,6 mln rysowań; GPU SM 4–14%, wątek obsługi 42→77% jednego rdzenia).
+
+| konfiguracja | Overall | oddanie p95 sc.3 | uwagi |
+|---|---|---|---|
+| G1 (spekulacyjne deskryptory) | 40,94 | 72–112 ms | 11 816 zapytań w cache; zapytań do serwera nadal ok. 1000/15 s |
+| + serwer bez getenv/format!/SipHash | 41,68 | 85–113 ms | |
+| + pomiary czasu tylko z STATS (`[vdso]` 8% → 0) | 41,93 | 85–115 ms | profil: crc32c 10,2%, zstd 12,5%, page_hash 8,5% |
+| kodowanie LZ4 (`GPU_ICD_MEM_LZ4=1`) | **38,15** | 107–149 ms | na łączu 22,7 GB (×2,1); lz4_flex::decompress_safe = **24,3%** wątku (zstd 12,5%) |
+
+Wniosek: na desktopie z szybkim łączem LZ4 jest GORSZY od zstd+prefiks — dekompresja `lz4_flex` w trybie safe na serwerze kosztuje więcej niż zstd, a bajtów jest dwa razy więcej. Drobne poprawki serwera dały razem ok. +2% FPS; jitter sceny 3 nie zmienił się. Wąskie gardło to praca jednego wątku serwera (crc + dekompresja + hashowanie stron + dekodowanie/odtwarzanie) — kierunek: potok (osobny wątek na odczyt, crc, dekompresję) i mniej powtórek stanu.
