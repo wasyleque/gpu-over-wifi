@@ -167,6 +167,8 @@ impl Stats {
 /// Flagi diagnostyczne czytane RAZ (zmienne środowiskowe nie zmieniają się w trakcie procesu, a odczyt przy każdym poleceniu
 /// kosztował zauważalnie przy setkach tysięcy poleceń na sekundę).
 pub struct Flags {
+    /// G1: spekulacyjny `vkGetDescriptorEXT` zaraz po `vkCreateImageView` (`GPU_ICD_DESC_PREFETCH=1`).
+    pub desc_prefetch: bool,
     pub debug: bool,
     pub trace: bool,
     pub periodic: bool,
@@ -200,6 +202,7 @@ pub struct Flags {
 pub fn flags() -> &'static Flags {
     static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
     F.get_or_init(|| Flags {
+        desc_prefetch: std::env::var_os("GPU_ICD_DESC_PREFETCH").is_some(),
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),
@@ -1915,6 +1918,10 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        if flags().desc_prefetch {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!("[gpu-icd] spekulacyjne deskryptory obrazów (G1): wysłano {}, wpisano do cache {}, pominięto (limit w locie) {}", PREFETCH_SENT.load(Relaxed), PREFETCH_DONE.load(Relaxed), PREFETCH_SKIPPED.load(Relaxed));
+        }
         let (n, q, r) = crate::link::wait_split();
         eprintln!("[gpu-icd] odświeżenia pamięci wg pamięci (GPU zapisało): {}", refresh_by_mem_report());
         eprintln!("[gpu-icd] czas CPU wątków procesu (s, wg nazwy): {}", thread_cpu_report());
@@ -2199,6 +2206,92 @@ pub(crate) unsafe fn exec(st: &mut InstState, op: u16, slots: &mut [u64]) -> u64
     exec_with(st, op, slots, false)
 }
 
+/// G1: ile spekulacyjnych zapytań o deskryptory wysłano, ile odpowiedzi wpisano do cache, ile pominięto (limit w locie).
+pub static PREFETCH_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PREFETCH_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PREFETCH_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const PREFETCH_MAX_INFLIGHT: usize = 256;
+/// Bilet zapytania -> (klucz cache, rozmiar deskryptora): odpowiedź odbiera dowolny czekający wątek (`link::finish_deferred`).
+static PREFETCH: std::sync::Mutex<Option<HashMap<u64, (Vec<u8>, usize)>>> = std::sync::Mutex::new(None);
+
+/// G1: po utworzeniu widoku obrazu dosyła do serwera `vkGetDescriptorEXT` dla każdego znanego kształtu zapytania (typ, układ) bez czekania na
+/// odpowiedź. Serwer wykona je w kolejności strumienia (po utworzeniu widoku), a odpowiedź ląduje w cache deskryptorów, zanim gra o nią zapyta:
+/// zapytanie gry staje się trafieniem w cache zamiast obiegu po sieci (16 ms w scenie 3 Tomb Raidera).
+///
+/// # Safety
+/// `dev` to uchwyt urządzenia z wywołania aplikacji; `view` to identyfikator właśnie nadany widokowi.
+unsafe fn prefetch_view_descriptors(st: &mut InstState, dev: u64, view: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let op = descriptor_op();
+    if COMMANDS.get(op as usize).is_none() {
+        return;
+    }
+    for (ty, size, sampler, layout) in st.desc_shapes.clone() {
+        if size == 0 || size > DESC_CACHE_MAX_BYTES {
+            continue;
+        }
+        if PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| m.len() >= PREFETCH_MAX_INFLIGHT) {
+            PREFETCH_SKIPPED.fetch_add(1, Relaxed);
+            return;
+        }
+        // VkDescriptorImageInfo {sampler, imageView, imageLayout}; VkDescriptorGetInfoEXT {sType, pNext, type, data.pSampledImage/pStorageImage}.
+        let mut img = [0u8; 24];
+        img[0..8].copy_from_slice(&sampler.to_le_bytes());
+        img[8..16].copy_from_slice(&view.to_le_bytes());
+        img[16..20].copy_from_slice(&layout.to_le_bytes());
+        let mut info = [0u8; 32];
+        info[0..4].copy_from_slice(&1_000_316_005u32.to_le_bytes());
+        info[16..20].copy_from_slice(&ty.to_le_bytes());
+        info[24..32].copy_from_slice(&(img.as_ptr() as u64).to_le_bytes());
+        let mut out = vec![0u8; size as usize];
+        let slots: [u64; 4] = [dev, info.as_ptr() as u64, size, out.as_mut_ptr() as u64];
+        let mut e = Encoder::new();
+        if encode_command(op, slots.as_ptr() as *const u8, &mut e, &IcdCtx).is_err() {
+            return;
+        }
+        let key = e.finish();
+        if DESC_CACHE.read().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| m.contains_key(&key)) {
+            continue;
+        }
+        if st.scan_pending {
+            st.settle_memory();
+        }
+        let mut reqs: Vec<Request> = Vec::with_capacity(3);
+        if !st.batch.is_empty() {
+            let data = std::mem::take(&mut st.batch);
+            st.stats.cmd_bytes += data.len() as u64;
+            st.stats.cmd_batches += 1;
+            reqs.push(Request::Cmds { data });
+        }
+        reqs.push(Request::Query { data: key.clone() });
+        reqs.push(Request::Sync);
+        let Ok(base) = st.client.send_many(&reqs) else { return };
+        let ticket = base;
+        PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ticket, (key, size as usize));
+        st.client.shared().defer(ticket);
+        PREFETCH_SENT.fetch_add(1, Relaxed);
+    }
+}
+
+/// Odpowiedź na spekulacyjne zapytanie (bilet `ticket`): wpisuje deskryptor do cache. Wołane z `link::finish_deferred` przez wątek, który odbiera odroczone odpowiedzi.
+pub(crate) fn prefetch_reply(ticket: u64, r: &Result<Response, gpu_renderd::client::ClientError>) {
+    let Some((key, size)) = PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(&ticket)) else { return };
+    let Ok(Response::Data(d)) = r else { return };
+    let result = d.get(..4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(-1);
+    if result < 0 {
+        return;
+    }
+    let Some(cmd) = COMMANDS.get(descriptor_op() as usize) else { return };
+    let mut out = vec![0u8; size];
+    let slots: [u64; 4] = [0, 0, size as u64, out.as_mut_ptr() as u64];
+    let mut dec = Decoder::new(d.get(4..).unwrap_or(&[]));
+    // SAFETY: `slots` opisuje bufor `out` o rozmiarze `size`, jak w zwykłej odpowiedzi na to polecenie.
+    if unsafe { decode_out_params(cmd, slots.as_ptr() as *const u8, &mut dec) }.is_ok() {
+        desc_cache_store(key, out);
+        PREFETCH_DONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Jak `exec`; `force_async` wymusza drogę partii (bez odpowiedzi) także dla poleceń z oczekiwaniem (np. `vkWaitForFences`),
 /// gdy wynik nie jest potrzebny, a serwer ma je tylko wykonać w kolejności.
 ///
@@ -2326,6 +2419,17 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         // VkDescriptorGetInfoEXT: `type` pod offsetem 16.
         let ty = if slots[1] != 0 { std::ptr::read_unaligned((slots[1] as *const u8).add(16) as *const u32) } else { u32::MAX };
         st.stats.desc_miss_by_type[(ty as usize).min(11)] += 1;
+        // G1: kształt zapytania o deskryptor obrazu (typ, rozmiar, sampler, układ), z którego później budujemy zapytania spekulacyjne.
+        if (ty == 2 || ty == 3) && slots[1] != 0 {
+            let p = std::ptr::read_unaligned((slots[1] as *const u8).add(24) as *const u64) as *const u8;
+            if !p.is_null() {
+                let (sampler, layout) = (std::ptr::read_unaligned(p as *const u64), std::ptr::read_unaligned(p.add(16) as *const u32));
+                let shape = (ty, slots[2], sampler, layout);
+                if sampler == 0 && st.desc_shapes.len() < 8 && !st.desc_shapes.contains(&shape) {
+                    st.desc_shapes.push(shape);
+                }
+            }
+        }
         // Które formaty tekseli i jakie wejścia zostają na serwerze mimo syntezy (do wyboru, co dopisać do tabeli).
         if ty == crate::descsynth::UNIFORM_TEXEL_BUFFER || ty == crate::descsynth::STORAGE_TEXEL_BUFFER {
             if let Some((addr, range, format)) = crate::descsynth::texel_input_of(slots[1] as *const u8) {
@@ -2446,6 +2550,10 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         st.batch.extend(bytes);
         if st.batch.len() > BATCH_FLUSH {
             st.flush();
+        }
+        if cmd.name == "vkCreateImageView" && flags().desc_prefetch && slots.len() >= 4 && slots[3] != 0 {
+            let view = std::ptr::read_unaligned(slots[3] as *const u64);
+            prefetch_view_descriptors(st, slots[0], view);
         }
         return Step::Done(0);
     }

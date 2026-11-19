@@ -57,8 +57,11 @@ impl Shared {
     }
 
     /// Obrabia odroczoną odpowiedź: kod wyniku różny od 0 albo błąd serwera zostaje zapamiętany w `DEFERRED_FAIL` (zgłoszony przy następnym wywołaniu).
-    fn finish_deferred(kind: u8, r: &Result<Response, ClientError>) {
+    fn finish_deferred(kind: u8, ticket: u64, r: &Result<Response, ClientError>) {
         use std::sync::atomic::Ordering::Relaxed;
+        if kind == 0 {
+            crate::fwd::prefetch_reply(ticket, r);
+        }
         DEFERRED_DONE.fetch_add(1, Relaxed);
         let code = match r {
             Ok(Response::Data(d)) if kind == 0 => d.get(..4).map_or(0, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])),
@@ -90,7 +93,7 @@ impl Shared {
                     t.draining = true;
                     drop(t);
                     let r = self.read_one();
-                    Self::finish_deferred(kind, &r);
+                    Self::finish_deferred(kind, served, &r);
                     let mut t = self.turn.lock().unwrap_or_else(|e| e.into_inner());
                     t.deferred.retain(|d| d.0 != served);
                     t.served += 1;

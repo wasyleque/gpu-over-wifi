@@ -103,6 +103,8 @@ struct InstState {
     gpuw: gpuwrite::GpuWrites,
     /// Lokalne wyliczanie deskryptorów buforów (uczy się i weryfikuje na odpowiedziach serwera; patrz `descsynth`).
     synth: descsynth::Synth,
+    /// G1: kształty zapytań o deskryptory obrazów (typ, rozmiar, sampler, układ) widziane w chybieniach.
+    desc_shapes: Vec<(u32, u64, u64, u32)>,
     /// Deskryptory buforów tekseli liczone lokalnie per format (patrz `descsynth`).
     texel: descsynth::TexelSynth,
     /// Pamięci, dla których plan odświeżania został już zapisany w logu (jednorazowo, przy `GPU_ICD_STATS=periodic`).
@@ -389,6 +391,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             mem_upload: Default::default(),
             gpuw: Default::default(),
             synth: Default::default(),
+            desc_shapes: Vec::new(),
             texel: Default::default(),
             plans_logged: Default::default(),
             gpu_dirty: false,
