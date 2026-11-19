@@ -23,6 +23,9 @@ struct State {
     /// Kolejne przekroczenia czasu oczekiwania: gdy klatki w ogóle nie są wyświetlane (brak wideo), hamowanie się wyłącza.
     timeouts_in_row: u32,
     throttle_off: bool,
+    /// Odstępy między kolejnymi wyświetleniami (µs) w bieżącym oknie raportu i moment poprzedniego wyświetlenia: równomierność klatek (płynność).
+    last_shown: Option<Instant>,
+    ivals: Vec<u32>,
 }
 
 static S: Mutex<Option<State>> = Mutex::new(None);
@@ -46,6 +49,12 @@ pub fn sent(seq: u32) {
 /// Klatka `seq` została wyświetlona; klatki starsze, które nigdy nie dotarły, są pomijane.
 pub fn shown(seq: u32) {
     with(|s| {
+        let now = Instant::now();
+        if let Some(p) = s.last_shown.replace(now) {
+            if s.ivals.len() < 4096 {
+                s.ivals.push(now.duration_since(p).as_micros().min(u32::MAX as u128) as u32);
+            }
+        }
         while let Some(&(q, _)) = s.pending.front() {
             if q.wrapping_sub(seq) as i32 >= 0 {
                 break; // q >= seq (z obsługą zawinięcia numeru)
@@ -123,9 +132,18 @@ pub fn report_and_reset() -> Option<String> {
             pct(s.hist[4]),
             pct(s.hist[5])
         );
+        if !s.ivals.is_empty() {
+            let mut v = std::mem::take(&mut s.ivals);
+            v.sort_unstable();
+            let q = |p: usize| v[(v.len() * p / 100).min(v.len() - 1)] as f64 / 1000.0;
+            let med = q(50);
+            let over2 = v.iter().filter(|&&x| x as f64 / 1000.0 > 2.0 * med).count();
+            let over100 = v.iter().filter(|&&x| x > 100_000).count();
+            out.push_str(&format!("; odstępy wyświetlenia: p50 {:.1} ms, p95 {:.1}, p99 {:.1}, maks {:.1}; ponad 2×p50: {}, ponad 100 ms: {} z {}", med, q(95), q(99), *v.last().unwrap() as f64 / 1000.0, over2, over100, v.len()));
+        }
         out.push_str(&format!("; hamowanie gry: {} razy, łącznie {:.0} ms", s.waits, s.waited_us as f64 / 1000.0));
         let pending = std::mem::take(&mut s.pending);
-        *s = State { pending, timeouts_in_row: s.timeouts_in_row, throttle_off: s.throttle_off, ..State::default() };
+        *s = State { pending, timeouts_in_row: s.timeouts_in_row, throttle_off: s.throttle_off, last_shown: s.last_shown, ..State::default() };
         Some(out)
     })
 }
