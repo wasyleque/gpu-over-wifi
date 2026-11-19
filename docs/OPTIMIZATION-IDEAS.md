@@ -97,3 +97,6 @@ Nic nie jest tu odrzucone; każdy pomysł ma plan pomiaru albo uwagę, czego bra
 
 - 2026-11-18, minipc N6000: LZ4 zamiast zstd = +6 FPS w Tomb Raiderze (14-17,5 -> ~20 FPS); surowe zapisy przy pustej kolejce = brak zysku (ponad łącze w ciężkich scenach).
   Szczegóły: `docs/measurements/2026-11-05-rottr/README.md`, Runs 35-41.
+
+- **G1 — spekulacyjny `vkGetDescriptorEXT` po utworzeniu widoku obrazu** (2026-11-19, Claude) · Dane: TR scena 3, 184 pytań o deskryptory po 16 ms = 3 s na 15 s; Cyberpunk 17,7 tys. pytań typu SAMPLED_IMAGE po ok. 370 µs. Hipoteza: dosłanie żądania w tej samej partii co `vkCreateImageView` (odpowiedź do cache) usuwa czekanie wątku gry. · Status: do wdrożenia i zmierzenia (liczba chybień, odstępy oddania p95 w scenie 3).
+- **G2 — bufor wyrównujący wyświetlanie klatek** (2026-11-19, Claude) · Wygładza odstępy wyświetlenia kosztem ok. 1 klatki opóźnienia; nie usuwa nierówności wytwarzania. · Status: do zmierzenia po G1.

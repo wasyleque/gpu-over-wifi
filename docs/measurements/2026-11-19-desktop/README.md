@@ -33,3 +33,12 @@ Nie wiadomo jeszcze, czy to samo powodowało zawieszenie na minipc (N6000) 2026-
 Biblioteka 9540ca42, przebieg 2026-11-19 22:1x: **9,54 FPS średnio** (min 6,08, max 13,14), 972 klatki w 101,9 s, 1080p, preset Niska, FSR auto, okno bez ramki. Wcześniej (2026-11-18) ten sam test zatrzymywał się w ładowaniu 3 razy na 3 (watchdog gry po 120 s).
 W logu 8 porażek `UFFDIO_CONTINUE`: **errno 11 (EAGAIN) po częściowym odwzorowaniu** (np. 4096 lub 28672 z 65536 B). Poprzedni kod ignorował wynik, więc strona błędu zostawała bez wybudzenia i wątek gry stał w `handle_userfault`: **to była przyczyna zawieszenia Cyberpunka na obu klientach, a hipoteza „klient za słaby" była błędna**.
 W przebiegu: `PAGEMAP_SCAN` 825 543 wywołań po 125 µs = 103 s, na łączu 3,2 GB. Rise of the Tomb Raider też korzysta z leniwych odwzorowań, więc ten sam błąd mógł być jednorazowym źródłem rzadkich zacięć także tam.
+
+## Płynność (jitter) w Tomb Raiderze, DESKTOP 2,5 GbE, ICD c90a37e7 — Overall 40,94
+Nowe statystyki: `odstępy wyświetlenia` i `odstępy oddania` (co 5 s, p50/p95/p99/maks).
+- Sceny lekkie: oddanie i wyświetlenie p50 16,7 ms, p95 ≈17 ms (równo, limit 60 FPS).
+- **Scena 3 (ciężka)**: oddanie p50 25–32 ms, p95 90–111 ms, p99 110–145 ms; wyświetlenie p50 30–40, p95 54–70, p99 ≈90. Czyli **nierówno wytwarza klatki sama gra** (jej wątek staje na naszych obiegach), a kolejka klatek wygładza to tylko częściowo. Hamowanie gry (limit klatek w locie) w tych oknach ≈0, więc `GPU_ICD_MAX_INFLIGHT` nie jest przyczyną.
+- Na klatkę w scenie 3: oczekiwanie na odpowiedzi serwera 9–15 ms, skan pamięci 8–9 ms, 8–10 obiegów (w scenach lekkich: 0,6–3 ms oczekiwania, 1,4–2 ms skanu).
+- Obiegi wg poleceń (scena 3, 3 okna ≈15 s): **GetDescriptorEXT 184× = 2973 ms (16 ms/pytanie)**, WaitSemaphores 20× = 1149 ms (57 ms), GetDescriptorSetLayoutSizeEXT 22× = 343 ms. W scenach lekkich: GetDescriptorEXT ≈0,7 ms/pytanie.
+- Wniosek (częściowo zmierzony, częściowo hipoteza): pytanie o deskryptor wraca po 16 ms, bo serwer obsługuje żądania po kolei i odpowiada dopiero po zakończeniu wcześniejszej partii (hipoteza: kolejka za pracą GPU); wątek gry czeka na każde nowe, niewidziane wcześniej, widoki obrazów.
+Kandydaci: **G1** spekulacyjny deskryptor wysyłany w tej samej partii zaraz po utworzeniu widoku obrazu (odpowiedź trafia do cache zanim gra zapyta; gra nie czeka); **P2** tańszy skan (8–9 ms/klatkę w scenie 3); **G2** bufor wyrównujący odstępy wyświetlania po stronie klienta (kosztuje opóźnienie, wygładza tylko wyświetlanie, nie wytwarzanie).
