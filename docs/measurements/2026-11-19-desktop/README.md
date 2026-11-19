@@ -69,3 +69,7 @@ Natywnie scena 3 jest płynna (60 FPS stałe), zdalnie szarpie (oddanie p95 85�
 Natywnie (1080 Ti, 11 GB): **85,92 FPS** średnio (min 64,76, max 110,61), 5521 klatek w 64,26 s, płynnie.
 Zdalnie (RTX 3090 Ti przez 2,5 GbE, ICD 9540ca42): 12,54 FPS (min 8,15, max 18,04), 1001 klatek w 79,8 s. Różnica ok. 7×, czyli Cyberpunk (vkd3d-proton, D3D12) jest dla zdalnego potoku o wiele trudniejszy niż Tomb Raider (natywnie 60 vs zdalnie 42 w DXVK).
 Limit klatek `GPU_ICD_PACE_FPS=30` w Tomb Raiderze: Overall 28,74, p95 oddania 34–42 ms przy medianie 33 ms (bez limitu 85–115 przy 25–30), płynność oceniona jako akceptowalna.
+
+## Wpływ debugów na benchmark (Cyberpunk, DESKTOP, ICD 3aa716d2)
+Cztery przebiegi tej samej konfiguracji: 13,53 / 13,00 / 13,85 FPS ze `GPU_ICD_STATS=periodic`, `GPU_ICD_LOG` i `GPU_ICD_PTRACE`; **13,76 FPS bez nich** (zostało tylko `GPU_ICD_DESC_PREFETCH`). Rozrzut ±0,4 FPS: wpływ debugów sterowanych zmiennymi nie jest mierzalny. Nie zmierzono jeszcze kosztu liczników wbudowanych na stałe (zegary w ścieżkach polecenia, blokad, skanu): kandydat na osobny pomiar przez flagę kompilacji.
+G1 (spekulacyjne deskryptory obrazów) w Cyberpunku: 92 874 zapytań w cache, ale 31 016 z 31 653 chybień typu 2/3 to „ten sam kształt": gra pyta o deskryptor zaraz po utworzeniu widoku, odpowiedź nie zdąży wrócić.
