@@ -64,3 +64,8 @@ Wniosek: na desktopie z szybkim łączem LZ4 jest GORSZY od zstd+prefiks — dek
 
 Dysk (Micron 2450 NVMe, `tools/iosample.py`): natywnie 87 MB odczytu / 32 MB zapisu / 89 ms wstrzymań I/O na przebieg (125 s); przez ICD 6 MB / 42 MB / 148 ms (151 s), szczyt zapisu 21 MB/s. Hipoteza „więcej operacji dyskowych" obalona pomiarem; brak swapowania (pswpout 198 stron od startu).
 Natywnie scena 3 jest płynna (60 FPS stałe), zdalnie szarpie (oddanie p95 85–115 ms przy medianie 25–30 ms). Konsultacja DeepSeek (v4-pro): najlepszy testowalny trop = early-return `vkWaitSemaphores` (gra zaczyna klatkę za wcześnie, potem staje na serwerze); test `GPU_ICD_EARLY_WAIT=0`.
+
+## Cyberpunk 2077: natywnie GTX 1080 Ti vs zdalnie (DESKTOP, 1080p, Niska, FSR auto, bez RT)
+Natywnie (1080 Ti, 11 GB): **85,92 FPS** średnio (min 64,76, max 110,61), 5521 klatek w 64,26 s, płynnie.
+Zdalnie (RTX 3090 Ti przez 2,5 GbE, ICD 9540ca42): 12,54 FPS (min 8,15, max 18,04), 1001 klatek w 79,8 s. Różnica ok. 7×, czyli Cyberpunk (vkd3d-proton, D3D12) jest dla zdalnego potoku o wiele trudniejszy niż Tomb Raider (natywnie 60 vs zdalnie 42 w DXVK).
+Limit klatek `GPU_ICD_PACE_FPS=30` w Tomb Raiderze: Overall 28,74, p95 oddania 34–42 ms przy medianie 33 ms (bez limitu 85–115 przy 25–30), płynność oceniona jako akceptowalna.
