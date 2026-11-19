@@ -1,0 +1,897 @@
+pid 110873, log nieaktywny 26s
+110873 GameThread S handle_userfault
+110903 redIOWorker0 S futex_wait_multiple
+110904 redDispatcher1 S futex_wait_multiple
+110905 redDispatcher2 S futex_wait_multiple
+110906 redDispatcher3 S futex_wait_multiple
+110907 redDispatcher4 S futex_wait_multiple
+110908 redDispatcher5 S futex_wait_multiple
+110909 redDispatcher6 S futex_wait_multiple
+110910 redDispatcher7 S futex_wait_multiple
+110911 redDispatcher8 S futex_wait_multiple
+110912 redDispatcher9 S futex_wait_multiple
+110913 redDispatcher10 S futex_wait_multiple
+110914 redDispatcher11 S futex_wait_multiple
+110917 WatchdogThread S poll_schedule_timeout.constprop.0
+110918 GameServicesWin S __futex_wait
+110919 GameThread S __futex_wait
+110921 GameThread S __futex_wait
+110922 GameThread S __futex_wait
+110923 GameThread S __futex_wait
+110924 GameThread S __futex_wait
+110925 GameThread S __futex_wait
+110926 GameThread S __futex_wait
+110927 GameThread S __futex_wait
+110928 GameThread S __futex_wait
+110929 GameThread S __futex_wait
+110930 GameThread S __futex_wait
+110931 GameThread S __futex_wait
+110932 GameThread S __futex_wait
+110933 GameThread S __futex_wait
+110934 GameThread S __futex_wait
+110935 GameThread S __futex_wait
+110937 GameThread S __futex_wait
+110939 wine_threadpool S futex_wait_multiple
+110940 GameModWorker S __futex_wait
+110942 GameThread S __futex_wait
+110946 gpu-icd-lazy S poll_schedule_timeout.constprop.0
+110947 gpu-icd-watchdo S hrtimer_nanosleep
+110948 gpu-icd-send S __futex_wait
+110949 gpu-icd-frame0 S __futex_wait
+110950 gpu-icd-frame1 S __futex_wait
+110952 RawTcpNetworkTh S poll_schedule_timeout.constprop.0
+110953 PacketNetworkMa S futex_wait_multiple
+110954 GameThread S poll_schedule_timeout.constprop.0
+110955 gpu-icd-send S __futex_wait
+110956 gpu-icd-frame0 S __futex_wait
+110957 gpu-icd-frame1 S __futex_wait
+110969 sl.log S __futex_wait
+110975 gpu-icd-send S __futex_wait
+110976 gpu-icd-frame0 S __futex_wait
+110977 gpu-icd-frame1 S __futex_wait
+110978 GameThread S __futex_wait
+110979 vkd3d-disk$ S __futex_wait
+110980 vkd3d_fence S __futex_wait
+110981 vkd3d_queue S __futex_wait
+110982 vkd3d_fence S __futex_wait
+110983 vkd3d_queue S __futex_wait
+110984 vkd3d_fence S __futex_wait
+110985 vkd3d_queue S __futex_wait
+110986 GameThread S futex_wait_multiple
+110987 vkd3d_fence S __futex_wait
+110988 vkd3d_queue S __futex_wait
+110989 wine_threadpool S __futex_wait
+110992 GameThread S futex_wait_multiple
+110993 GameThread S futex_wait_multiple
+110994 GameThread S futex_wait_multiple
+110995 GameThread S futex_wait_multiple
+110996 GameThread S futex_wait_multiple
+110999 wine_mmdevapi_n S futex_wait_multiple
+111000 module-rt S ep_poll
+111001 winepipewire S ep_poll
+111002 redDispatcher1 S poll_schedule_timeout.constprop.0
+111003 GameThread S poll_schedule_timeout.constprop.0
+111004 GameThread S futex_wait_multiple
+111005 wine_xinput_hid S futex_wait_multiple
+111006 wine_sechost_de S futex_wait_multiple
+111007 GamepadObserver S poll_schedule_timeout.constprop.0
+111017 BinkAsy4 S __futex_wait
+111018 BinkAsy5 S __futex_wait
+111019 vkd3d-swapchain S __futex_wait
+111020 Bink IO IO) __futex_wait
+111022 gpu-icd-video S wait_woken
+111023 cuda00061400186 S poll_schedule_timeout.constprop.0
+111026 cuda-EvtHandlr S poll_schedule_timeout.constprop.0
+111027 gpu-icd-video S __futex_wait
+111028 gpu-icd-video S __futex_wait
+111029 gpu-icd-video S __futex_wait
+111039 gpu-icd-video S __futex_wait
+111040 [vkcf] Analysis Analysis) __futex_wait
+111042 [vkrt] Analysis Analysis) __futex_wait
+111043 [vkps] Update Update) __futex_wait
+111045 gpu-icd-video S __futex_wait
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/libthread_db.so.1".
+[Switching to thread 1 (Thread 0x7f0d28443740 (LWP 110873))]
+0x0000000141969f79 in cpLauncher!?GetPos@WriteBytesBuffer@AK@@QEBAHXZ () from target:/home/wasyll/Games/Heroic/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe
+
+Thread 91 (Thread 0x10020f6c0 (LWP 110903) "redIOWorker0"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 90 (Thread 0x10030f6c0 (LWP 110904) "redDispatcher1"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 89 (Thread 0x10040f6c0 (LWP 110905) "redDispatcher2"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 88 (Thread 0x10050f6c0 (LWP 110906) "redDispatcher3"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 87 (Thread 0x10060f6c0 (LWP 110907) "redDispatcher4"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 86 (Thread 0x10070f6c0 (LWP 110908) "redDispatcher5"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 85 (Thread 0x10080f6c0 (LWP 110909) "redDispatcher6"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 84 (Thread 0x10090f6c0 (LWP 110910) "redDispatcher7"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 83 (Thread 0x100a0f6c0 (LWP 110911) "redDispatcher8"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 82 (Thread 0x100b0f6c0 (LWP 110912) "redDispatcher9"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 81 (Thread 0x100c0f6c0 (LWP 110913) "redDispatcher10"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 80 (Thread 0x100d0f6c0 (LWP 110914) "redDispatcher11"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 79 (Thread 0x100e0f6c0 (LWP 110917) "WatchdogThread"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2831de93 in select () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28164c01 in NtDelayExecution () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 78 (Thread 0x100f0f6c0 (LWP 110918) "GameServicesWin"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 77 (Thread 0x10100f6c0 (LWP 110919) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 76 (Thread 0x10120f6c0 (LWP 110921) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169bd3 in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 75 (Thread 0x10130f6c0 (LWP 110922) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 74 (Thread 0x10140f6c0 (LWP 110923) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 73 (Thread 0x10150f6c0 (LWP 110924) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 72 (Thread 0x10160f6c0 (LWP 110925) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 71 (Thread 0x10170f6c0 (LWP 110926) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 70 (Thread 0x10180f6c0 (LWP 110927) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 69 (Thread 0x10190f6c0 (LWP 110928) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 68 (Thread 0x101a0f6c0 (LWP 110929) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 67 (Thread 0x101b0f6c0 (LWP 110930) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 66 (Thread 0x101c0f6c0 (LWP 110931) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169bd3 in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 65 (Thread 0x101d0f6c0 (LWP 110932) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 64 (Thread 0x101e0f6c0 (LWP 110933) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 63 (Thread 0x101f0f6c0 (LWP 110934) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 62 (Thread 0x10200f6c0 (LWP 110935) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 61 (Thread 0x10110f6c0 (LWP 110937) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 60 (Thread 0x10230f6c0 (LWP 110939) "wine_threadpool"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163614 in NtWaitForMultipleObjects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 59 (Thread 0x10240f6c0 (LWP 110940) "GameModWorker"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 58 (Thread 0x10250f6c0 (LWP 110942) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 57 (Thread 0x7f0d0b7fe6c0 (LWP 110946) "gpu-icd-lazy"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d283112e5 in poll () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d17c0d41c in gpu_icd::lazymap::handler () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17bdd76e in std::sys::backtrace::__rust_begin_short_backtrace::<gpu_icd::lazymap::hub::{closure#0}::{closure#0}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17be2f95 in <std::thread::lifecycle::spawn_unchecked<gpu_icd::lazymap::hub::{closure#0}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#6  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#7  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 56 (Thread 0x7f0d0b5fd6c0 (LWP 110947) "gpu-icd-watchdo"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d282e4aad in clock_nanosleep () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d17ce9767 in std::thread::functions::sleep () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17bddfa4 in std::sys::backtrace::__rust_begin_short_backtrace::<gpu_icd::watchdog::start::{closure#0}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17be368f in <std::thread::lifecycle::spawn_unchecked<gpu_icd::watchdog::start::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#6  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#7  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 55 (Thread 0x7f0d0b3fc6c0 (LWP 110948) "gpu-icd-send"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdd888 in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#0}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be33cf in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 54 (Thread 0x7f0d0b1fb6c0 (LWP 110949) "gpu-icd-frame0"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdddce in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#2}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be3545 in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#2}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 53 (Thread 0x7f0d0affa6c0 (LWP 110950) "gpu-icd-frame1"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdddce in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#2}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be3545 in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#2}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 52 (Thread 0x10270f6c0 (LWP 110952) "RawTcpNetworkTh"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2831de93 in select () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28164c01 in NtDelayExecution () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 51 (Thread 0x10280f6c0 (LWP 110953) "PacketNetworkMa"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 50 (Thread 0x10291f6c0 (LWP 110954) "GameThread"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2831de93 in select () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28164c01 in NtDelayExecution () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 49 (Thread 0x7f0d035ff6c0 (LWP 110955) "gpu-icd-send"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdd888 in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#0}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be33cf in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 48 (Thread 0x7f0d0b9ff6c0 (LWP 110956) "gpu-icd-frame0"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdddce in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#2}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be3545 in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#2}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 47 (Thread 0x7f0d142156c0 (LWP 110957) "gpu-icd-frame1"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdddce in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#2}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be3545 in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#2}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 46 (Thread 0x10210f6c0 (LWP 110969) "sl.log"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 45 (Thread 0x7f0d0a9f76c0 (LWP 110975) "gpu-icd-send"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdd888 in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#0}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be33cf in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 44 (Thread 0x7f0d0abf86c0 (LWP 110976) "gpu-icd-frame0"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdddce in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#2}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be3545 in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#2}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 43 (Thread 0x7f0d0adf96c0 (LWP 110977) "gpu-icd-frame1"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d17cd4a15 in <std::sys::sync::condvar::futex::Condvar>::wait () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#2  0x00007f0d17bdddce in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::link::Link>::from_client::{closure#2}, ()> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17be3545 in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::link::Link>::from_client::{closure#2}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 42 (Thread 0x10260f6c0 (LWP 110978) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 41 (Thread 0x102b1f6c0 (LWP 110979) "vkd3d-disk$"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169bd3 in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 40 (Thread 0x102c1f6c0 (LWP 110980) "vkd3d_fence"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 39 (Thread 0x102d1f6c0 (LWP 110981) "vkd3d_queue"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 38 (Thread 0x102e1f6c0 (LWP 110982) "vkd3d_fence"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 37 (Thread 0x102f1f6c0 (LWP 110983) "vkd3d_queue"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 36 (Thread 0x10301f6c0 (LWP 110984) "vkd3d_fence"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 35 (Thread 0x10311f6c0 (LWP 110985) "vkd3d_queue"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 34 (Thread 0x10321f6c0 (LWP 110986) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28129dbc in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 33 (Thread 0x10331f6c0 (LWP 110987) "vkd3d_fence"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 32 (Thread 0x10341f6c0 (LWP 110988) "vkd3d_queue"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 31 (Thread 0x10351f6c0 (LWP 110989) "wine_threadpool"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169bd3 in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 30 (Thread 0x102a1f6c0 (LWP 110992) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163614 in NtWaitForMultipleObjects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 29 (Thread 0x10371f6c0 (LWP 110993) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163614 in NtWaitForMultipleObjects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 28 (Thread 0x10381f6c0 (LWP 110994) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 27 (Thread 0x103b1f6c0 (LWP 110995) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 26 (Thread 0x103e1f6c0 (LWP 110996) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28129dbc in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 25 (Thread 0x10411f6c0 (LWP 110999) "wine_mmdevapi_n"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2813e620 in NtNotifyChangeMultipleKeys () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2813e65b in NtNotifyChangeKey () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#6  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#7  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#8  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 24 (Thread 0x7f0d021ff6c0 (LWP 111000) "module-rt"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28320bcb in epoll_wait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d15369816 in ?? () from target:/usr/lib/x86_64-linux-gnu/spa-0.2/support/libspa-support.so
+#3  0x00007f0d15354b7d in ?? () from target:/usr/lib/x86_64-linux-gnu/spa-0.2/support/libspa-support.so
+#4  0x00007f0d15476895 in ?? () from target:/lib/x86_64-linux-gnu/libpipewire-0.3.so.0
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 23 (Thread 0x7f0d019fe6c0 (LWP 111001) "winepipewire"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28320bcb in epoll_wait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d15369816 in ?? () from target:/usr/lib/x86_64-linux-gnu/spa-0.2/support/libspa-support.so
+#3  0x00007f0d15354b7d in ?? () from target:/usr/lib/x86_64-linux-gnu/spa-0.2/support/libspa-support.so
+#4  0x00007f0d15476895 in ?? () from target:/lib/x86_64-linux-gnu/libpipewire-0.3.so.0
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 22 (Thread 0x10441f6c0 (LWP 111002) "redDispatcher1"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2831de93 in select () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28164c01 in NtDelayExecution () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d17986859 in pipewire_period_timer_loop () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/winepipewire.so
+#4  0x00007f0d2817d89a in start_system_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 21 (Thread 0x10451f6c0 (LWP 111003) "GameThread"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2831de93 in select () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28164c01 in NtDelayExecution () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 20 (Thread 0x10481f6c0 (LWP 111004) "GameThread"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 19 (Thread 0x104b1f6c0 (LWP 111005) "wine_xinput_hid"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28129dbc in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163614 in NtWaitForMultipleObjects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d27713579 in NtUserMsgWaitForMultipleObjectsEx.part.0 () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/win32u.so
+#4  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#6  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#7  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 18 (Thread 0x10501f6c0 (LWP 111006) "wine_sechost_de"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2812a041 in fsync_wait_objects () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28163d40 in NtWaitForSingleObject () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 17 (Thread 0x10531f6c0 (LWP 111007) "GamepadObserver"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d2831de93 in select () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28164c01 in NtDelayExecution () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 16 (Thread 0x105e1f6c0 (LWP 111017) "BinkAsy4"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 15 (Thread 0x10611f6c0 (LWP 111018) "BinkAsy5"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 14 (Thread 0x10641f6c0 (LWP 111019) "vkd3d-swapchain"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 13 (Thread 0x10671f6c0 (LWP 111020) "Bink IO"):
+#0  0x00007f0d2831e46d in syscall () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28169c3f in NtWaitForAlertByThreadId () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#2  0x00007f0d28149ef6 in __wine_syscall_dispatcher () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#3  0x00007f0d2817721e in start_thread () from target:/home/wasyll/.config/heroic/tools/proton/Proton-CachyOS-latest/files/lib/wine/x86_64-unix/ntdll.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 12 (Thread 0x7f0d003ff6c0 (LWP 111022) "gpu-icd-video"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d283229f8 in recv () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d17cd2d14 in <std::net::tcp::TcpStream as alloc::io::read::Read>::read () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#3  0x00007f0d17c2b970 in <gpu_renderd::client::Client>::recv_frame () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#4  0x00007f0d17c0bce3 in gpu_icd::video::run () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#5  0x00007f0d17bdd7a4 in std::sys::backtrace::__rust_begin_short_backtrace::<<gpu_icd::video::VideoThread>::start::{closure#3}, gpu_icd::video::VideoStats> () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#6  0x00007f0d17be31ab in <std::thread::lifecycle::spawn_unchecked<<gpu_icd::video::VideoThread>::start::{closure#3}, gpu_icd::video::VideoStats>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#7  0x00007f0d17cedb29 in <std::sys::thread::unix::Thread>::new::thread_start () from target:/home/wasyll/gpu-hub-client/libgpu_icd_pipelined.so
+#8  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#9  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 11 (Thread 0x7efcd8fff6c0 (LWP 111023) "cuda00061400186"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d283112e5 in poll () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007efcd9319fa7 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#3  0x00007efcd94069e7 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#4  0x00007efcd9306de3 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 10 (Thread 0x7efcc13ff6c0 (LWP 111026) "cuda-EvtHandlr"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d283112e5 in poll () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007efcd9319fa7 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#3  0x00007efcd94069e7 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#4  0x00007efcd9306de3 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 9 (Thread 0x7efcdfdfd6c0 (LWP 111027) "gpu-icd-video"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d282974ec in pthread_cond_wait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007efcd9269dfb in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#4  0x00007efcd9306de3 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libcuda.so.1
+#5  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#6  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 8 (Thread 0x7efcdf5fc6c0 (LWP 111028) "gpu-icd-video"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28297702 in pthread_cond_timedwait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007efce2c9b9aa in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvcuvid.so.1
+#4  0x00007efce2c9a9a6 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvcuvid.so.1
+#5  0x00007efce2c4cefc in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvcuvid.so.1
+#6  0x00007efce2c9ad75 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvcuvid.so.1
+#7  0x00007efce2c9b44d in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvcuvid.so.1
+#8  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#9  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 7 (Thread 0x7efcbede96c0 (LWP 111029) "gpu-icd-video"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d282974ec in pthread_cond_wait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f0d032d1dd0 in ?? () from target:/run/host/usr/lib/dri/nvidia_drv_video.so
+#4  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#5  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 6 (Thread 0x7efcb8adf6c0 (LWP 111039) "gpu-icd-video"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28297702 in pthread_cond_timedwait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f0d160104ac in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#4  0x00007f0d1645ece1 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#5  0x00007f0d16010664 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#6  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#7  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 5 (Thread 0x7efcadfff6c0 (LWP 111040) "[vkcf] Analysis"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d282974ec in pthread_cond_wait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f0d1601044c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#4  0x00007f0d1646664e in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#5  0x00007f0d16010664 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#6  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#7  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 4 (Thread 0x7efcad7fe6c0 (LWP 111042) "[vkrt] Analysis"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28297702 in pthread_cond_timedwait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f0d160104ac in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#4  0x00007f0d1647e0c2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#5  0x00007f0d16010664 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#6  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#7  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 3 (Thread 0x7efcacffd6c0 (LWP 111043) "[vkps] Update"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28297702 in pthread_cond_timedwait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f0d160104ac in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#4  0x00007f0d1644d50d in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#5  0x00007f0d16010664 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#6  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#7  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 2 (Thread 0x7efcac7fc6c0 (LWP 111045) "gpu-icd-video"):
+#0  0x00007f0d282a08f2 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f0d28294c79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f0d28297702 in pthread_cond_timedwait () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f0d160104ac in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#4  0x00007f0d1658dc79 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#5  0x00007f0d16577b66 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#6  0x00007f0d16010664 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libnvidia-glcore.so.580.178.04
+#7  0x00007f0d28298042 in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+#8  0x00007f0d2832072c in ?? () from target:/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 1 (Thread 0x7f0d28443740 (LWP 110873) "GameThread"):
+#0  0x0000000141969f79 in cpLauncher!?GetPos@WriteBytesBuffer@AK@@QEBAHXZ () from target:/home/wasyll/Games/Heroic/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe
+#1  0x00000001403e68ce in cpLauncher!?Bytes@WriteBytesMem@AK@@UEBAPEAEXZ () from target:/home/wasyll/Games/Heroic/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe
+#2  0x0000000596b4fb98 in ?? ()
+#3  0x000000000031d890 in ?? ()
+#4  0xc13c82bbad7e3706 in ?? ()
+#5  0x0000000000000001 in ?? ()
+#6  0x00006fffe9c54f90 in d3d12core!D3D12GetInterface () from target:/home/wasyll/Games/Heroic/Prefixes/Cyberpunk 2077/drive_c/windows/system32/d3d12core.dll
+#7  0x0000000000000000 in ?? ()
+[Inferior 1 (process 110873) detached]

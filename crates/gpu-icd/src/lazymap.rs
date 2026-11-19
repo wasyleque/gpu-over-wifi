@@ -300,13 +300,27 @@ fn cont(hub: &Hub, start: usize, len: usize, own: Option<usize>) {
     let fd = hub.uffd.as_raw_fd();
     let mut c = UffdioContinue { start: start as u64, len: len as u64, mode: 0, mapped: 0 };
     // SAFETY: `c` żyje przez czas wywołania; zakres leży w zarejestrowanym odwzorowaniu.
-    if unsafe { ioctl(fd, UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) } >= 0 {
+    let r = unsafe { ioctl(fd, UFFDIO_CONTINUE, &mut c as *mut UffdioContinue) };
+    if r >= 0 && c.mapped as u64 >= len as u64 {
+        return;
+    }
+    if r >= 0 || std::io::Error::last_os_error().raw_os_error() == Some(17) {
+        // Częściowy sukces albo EEXIST: jądro budzi wątki tylko dla stron faktycznie odwzorowanych przez to wywołanie, a zakres staje na pierwszej
+        // stronie już odwzorowanej, więc strona błędu leżąca za nią zostawała bez wybudzenia (zawieszenie Cyberpunka 2026-11-19, gdb po dołączeniu
+        // ruszał wątek). Odwzorowujemy resztę strona po stronie (EEXIST pomijamy) i budzimy cały zakres.
+        let mut p = start;
+        while p < start + len {
+            let mut one = UffdioContinue { start: p as u64, len: PAGE as u64, mode: 0, mapped: 0 };
+            // SAFETY: jak wyżej.
+            unsafe { ioctl(fd, UFFDIO_CONTINUE, &mut one as *mut UffdioContinue) };
+            p += PAGE;
+        }
+        let mut range = [start as u64, len as u64];
+        // SAFETY: `range` to `struct uffdio_range`.
+        unsafe { ioctl(fd, UFFDIO_WAKE, range.as_mut_ptr()) };
         return;
     }
     let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    if err == 17 {
-        return; // EEXIST: strona już odwzorowana
-    }
     let n = CONTINUE_FAILS.fetch_add(1, Ordering::Relaxed);
     if n < 8 {
         eprintln!("[gpu-icd] UFFDIO_CONTINUE nie powiodło się: adres {start:#x}, długość {len:#x}, errno {err}, odwzorowano {}", c.mapped);
