@@ -46,3 +46,17 @@ Przebieg ze `GPU_ICD_DICT` (słownik 64 KiB, `rottr-64k.dict`): Syria 10,23 FPS,
 Baza LZ4: Syria ≈15,1–16,0, Geothermal ≈13,8–15,4. Bajty na łączu 11,8 GB (baza ≈16 GB, czyli −26%), ale wątki kodujące ramki 35% CPU każdy,
 opóźnienie klatki średnio 7,4 s (kolejka rośnie). **Wniosek: na N6000 CPU kodowania jest wąskim gardłem, nie łącze — C7 bez zysku (−35% FPS).**
 Status C7: zmierzony negatywnie na tym kliencie; zostaje za flagą (może mieć sens przy wolnym łączu/mocnym CPU). Konfiguracja gry wróciła do LZ4.
+
+## C3b: koszt CPU diffu względem lustra (skan słowami 64-bitowymi), N6000, te same 4 pamięci TR
+Wersja `sparse_diff` przepisana na porównanie po 8 bajtów (`next_diff`); czas samego diffu (G=4) i diffu + LZ4 na zebranym ładunku, ms na MB surowych:
+
+| pamięć | LZ4 | sam diff G=4 (bajty % surowych) | diff + LZ4 (bajty %) |
+|---|---|---|---|
+| 0x10004a | 1,49 | 0,59 (9,1%) | 0,87 (5,7%) |
+| 0x100312 | 1,69 | 1,16 (33,6%) | 2,16 (16,8%) |
+| 0x10095d | 1,67 | 0,99 (28,2%) | 1,65 (12,9%) |
+| 0x1028fc | 1,95 | 1,67 (56,8%) | 3,24 (26,8%) |
+
+Wnioski (zmierzone): diff + LZ4 daje 2–4× mniej bajtów niż sam LZ4, ale CPU zyskuje tylko tam, gdzie zmian jest mało (0x10004a: −42% CPU i −78% bajtów); przy gęstych zmianach (0x1028fc) kosztuje +66%.
+Sam diff nie jest „darmowy" (0,6–1,7 ms/MB, a nie ~0,2 jak przy czystej przepustowości pamięci): dominuje liczba krótkich przebiegów.
+Kierunek: wybór per zapis wg gęstości zmian (np. pierwszy 4-KiB blok: jeśli zmienione <15% bajtów → diff+LZ4, inaczej LZ4), to kolejny pomiar. Nie wdrożone.

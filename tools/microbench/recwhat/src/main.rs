@@ -51,35 +51,43 @@ fn hash128(data: &[u8]) -> u128 {
     ((h1 as u128) << 64) | h2 as u128
 }
 
+fn t_d_el(_t: &Instant) -> u128 { 0 }
+
+fn next_diff(data: &[u8], prefix: &[u8], from: usize) -> Option<usize> {
+    let n = data.len();
+    let mut i = from;
+    while i < n && (i & 7) != 0 {
+        if data[i] != prefix[i] { return Some(i); }
+        i += 1;
+    }
+    while i + 8 <= n {
+        let x = u64::from_le_bytes(data[i..i + 8].try_into().unwrap())
+            ^ u64::from_le_bytes(prefix[i..i + 8].try_into().unwrap());
+        if x != 0 { return Some(i + (x.trailing_zeros() / 8) as usize); }
+        i += 8;
+    }
+    while i < n {
+        if data[i] != prefix[i] { return Some(i); }
+        i += 1;
+    }
+    None
+}
+
+// Te same przebiegi co wersja bajtowa (koniec = ostatnia różnica + gap + 1), ale skanowanie słowami 64-bitowymi.
 fn sparse_diff(data: &[u8], prefix: &[u8], gap: usize) -> (Vec<(usize, usize)>, usize) {
     let mut runs = Vec::new();
-    let mut i = 0;
     let mut payload_size = 0;
-    
-    while i < data.len() {
-        if data[i] != prefix[i] {
-            let start = i;
-            let mut end = i + 1;
-            let mut last_diff = i;
-            
-            while end < data.len() {
-                if data[end] != prefix[end] {
-                    last_diff = end;
-                }
-                if end - last_diff > gap {
-                    break;
-                }
-                end += 1;
-            }
-            
-            runs.push((start, end));
-            payload_size += end - start;
-            i = end;
-        } else {
-            i += 1;
+    let mut pos = 0;
+    while let Some(start) = next_diff(data, prefix, pos) {
+        let mut last = start;
+        while let Some(p) = next_diff(data, prefix, last + 1) {
+            if p - last <= gap { last = p; } else { break; }
         }
+        let end = (last + gap + 1).min(data.len());
+        runs.push((start, end));
+        payload_size += end - start;
+        pos = end;
     }
-    
     (runs, payload_size)
 }
 
@@ -165,6 +173,8 @@ struct AnalysisResult {
     zstd1_pfx_time: u128,
     lz4_time: u128,
     sparse_time: u128,
+    sparse_diff_only: u128,
+    sparse_comb_only: u128,
     cas_lz4_time: u128,
     rewind_time: u128,
     dict_16k_time: u128,
@@ -212,6 +222,8 @@ impl AnalysisResult {
             zstd1_pfx_time: 0,
             lz4_time: 0,
             sparse_time: 0,
+            sparse_diff_only: 0,
+            sparse_comb_only: 0,
             cas_lz4_time: 0,
             rewind_time: 0,
             dict_16k_time: 0,
@@ -258,6 +270,8 @@ impl AnalysisResult {
         self.zstd1_pfx_time += other.zstd1_pfx_time;
         self.lz4_time += other.lz4_time;
         self.sparse_time += other.sparse_time;
+        self.sparse_diff_only += other.sparse_diff_only;
+        self.sparse_comb_only += other.sparse_comb_only;
         self.cas_lz4_time += other.cas_lz4_time;
         self.rewind_time += other.rewind_time;
         self.dict_16k_time += other.dict_16k_time;
@@ -414,7 +428,10 @@ fn analyze_stream(
             
             // SPARSE
             let start = Instant::now();
+            let t_d = Instant::now();
             let (runs_g4, payload_g4) = sparse_diff(data, &prefix, 4);
+            result.sparse_diff_only += t_d.elapsed().as_nanos();
+            let dd = t_d.elapsed().as_nanos();
             let (runs_g16, payload_g16) = sparse_diff(data, &prefix, 16);
             let (runs_g64, payload_g64) = sparse_diff(data, &prefix, 64);
             
@@ -427,6 +444,7 @@ fn analyze_stream(
             result.sparse_g64_bytes += sparse_g64_size as u64;
             
             // SPARSE+LZ4
+            let t_c = Instant::now();
             if payload_g4 >= 256 {
                 let mut sparse_data = Vec::with_capacity(payload_g4);
                 for (start, end) in &runs_g4 {
@@ -437,6 +455,7 @@ fn analyze_stream(
             } else {
                 result.sparse_lz4_g4_bytes += sparse_g4_size as u64;
             }
+            result.sparse_comb_only += t_c.elapsed().as_nanos() + dd;
             
             if payload_g16 >= 256 {
                 let mut sparse_data = Vec::with_capacity(payload_g16);
@@ -616,10 +635,10 @@ fn print_results(result: &AnalysisResult, label: &str) {
         ("RAW", result.raw_bytes, 0u128),
         ("ZSTD1P", result.zstd1_pfx_bytes, result.zstd1_pfx_time),
         ("LZ4", result.lz4_bytes, result.lz4_time),
-        ("SPARSE(G=4)", result.sparse_g4_bytes, result.sparse_time),
+        ("SPARSE(G=4)", result.sparse_g4_bytes, result.sparse_diff_only),
         ("SPARSE(G=16)", result.sparse_g16_bytes, result.sparse_time),
         ("SPARSE(G=64)", result.sparse_g64_bytes, result.sparse_time),
-        ("SPARSE+LZ4(G=4)", result.sparse_lz4_g4_bytes, result.sparse_time),
+        ("SPARSE+LZ4(G=4)", result.sparse_lz4_g4_bytes, result.sparse_comb_only),
         ("SPARSE+LZ4(G=16)", result.sparse_lz4_g16_bytes, result.sparse_time),
         ("SPARSE+LZ4(G=64)", result.sparse_lz4_g64_bytes, result.sparse_time),
         ("CAS+LZ4", result.cas_lz4_bytes, result.cas_lz4_time),
