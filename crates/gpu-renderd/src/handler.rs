@@ -713,6 +713,27 @@ thread_local! {
 }
 
 /// Rozpakowuje ramkę zstd słownikiem `dict_id`; `None` dla nieznanego słownika albo błędnej ramki. Wynik ma najwyżej `raw_len` bajtów (brak bomby dekompresyjnej).
+/// Rozpakowuje zapisy pamięci niezależne od stanu sesji (LZ4, zstd, zstd ze słownikiem) do zwykłego `MemWrite`: robi to wątek odczytu połączenia po
+/// uwierzytelnieniu, żeby wątek wykonujący nie tracił na to czasu. Przy błędzie (zła długość, uszkodzone dane) zwraca żądanie bez zmian, więc
+/// wątek wykonujący zgłosi go jak dotąd.
+pub(crate) fn predecompress(req: Request) -> Request {
+    match req {
+        Request::MemWriteLz4 { memory, offset, raw_len, data } => match lz4_flex::block::decompress(&data, raw_len as usize) {
+            Ok(raw) if raw.len() == raw_len as usize => Request::MemWrite { memory, offset, data: raw },
+            _ => Request::MemWriteLz4 { memory, offset, raw_len, data },
+        },
+        Request::MemWriteZstd { memory, offset, raw_len, data } => match zstd::bulk::decompress(&data, raw_len as usize) {
+            Ok(raw) if raw.len() == raw_len as usize => Request::MemWrite { memory, offset, data: raw },
+            _ => Request::MemWriteZstd { memory, offset, raw_len, data },
+        },
+        Request::MemWriteZstdDict { memory, offset, raw_len, dict_id, data } => match dict_decompress(dict_id, &data, raw_len as usize) {
+            Some(raw) if raw.len() == raw_len as usize => Request::MemWrite { memory, offset, data: raw },
+            _ => Request::MemWriteZstdDict { memory, offset, raw_len, dict_id, data },
+        },
+        other => other,
+    }
+}
+
 fn dict_decompress(dict_id: u32, data: &[u8], raw_len: usize) -> Option<Vec<u8>> {
     DICT_DEC.with(|c| {
         let mut c = c.borrow_mut();

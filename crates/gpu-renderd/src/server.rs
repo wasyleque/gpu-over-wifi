@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::conn::{serve_connection, ServeError};
+use crate::conn::{serve_connection, serve_connection_pipelined, ServeError};
 use crate::handler::Session;
 use crate::vk::backend::VulkanBackend;
 
@@ -20,8 +20,13 @@ pub fn handle_stream(mut stream: TcpStream, token: Vec<u8>) -> Result<(), ServeE
     crate::client::enable_keepalive(&stream);
     let backend = VulkanBackend::new().map_err(|_| ServeError::Io(ErrorKind::Other))?;
     let mut session = Session::new(backend, token);
-    let mut reader = stream.try_clone().map_err(|e| ServeError::Io(e.kind()))?;
-    serve_connection(&mut session, &mut reader, &mut stream)
+    let reader = stream.try_clone().map_err(|e| ServeError::Io(e.kind()))?;
+    if std::env::var_os("GPU_RENDERD_NO_PIPELINE").is_some() {
+        let mut reader = reader;
+        serve_connection(&mut session, &mut reader, &mut stream)
+    } else {
+        serve_connection_pipelined(&mut session, reader, &mut stream)
+    }
 }
 
 struct ConnGuard(Arc<AtomicUsize>);

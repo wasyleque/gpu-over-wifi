@@ -88,155 +88,276 @@ fn flush_pending<W: Write>(writer: &mut W, pending: &mut Vec<u8>) -> Result<(), 
 /// - `session.cleanup()` jest wywoływane ZAWSZE na końcu (także przy błędach), dokładnie raz.
 ///
 /// Czyta porcjami po najwyżej 64 KiB; nie może panikować na żadnych danych.
+/// Ramka z czytnika i (opcjonalnie) już zdekodowane żądanie: wątek odczytu (`serve_connection_pipelined`) dekoduje i rozpakowuje zapisy pamięci
+/// zamiast wątku wykonującego (profil perf: crc32c ok. 10% i dekompresja ok. 12% jedynego wątku obsługi).
+struct Incoming {
+    frame: Frame,
+    req: Option<Request>,
+}
+
+/// Źródło ramek pętli połączenia: `next` czeka na następną (`Ok(None)` = czysty EOF), `try_next` oddaje tylko to, co jest już gotowe.
+trait FrameSource {
+    fn next(&mut self) -> Result<Option<Incoming>, ServeError>;
+    fn try_next(&mut self) -> Result<Option<Incoming>, ServeError>;
+}
+
+/// Czytanie wprost w wątku obsługi (testy i wejścia nie-gniazdowe).
+struct DirectSource<'a, R: Read> {
+    reader: &'a mut R,
+    fr: FrameReader,
+    buf: Vec<u8>,
+    authed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<R: Read> FrameSource for DirectSource<'_, R> {
+    fn next(&mut self) -> Result<Option<Incoming>, ServeError> {
+        loop {
+            if let Some(frame) = self.fr.next_frame()? {
+                return Ok(Some(Incoming { frame, req: None }));
+            }
+            match self.reader.read(&mut self.buf) {
+                Ok(0) => {
+                    return if self.fr.buffered() == 0 { Ok(None) } else { Err(ServeError::Io(std::io::ErrorKind::UnexpectedEof)) };
+                }
+                Ok(n) => self.fr.push(&self.buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                // Limit czasu odczytu (`server::IDLE_TIMEOUT`) chroni przed klientami, którzy się nie uwierzytelnili. Uwierzytelniony klient bez żądań
+                // jest po prostu bezczynny (gra liczy coś na procesorze przez kilka minut, np. wczytuje świat): zamknięcie połączenia zawiesiłoby grę,
+                // która potem czeka w nieskończoność na kartę (Cyberpunk po 120 s ciszy). Martwego klienta wykrywa keepalive TCP (`server::enable_keepalive`).
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && self.authed.load(std::sync::atomic::Ordering::Relaxed) => continue,
+                Err(e) => return Err(ServeError::Io(e.kind())),
+            }
+        }
+    }
+
+    fn try_next(&mut self) -> Result<Option<Incoming>, ServeError> {
+        Ok(self.fr.next_frame()?.map(|frame| Incoming { frame, req: None }))
+    }
+}
+
+/// Ramki dostarczane przez osobny wątek odczytu (kanał ograniczony: wątek odczytu nie wyprzedza wykonywania o więcej niż kilkadziesiąt ramek).
+struct ThreadSource {
+    rx: std::sync::mpsc::Receiver<Result<Option<Incoming>, ServeError>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for ThreadSource {
+    fn drop(&mut self) {
+        // Wątek odczytu kończy się przy najbliższym limicie czasu odczytu albo przy zamknięciu gniazda przez klienta.
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl FrameSource for ThreadSource {
+    fn next(&mut self) -> Result<Option<Incoming>, ServeError> {
+        self.rx.recv().unwrap_or(Ok(None))
+    }
+
+    fn try_next(&mut self) -> Result<Option<Incoming>, ServeError> {
+        match self.rx.try_recv() {
+            Ok(r) => r,
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+/// Wątek odczytu: czyta, składa ramki (tu liczy się crc32c), dekoduje żądania, a po uwierzytelnieniu rozpakowuje zapisy pamięci. Kolejność ramek
+/// zostaje zachowana; błąd dekodowania zostawia żądanie niezdekodowane, więc wątek wykonujący zgłosi go dokładnie tak jak przy czytaniu wprost.
+fn spawn_reader<R: Read + Send + 'static>(mut reader: R, authed: std::sync::Arc<std::sync::atomic::AtomicBool>) -> ThreadSource {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Option<Incoming>, ServeError>>(64);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let spawned = std::thread::Builder::new().name("renderd-read".into()).spawn(move || {
+        let mut fr = FrameReader::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            // Najpierw wszystkie kompletne ramki z bufora.
+            loop {
+                match fr.next_frame() {
+                    Ok(Some(mut frame)) => {
+                        let mut req = None;
+                        if frame.header.stream == STREAM_CONTROL && frame.header.flags & flags::ZSTD == 0 {
+                            if let Ok(r) = Request::decode(&frame.payload) {
+                                let r = if authed.load(Relaxed) { crate::handler::predecompress(r) } else { r };
+                                frame.payload = Vec::new();
+                                req = Some(r);
+                            }
+                        }
+                        if tx.send(Ok(Some(Incoming { frame, req }))).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(e.into()));
+                        return;
+                    }
+                }
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    let _ = tx.send(if fr.buffered() == 0 { Ok(None) } else { Err(ServeError::Io(std::io::ErrorKind::UnexpectedEof)) });
+                    return;
+                }
+                Ok(n) => fr.push(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && authed.load(Relaxed) => {
+                    if stop2.load(Relaxed) {
+                        return;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(ServeError::Io(e.kind())));
+                    return;
+                }
+            }
+        }
+    });
+    if spawned.is_err() {
+        let (tx2, rx2) = std::sync::mpsc::sync_channel(1);
+        let _ = tx2.send(Err(ServeError::Io(std::io::ErrorKind::Other)));
+        return ThreadSource { rx: rx2, stop };
+    }
+    ThreadSource { rx, stop }
+}
+
 pub fn serve_connection<R: Read, W: Write, B: GpuBackend>(
     session: &mut Session<B>,
     reader: &mut R,
     writer: &mut W,
 ) -> Result<(), ServeError> {
-    let mut fr = FrameReader::new();
-    let mut buf = vec![0u8; 64 * 1024];
+    let authed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(session.is_authenticated()));
+    let mut source = DirectSource { reader, fr: FrameReader::new(), buf: vec![0u8; 64 * 1024], authed: authed.clone() };
+    serve_loop(session, &mut source, writer, &authed)
+}
+
+/// To samo co `serve_connection`, ale odczyt, składanie ramek (crc32c), dekodowanie żądań i rozpakowywanie zapisów pamięci robi osobny wątek,
+/// a wątek wykonujący tylko stosuje żądania po kolei (jedyny wątek obsługi połączenia był nasycony w ciężkich scenach).
+pub fn serve_connection_pipelined<R: Read + Send + 'static, W: Write, B: GpuBackend>(
+    session: &mut Session<B>,
+    reader: R,
+    writer: &mut W,
+) -> Result<(), ServeError> {
+    let authed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(session.is_authenticated()));
+    let mut source = spawn_reader(reader, authed.clone());
+    serve_loop(session, &mut source, writer, &authed)
+}
+
+fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
+    session: &mut Session<B>,
+    source: &mut S,
+    writer: &mut W,
+    authed: &std::sync::atomic::AtomicBool,
+) -> Result<(), ServeError> {
     // Odpowiedzi na wszystkie żądania z jednego odczytu idą jednym zapisem (patrz `flush_pending`): mniej pakietów i wywołań systemowych.
     let mut pending: Vec<u8> = Vec::new();
-    // Ramki wyjęte z czytnika przy podglądaniu następnych żądań (patrz grupa odczytów różnic niżej).
-    let mut ahead: std::collections::VecDeque<Frame> = std::collections::VecDeque::new();
+    // Ramki wyjęte ze źródła przy podglądaniu następnych żądań (patrz grupa odczytów różnic niżej).
+    let mut ahead: std::collections::VecDeque<Incoming> = std::collections::VecDeque::new();
     let mut group_left = 0usize;
 
-    // Inner function to handle the main loop logic
     let result = (|| -> Result<(), ServeError> {
         loop {
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    // EOF - check if we have any buffered data
-                    if fr.buffered() == 0 {
-                        return Ok(());
-                    } else {
-                        return Err(ServeError::Io(std::io::ErrorKind::UnexpectedEof));
-                    }
-                }
-                Ok(n) => {
-                    // Read some data, push to frame reader
-                    fr.push(&buf[..n]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    // Interrupted, try again
-                    continue;
-                }
-                // Limit czasu odczytu (`server::IDLE_TIMEOUT`) chroni przed klientami, którzy się nie uwierzytelnili. Uwierzytelniony klient bez żądań
-                // jest po prostu bezczynny (gra liczy coś na procesorze przez kilka minut, np. wczytuje świat): zamknięcie połączenia zawiesiłoby grę,
-                // która potem czeka w nieskończoność na kartę (Cyberpunk po 120 s ciszy). Martwego klienta wykrywa keepalive TCP (`server::enable_keepalive`).
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && session.is_authenticated() => {
-                    continue;
-                }
-                Err(e) => {
-                    return Err(ServeError::Io(e.kind()));
-                }
-            }
-
-            // Process all complete frames from the buffer
-            loop {
-                let frame = match ahead.pop_front() {
-                    Some(f) => f,
-                    None => match fr.next_frame() {
-                        Ok(Some(f)) => f,
-                        Ok(None) => break,
-                        Err(e) => {
-                            flush_pending(writer, &mut pending)?;
-                            return Err(e.into());
-                        }
-                    },
-                };
-                // Check if frame is on the correct stream or has ZSTD compression (unsupported)
-                if frame.header.stream != STREAM_CONTROL || frame.header.flags & flags::ZSTD != 0 {
-                    flush_pending(writer, &mut pending)?;
-                    return Err(ServeError::Unsupported);
-                }
-
-                // Decode the request
-                let req = match Request::decode(&frame.payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        // Send error response and then return the decode error
-                        let error_resp = Response::Error {
-                            code: ERR_PROTOCOL,
-                            message: "malformed request".to_string(),
-                        };
-                        let error_frame = Frame::new(
-                            frame.header.stream,
-                            flags::CRC,
-                            frame.header.seq,
-                            frame.header.epoch,
-                            error_resp.encode(),
-                        )?;
+            let incoming = match ahead.pop_front() {
+                Some(i) => i,
+                None => match source.try_next() {
+                    Ok(Some(i)) => i,
+                    Ok(None) => {
+                        // Przetworzono wszystko, co już przyszło: odpowiedzi idą razem, potem czekamy na dane.
                         flush_pending(writer, &mut pending)?;
-                        writer.write_all(&error_frame.encode())?;
-                        writer.flush()?;
-                        return Err(ServeError::Msg(e));
+                        match source.next() {
+                            Ok(Some(i)) => i,
+                            Ok(None) => return Ok(()),
+                            Err(e) => return Err(e),
+                        }
                     }
+                    Err(e) => {
+                        flush_pending(writer, &mut pending)?;
+                        return Err(e);
+                    }
+                },
+            };
+            let Incoming { frame, req } = incoming;
+            // Check if frame is on the correct stream or has ZSTD compression (unsupported)
+            if frame.header.stream != STREAM_CONTROL || frame.header.flags & flags::ZSTD != 0 {
+                flush_pending(writer, &mut pending)?;
+                return Err(ServeError::Unsupported);
+            }
+
+            // Decode the request (wątek odczytu mógł to już zrobić)
+            let req = match req.map(Ok).unwrap_or_else(|| Request::decode(&frame.payload)) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Send error response and then return the decode error
+                    let error_resp = Response::Error { code: ERR_PROTOCOL, message: "malformed request".to_string() };
+                    let error_frame = Frame::new(frame.header.stream, flags::CRC, frame.header.seq, frame.header.epoch, error_resp.encode())?;
+                    flush_pending(writer, &mut pending)?;
+                    writer.write_all(&error_frame.encode())?;
+                    writer.flush()?;
+                    return Err(ServeError::Msg(e));
+                }
+            };
+
+            // Połączenie wideo: po uwierzytelnieniu `AttachVideo` zamienia to połączenie w strumień ramek sesji sterującej.
+            if let (Request::AttachVideo { session: sid }, true) = (&req, session.is_authenticated()) {
+                flush_pending(writer, &mut pending)?;
+                let reply = match crate::videohub::claim(*sid) {
+                    Some(rx) => {
+                        send_reply(writer, &frame, &Response::U32(0))?;
+                        return video_loop(rx, writer);
+                    }
+                    None => Response::Error { code: ERR_PROTOCOL, message: "unknown or already attached session".to_string() },
                 };
-
-                // Handle the request
-                // Połączenie wideo: po uwierzytelnieniu `AttachVideo` zamienia to połączenie w strumień ramek sesji sterującej.
-                if let (Request::AttachVideo { session: sid }, true) = (&req, session.is_authenticated()) {
-                    flush_pending(writer, &mut pending)?;
-                    let reply = match crate::videohub::claim(*sid) {
-                        Some(rx) => {
-                            send_reply(writer, &frame, &Response::U32(0))?;
-                            return video_loop(rx, writer);
-                        }
-                        None => Response::Error { code: ERR_PROTOCOL, message: "unknown or already attached session".to_string() },
-                    };
-                    send_reply(writer, &frame, &reply)?;
-                    continue;
-                }
-                // Kolejne żądania odczytu różnic pamięci, które już przyszły (klient odświeża po jednym oczekiwaniu kilka pamięci), idą do backendu jako
-                // grupa: jedna kopia GPU i jeden płotek zamiast jednego na pamięć. Odpowiedzi nadal wychodzą po jednej, w kolejności żądań.
-                if let Some(item) = delta_item(&req) {
-                    if group_left == 0 && session.is_authenticated() {
-                        let mut items = vec![item];
-                        while let Ok(Some(f)) = fr.next_frame() {
-                            let next = if f.header.stream == STREAM_CONTROL { Request::decode(&f.payload).ok().and_then(|r| delta_item(&r)) } else { None };
-                            ahead.push_back(f);
-                            match next {
-                                Some(it) => items.push(it),
-                                None => break,
-                            }
-                        }
-                        if items.len() >= 2 {
-                            session.prefetch_deltas(&items);
-                            group_left = items.len();
+                send_reply(writer, &frame, &reply)?;
+                continue;
+            }
+            // Kolejne żądania odczytu różnic pamięci, które już przyszły (klient odświeża po jednym oczekiwaniu kilka pamięci), idą do backendu jako
+            // grupa: jedna kopia GPU i jeden płotek zamiast jednego na pamięć. Odpowiedzi nadal wychodzą po jednej, w kolejności żądań.
+            if let Some(item) = delta_item(&req) {
+                if group_left == 0 && session.is_authenticated() {
+                    let mut items = vec![item];
+                    while let Ok(Some(it)) = source.try_next() {
+                        let next = match &it.req {
+                            Some(r) => delta_item(r),
+                            None if it.frame.header.stream == STREAM_CONTROL => Request::decode(&it.frame.payload).ok().and_then(|r| delta_item(&r)),
+                            None => None,
+                        };
+                        ahead.push_back(it);
+                        match next {
+                            Some(it) => items.push(it),
+                            None => break,
                         }
                     }
-                } else if group_left > 0 {
+                    if items.len() >= 2 {
+                        session.prefetch_deltas(&items);
+                        group_left = items.len();
+                    }
+                }
+            } else if group_left > 0 {
+                session.prefetch_end();
+                group_left = 0;
+            }
+            let handled_delta = delta_item(&req).is_some();
+            let response = session.handle_request(req);
+            authed.store(session.is_authenticated(), std::sync::atomic::Ordering::Relaxed);
+            let Some(response) = response else { continue };
+            if handled_delta && group_left > 0 {
+                group_left -= 1;
+                if group_left == 0 {
                     session.prefetch_end();
-                    group_left = 0;
-                }
-                let handled_delta = delta_item(&req).is_some();
-                let Some(response) = session.handle_request(req) else { continue };
-                if handled_delta && group_left > 0 {
-                    group_left -= 1;
-                    if group_left == 0 {
-                        session.prefetch_end();
-                    }
-                }
-
-                // Encode and send the response
-                let response_frame = Frame::new(
-                    frame.header.stream,
-                    flags::CRC,
-                    frame.header.seq,
-                    frame.header.epoch,
-                    response.encode(),
-                )?;
-                pending.extend_from_slice(&response_frame.encode());
-
-                // Check if authentication was successful
-                if !session.is_authenticated() {
-                    flush_pending(writer, &mut pending)?;
-                    return Err(ServeError::AuthFailed);
                 }
             }
-            // Przetworzono wszystko, co przyszło w tym odczycie: odpowiedzi idą razem.
-            flush_pending(writer, &mut pending)?;
+
+            // Encode and send the response
+            let response_frame = Frame::new(frame.header.stream, flags::CRC, frame.header.seq, frame.header.epoch, response.encode())?;
+            pending.extend_from_slice(&response_frame.encode());
+
+            // Check if authentication was successful
+            if !session.is_authenticated() {
+                flush_pending(writer, &mut pending)?;
+                return Err(ServeError::AuthFailed);
+            }
         }
     })();
 
@@ -261,6 +382,10 @@ mod tests {
     }
 
     impl GpuBackend for Mock {
+        fn mem_write(&mut self, memory: u64, offset: u64, data: &[u8]) -> Result<(), i32> {
+            self.log.borrow_mut().push(format!("mem_write {memory} {offset} {} {:?}", data.len(), &data[..data.len().min(4)]));
+            Ok(())
+        }
         fn instance_version(&mut self) -> Result<u32, i32> {
             Ok(0x0040_3000)
         }
@@ -358,6 +483,60 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn pipelined_reader_gives_the_same_replies_as_direct_reading() {
+        let (mut s, _) = session();
+        let mut input = req_frame(7, 42, &hello());
+        input.extend(req_frame(8, 42, &Request::EnumInstanceVersion));
+        let mut out = Vec::new();
+        assert_eq!(serve_connection_pipelined(&mut s, Cursor::new(input.clone()), &mut out), Ok(()));
+        let r = parse_responses(&out);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].1, Response::HelloOk { version: PROTOCOL_VERSION });
+        assert_eq!((r[1].0.header.seq, r[1].0.header.epoch), (8, 42));
+        assert_eq!(r[1].1, Response::U32(0x0040_3000));
+        // Dokładnie te same bajty co przy czytaniu wprost.
+        let (mut s2, _) = session();
+        let mut out2 = Vec::new();
+        assert_eq!(serve_connection(&mut s2, &mut Cursor::new(input), &mut out2), Ok(()));
+        assert_eq!(out, out2);
+    }
+
+    #[test]
+    fn pipelined_reader_delivers_compressed_memory_writes_unpacked_and_in_order() {
+        let raw: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let lz4 = lz4_flex::block::compress(&raw);
+        let zst = zstd::bulk::compress(&raw, 1).unwrap();
+        let (mut s, log) = session();
+        let mut input = req_frame(1, 0, &hello());
+        for i in 0..20u64 {
+            input.extend(req_frame(2 + i as u16 * 3, 0, &Request::MemWriteLz4 { memory: 9, offset: i * 8192, raw_len: raw.len() as u32, data: lz4.clone() }));
+            input.extend(req_frame(3 + i as u16 * 3, 0, &Request::MemWriteZstd { memory: 9, offset: i * 8192 + 4096, raw_len: raw.len() as u32, data: zst.clone() }));
+            input.extend(req_frame(4 + i as u16 * 3, 0, &Request::Sync));
+        }
+        let mut out = Vec::new();
+        assert_eq!(serve_connection_pipelined(&mut s, Cursor::new(input), &mut out), Ok(()));
+        let writes: Vec<String> = log.borrow().iter().filter(|l| l.starts_with("mem_write")).cloned().collect();
+        assert_eq!(writes.len(), 40);
+        for (i, w) in writes.iter().enumerate() {
+            let off = (i as u64 / 2) * 8192 + (i as u64 % 2) * 4096;
+            assert_eq!(*w, format!("mem_write 9 {off} 4096 [0, 1, 2, 3]"), "zapis {i} w kolejności i rozpakowany");
+        }
+    }
+
+    #[test]
+    fn pipelined_reader_reports_bad_frames_and_undecodable_payloads_like_direct_reading() {
+        let (mut s, _) = session();
+        let mut input = req_frame(1, 0, &hello());
+        input.extend(Frame::new(STREAM_CONTROL, flags::CRC, 2, 0, vec![0xEE; 9]).unwrap().encode());
+        let mut out = Vec::new();
+        assert!(matches!(serve_connection_pipelined(&mut s, Cursor::new(input), &mut out), Err(ServeError::Msg(_))));
+        let r = parse_responses(&out);
+        assert!(matches!(r.last().unwrap().1, Response::Error { code: ERR_PROTOCOL, .. }));
+        let (mut s2, _) = session();
+        assert!(serve_connection_pipelined(&mut s2, Cursor::new(vec![0xFF; 64]), &mut Vec::new()).is_err());
     }
 
     #[test]
