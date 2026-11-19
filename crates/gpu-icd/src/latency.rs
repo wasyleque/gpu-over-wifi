@@ -44,6 +44,16 @@ struct Pace {
 }
 
 static PACE: Mutex<Pace> = Mutex::new(Pace { last: None, slept_us: 0.0, ewma_us: 0.0 });
+/// Twardy limit klatek (`GPU_ICD_PACE_FPS=30`): następny termin oddania klatki liczony bezwzględnie, bez nadrabiania po opóźnieniu.
+static CAP_NEXT: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn cap_interval() -> Option<Duration> {
+    static T: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        let fps: f64 = std::env::var("GPU_ICD_PACE_FPS").ok()?.parse().ok()?;
+        (fps >= 5.0 && fps <= 240.0).then(|| Duration::from_micros((1e6 / fps) as u64))
+    })
+}
 static PACE_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PACE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -57,6 +67,24 @@ fn pace_factor() -> Option<f64> {
 
 /// Wołać przy wejściu w `vkQueuePresentKHR`, ZANIM weźmiemy blokadę instancji (usypia wątek oddający klatkę).
 pub fn pace() {
+    if let Some(t) = cap_interval() {
+        let wake = {
+            let mut n = CAP_NEXT.lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            let deadline = n.unwrap_or(now);
+            // Opóźniona klatka nie powoduje nadrabiania: następny termin liczymy od teraz.
+            *n = Some(deadline.max(now) + t);
+            deadline
+        };
+        let now = Instant::now();
+        if wake > now {
+            let d = wake - now;
+            std::thread::sleep(d);
+            PACE_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            PACE_US.fetch_add(d.as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        return;
+    }
     let Some(factor) = pace_factor() else { return };
     let sleep_us = {
         let mut p = PACE.lock().unwrap_or_else(|e| e.into_inner());
@@ -209,7 +237,7 @@ pub fn report_and_reset() -> Option<String> {
         if let Some(t) = spread(&mut s.sivals, "odstępy oddania") {
             out.push_str(&format!("; {t}"));
         }
-        if pace_factor().is_some() {
+        if pace_factor().is_some() || cap_interval().is_some() {
             use std::sync::atomic::Ordering::Relaxed;
             out.push_str(&format!("; pacing: {} wstrzymań, łącznie {} ms", PACE_N.swap(0, Relaxed), PACE_US.swap(0, Relaxed) / 1000));
         }
