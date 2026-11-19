@@ -40,3 +40,9 @@ Klient: `GPU_ICD_DICT=<plik .dict>` (zapisy pamięci kodowane zstd poziom 1 sło
 `GPU_RENDERD_DICT_DIR` (domyślnie `~/gpu-hub/dicts`), indeksowane identyfikatorem słownika zstd; nieznany identyfikator = błąd żądania. Nowa wiadomość protokołu `MemWriteZstdDict` (tag 23).
 Słownik dla Tomb Raidera: `recwhat <nagranie> --all --train-from <wszystkie pliki> --export-dict <prefiks>` (64 KiB, wspólny dla wszystkich pamięci gry). Testy: protokół (68+2), daemon (98, w tym
 `dict_roundtrip_and_rejection`), klient (111). Pomiar w grze: oczekiwany kierunek wg `recwhat` to ok. 35-57% mniej bajtów niż LZ4 przy ok. +40% CPU kodowania.
+
+## C7 (słownik zstd) w grze — wynik 2026-11-19 (N6000, 1 GbE→kabel, TR)
+Przebieg ze `GPU_ICD_DICT` (słownik 64 KiB, `rottr-64k.dict`): Syria 10,23 FPS, Geothermal 9,94, Mountain Peak 15,59, Overall 12,01.
+Baza LZ4: Syria ≈15,1–16,0, Geothermal ≈13,8–15,4. Bajty na łączu 11,8 GB (baza ≈16 GB, czyli −26%), ale wątki kodujące ramki 35% CPU każdy,
+opóźnienie klatki średnio 7,4 s (kolejka rośnie). **Wniosek: na N6000 CPU kodowania jest wąskim gardłem, nie łącze — C7 bez zysku (−35% FPS).**
+Status C7: zmierzony negatywnie na tym kliencie; zostaje za flagą (może mieć sens przy wolnym łączu/mocnym CPU). Konfiguracja gry wróciła do LZ4.
