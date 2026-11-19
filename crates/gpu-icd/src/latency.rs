@@ -26,6 +26,9 @@ struct State {
     /// Odstępy między kolejnymi wyświetleniami (µs) w bieżącym oknie raportu i moment poprzedniego wyświetlenia: równomierność klatek (płynność).
     last_shown: Option<Instant>,
     ivals: Vec<u32>,
+    /// To samo dla oddawania klatek przez grę (vkQueuePresentKHR): porównanie rozdziela nierówność wytwarzania od nierówności dostarczania.
+    last_sent: Option<Instant>,
+    sivals: Vec<u32>,
 }
 
 static S: Mutex<Option<State>> = Mutex::new(None);
@@ -39,6 +42,12 @@ fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
 /// Klatka `seq` została oddana do wysłania.
 pub fn sent(seq: u32) {
     with(|s| {
+        let now = Instant::now();
+        if let Some(p) = s.last_sent.replace(now) {
+            if s.sivals.len() < 4096 {
+                s.sivals.push(now.duration_since(p).as_micros().min(u32::MAX as u128) as u32);
+            }
+        }
         if s.pending.len() >= PENDING_MAX {
             s.pending.pop_front();
         }
@@ -101,6 +110,20 @@ pub fn wait_for_room(max: usize, limit: Duration) {
     }
 }
 
+fn spread(v: &mut Vec<u32>, label: &str) -> Option<String> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_unstable();
+    let q = |p: usize| v[(v.len() * p / 100).min(v.len() - 1)] as f64 / 1000.0;
+    let med = q(50);
+    let over2 = v.iter().filter(|&&x| x as f64 / 1000.0 > 2.0 * med).count();
+    let over100 = v.iter().filter(|&&x| x > 100_000).count();
+    let r = format!("{label}: p50 {:.1} ms, p95 {:.1}, p99 {:.1}, maks {:.1}; ponad 2×p50: {}, ponad 100 ms: {} z {}", med, q(95), q(99), *v.last().unwrap() as f64 / 1000.0, over2, over100, v.len());
+    v.clear();
+    Some(r)
+}
+
 impl State {
     fn record(&mut self, d: Duration) {
         let us = d.as_micros() as u64;
@@ -132,18 +155,15 @@ pub fn report_and_reset() -> Option<String> {
             pct(s.hist[4]),
             pct(s.hist[5])
         );
-        if !s.ivals.is_empty() {
-            let mut v = std::mem::take(&mut s.ivals);
-            v.sort_unstable();
-            let q = |p: usize| v[(v.len() * p / 100).min(v.len() - 1)] as f64 / 1000.0;
-            let med = q(50);
-            let over2 = v.iter().filter(|&&x| x as f64 / 1000.0 > 2.0 * med).count();
-            let over100 = v.iter().filter(|&&x| x > 100_000).count();
-            out.push_str(&format!("; odstępy wyświetlenia: p50 {:.1} ms, p95 {:.1}, p99 {:.1}, maks {:.1}; ponad 2×p50: {}, ponad 100 ms: {} z {}", med, q(95), q(99), *v.last().unwrap() as f64 / 1000.0, over2, over100, v.len()));
+        if let Some(t) = spread(&mut s.ivals, "odstępy wyświetlenia") {
+            out.push_str(&format!("; {t}"));
+        }
+        if let Some(t) = spread(&mut s.sivals, "odstępy oddania") {
+            out.push_str(&format!("; {t}"));
         }
         out.push_str(&format!("; hamowanie gry: {} razy, łącznie {:.0} ms", s.waits, s.waited_us as f64 / 1000.0));
         let pending = std::mem::take(&mut s.pending);
-        *s = State { pending, timeouts_in_row: s.timeouts_in_row, throttle_off: s.throttle_off, last_shown: s.last_shown, ..State::default() };
+        *s = State { pending, timeouts_in_row: s.timeouts_in_row, throttle_off: s.throttle_off, last_shown: s.last_shown, last_sent: s.last_sent, ..State::default() };
         Some(out)
     })
 }
