@@ -23,6 +23,7 @@ mod exts;
 mod fwd;
 mod local;
 mod memreq;
+mod niceness;
 mod coldtrap;
 #[allow(dead_code)]
 mod hotset;
@@ -421,6 +422,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
     }));
     fwd::desc_cache_clear();
     fwd::install_lazy();
+    niceness::start_from_env();
     watchdog::start(fwd::link_state, fwd::fast_commands);
     CURRENT.store(obj, std::sync::atomic::Ordering::SeqCst);
     INSTANCES.lock().unwrap_or_else(|e| e.into_inner()).push(obj as usize);

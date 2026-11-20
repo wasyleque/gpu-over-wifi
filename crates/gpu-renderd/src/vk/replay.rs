@@ -118,6 +118,31 @@ fn ns_since(t: Option<std::time::Instant>) -> u64 {
     t.map_or(0, |t| t.elapsed().as_nanos() as u64)
 }
 
+/// Rodzaje obiektów potomnych urządzenia w kolejności niszczenia (zależne przed tymi, od których zależą).
+const CHILD_KINDS_IN_DESTROY_ORDER: [&str; 21] = [
+    "VkPipeline",
+    "VkFramebuffer",
+    "VkRenderPass",
+    "VkPipelineLayout",
+    "VkShaderModule",
+    "VkImageView",
+    "VkBufferView",
+    "VkSampler",
+    "VkImage",
+    "VkBuffer",
+    "VkDescriptorPool",
+    "VkDescriptorSetLayout",
+    "VkDescriptorUpdateTemplate",
+    "VkCommandPool",
+    "VkQueryPool",
+    "VkFence",
+    "VkSemaphore",
+    "VkEvent",
+    "VkPipelineCache",
+    "VkSamplerYcbcrConversion",
+    "VkPrivateDataSlot",
+];
+
 pub fn cmd_times_report() -> String {
     let t = CMD_TIMES.lock().unwrap_or_else(|e| e.into_inner());
     let mut v: Vec<_> = t.by_name.iter().collect();
@@ -696,13 +721,32 @@ impl Replayer {
     }
 
     /// Niszczy wszystkie urządzenia sesji (po `vkDeviceWaitIdle`); wywoływane przed zniszczeniem instancji.
-    pub fn destroy_devices(&mut self) {
+        pub fn destroy_devices(&mut self) {
         let devices: Vec<(u64, Entry)> = self.registry_devices();
         for (id, e) in devices {
             if let (Ok(wait), Ok(destroy)) = (self.func_by_name("vkDeviceWaitIdle"), self.func_by_name("vkDestroyDevice")) {
                 // SAFETY: uchwyt urządzenia jest ważny do chwili zniszczenia; po nim wpis znika z rejestru.
                 unsafe {
                     call_thunk(wait, &[e.real], &[]);
+                    // Obiekty potomne urządzenia niszczymy sami, w kolejności zależności: gdy sesja kończy się bez ich zwolnienia (zabita gra), sterownik NVIDIA
+                    // zostawiał po każdej sesji ok. 20 deskryptorów /dev/nvidia0 i 200-260 MB RSS, a po ok. 28 sesjach `vkCreateDevice` trwał od 8 do 126 s.
+                    for kind in CHILD_KINDS_IN_DESTROY_ORDER {
+                        let Ok(df) = self.func_by_name(&format!("vkDestroy{}", &kind[2..])) else { continue };
+                        for (cid, c) in self.registry.entries_of_kind(kind) {
+                            if c.parent == e.real {
+                                call_thunk(df, &[e.real, c.real, 0], &[]);
+                                self.registry.unregister(cid);
+                            }
+                        }
+                    }
+                    // Zestawy deskryptorów i bufory poleceń zniknęły razem z pulami: tylko wpisy rejestru.
+                    for kind in ["VkDescriptorSet", "VkCommandBuffer"] {
+                        for (cid, c) in self.registry.entries_of_kind(kind) {
+                            if c.parent == e.real {
+                                self.registry.unregister(cid);
+                            }
+                        }
+                    }
                     // Sterownik NVIDIA nie zwalnia pamięci urządzenia przy `vkDestroyDevice`, gdy sesja kończy się bez zwolnienia obiektów (zerwane
                     // połączenie, zabita gra): po jednym przebiegu GravityMarka zostawało 2 GB VRAM, po awarii Cyberpunka 15 GB. Zwalniamy więc
                     // wszystkie alokacje tego urządzenia sami (po `vkDeviceWaitIdle` nic z nich nie korzysta).

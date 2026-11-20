@@ -175,3 +175,12 @@ Wysyłka `MemRead` pod blokadą, odbiór odpowiedzi BEZ niej, wpis danych znów 
 z odblokowaniem 15,66 / 15,24 / 15,55 FPS, bez: 14,48 / 15,08 (+ wcześniejsze bazy 14,56–15,18), czyli ok. +0,7 FPS (+5%); czekanie na blokadę
 przy pobraniach 25 s → 12 s. Sam obieg nadal ~2,3 ms: czyste 64 KB po łączu 10.42.0.x to 0,50 ms (p99 0,61), więc ok. 1,3 ms to kolejka wysyłki za
 wcześniejszymi (kompresowanymi) danymi + serwer. Następny krok do zmierzenia: osobny kanał odczytu z zależnością „po bilecie N strumienia głównego”.
+
+### Sporadyczne awarie startu gry: przyczyna znaleziona i naprawiona (0.3.24)
+
+Log klienta: WATCHDOG „czeka na odpowiedź serwera 8 s” przy starcie, po czym gra się wywala (Proton „Generating error report”). Serwer raportował `CreateDevice 57x 574 s`
+(średnio 8–10 s; ostatnie wywołanie ok. 126 s i wynik -4): **wyciek zasobów sterownika między sesjami**. Pomiar na świeżym serwerze (pid, deskryptory, RSS po kolejnych
+sesjach): fds 43 → 64 → 85 → 105 → 125 (po ok. 20 na sesję, głównie `/dev/nvidia0`), RSS 587 → 847 → 1031 → 1211 → 1481 MB; `CreateDevice` świeży 0,5 s.
+Przyczyny: (1) `destroy_devices` zwalniał pamięć i urządzenie, ale nie obiekty potomne (pipeline'y, obrazy, bufory, semafory itd.), więc sterownik NVIDIA trzymał kontekst;
+teraz niszczymy je w kolejności zależności przed `vkDestroyDevice` — fds stabilne (30, `/dev/nvidia0` 12), `CreateDevice` 0,35 s; (2) areny malloc wątków połączeń trzymały zwolnioną pamięć:
+`malloc_trim(0)` po sesji — wzrost RSS z ok. 200 MB na sesję do ok. 20 MB. Wcześniejsze „awarie przy starcie” (1 na 4 przebiegi) były skutkiem narastającego czasu `vkCreateDevice` po wielu przebiegach pod rząd.

@@ -680,6 +680,12 @@ impl<B: GpuBackend> Session<B> {
         for (handle, _) in self.instances.drain(..) {
             let _ = self.backend.destroy_instance(handle);
         }
+        // Wątki połączeń mają własne areny malloc, które po sesji trzymają zwolnioną pamięć (RSS rósł o ok. 200 MB na sesję gry): oddajemy ją systemowi.
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: `malloc_trim` jest bezpieczne do wołania z dowolnego wątku.
+        unsafe { malloc_trim(0) };
     }
 }
 
