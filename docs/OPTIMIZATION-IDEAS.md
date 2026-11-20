@@ -117,3 +117,14 @@ Nic nie jest tu odrzucone; każdy pomysł ma plan pomiaru albo uwagę, czego bra
 - Propozycja DeepSeeka "skanuj po 64 bloki na klatkę" **odpada z powodów poprawności** (zapis w zimnym bloku wykryty po kilku klatkach = nieaktualne dane na serwerze); jego przegląd wyścigów potwierdza też luki UNREGISTER→REGISTER (okno bez ochrony) i radzi mniejsze bloki (64–128 KiB) przy awansie.
 - Zamiast tego (poprawne z konstrukcji): **skan równoległy** (E): `PAGEMAP_SCAN` na rozłącznych zakresach równolegle (blokada odczytu mmap), skraca czas na ścieżce krytycznej 0,9 ms → ok. 0,25 ms przy 4 wątkach, bez zmiany semantyki; kosztem CPU w innych rdzeniach (budżet słabego klienta: sterowane flagą, do zmierzenia).
 - `crates/gpu-icd/src/hotset.rs`: księgowość gorących/zimnych (5 testów) zostaje do wariantu z uprawnieniami.
+
+## Wyniki 2026-11-20 (odczyt leniwy) i następny krok
+
+Pomiary (docs/measurements/2026-11-19-desktop/README.md, sekcja „Odczyt leniwy”): profil perf pokazał, że klatka CP jest ograniczona opóźnieniem obiegów, nie CPU
+(dispatchery gry kręcą się w pętli oczekiwania); 58 tys. pobrań leniwych/przebieg po ok. 1,8 ms to tylko 17 różnych okien po 64 KB. Zmierzone i bez zysku FPS:
+flush odpowiedzi odczytu na serwerze, większe okno, pobranie z wyprzedzeniem po stronie klienta (gorzej: 9,2 FPS), zawężenie unieważnień do buforów docelowych kopii (−10% pobrań).
+
+Następny krok (do zmierzenia, nie odrzucony): **push z serwera przy zakończeniu pracy GPU** — klient raz zgłasza serwerowi listę gorących okien (pamięć, offset, długość; z logu
+`GPU_ICD_FETCHLOG` jest ich ok. 17), a serwer dołącza ich zawartość (z deltą względem poprzedniej wersji) do odpowiedzi na oczekiwanie fence/semafora. Błąd strony po stronie klienta
+znajduje wtedy dane już lokalnie (bez obiegu). Klient-side prefetch przegrał wyścig, bo startuje dopiero po powrocie oczekiwania; push na serwerze startuje w chwili zakończenia GPU
+i podróżuje razem z odpowiedzią. Wymaga zmiany protokołu (nowa wiadomość `SetHotWindows`, rozszerzona odpowiedź oczekiwania) i testów kolejności z serwerem pipeline'owym.
