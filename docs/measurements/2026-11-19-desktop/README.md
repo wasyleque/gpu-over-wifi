@@ -124,3 +124,24 @@ Stan kodu: HOTCOLD i SCAN_THREADS zostają jako opcje (domyślnie wyłączone), 
   Wine/gry, a nie obliczenia gry (JIT tylko 1,6%).
 - Wniosek: klatka jest ograniczona OPÓŹNIENIEM (gra czeka na wyniki od GPU/ICD), a nie mocą CPU. To wskazuje na obiegi (leniwe pobrania:
   61 232 razy, śr. 2,36 ms, łącznie 144 s sumy wątków; skany synchroniczne 43,9 s; GetDescriptorEXT), czyli na redukcję liczby i czasu obiegów (R1/R3), nie na tańszy skan.
+
+## Odczyt leniwy: rozbicie czasu i eksperymenty (2026-11-20, Cyberpunk, pełny ekran 1920x1080, ok. 15 FPS)
+
+Rozbicie 2,4 ms na pobranie (58 tys. pobrań/przebieg, 3,7 GB): czekanie na blokadę instancji 25 s; praca pod blokadą 115 s, w tym flush 6 s i samo
+wywołanie `MemRead` 104 s (1,77 ms). Serwer: kolejka 0,29 ms, wykonanie 9 µs; klient: kolejka+zapis do gniazda 0,9 ms, zapis→odpowiedź 0,9 ms.
+Obsługa błędów stron jest szeregowa (jeden wątek `gpu-icd-lazy`): po obsłużeniu błędu czekał już następny w 23% przypadków.
+
+| Eksperyment | Wynik (FPS) | Wniosek |
+|---|---|---|
+| `GPU_RENDERD_FLUSH_READS` (odpowiedź na odczyt wychodzi od razu) | 15,05 | bez zmiany; opóźnienie nie siedzi w paczkowaniu odpowiedzi serwera |
+| `GPU_ICD_LAZY_WINDOW_MIN=64` (okno min. 256 KB) | 11,77 | gorzej: pobrań prawie tyle samo (52 tys.), bajtów 3,5× więcej; odczyty są rozproszone |
+| `GPU_ICD_PREFETCH=1` (pobranie gorących okien po unieważnieniu) | 9,17 | wyraźnie gorzej: 124 tys. pobrań z wyprzedzeniem, błędy stron bez zmiany (gra czyta zaraz po oczekiwaniu, przed końcem pobrania) |
+| `GPU_ICD_LAZY_XFER_GATE=1` (unieważniaj tylko gdy praca miała zapis transferem, i tylko bufory docelowe kopii) | 15,38 vs baza 15,18 / 14,56 | pobrań −10%, FPS w granicach szumu |
+
+Log pobrań (`GPU_ICD_FETCHLOG`): 57 tys. pobrań to zaledwie 17 różnych okien (pamięć, offset), ~55 pobrań na klatkę, okna po 64 KB. 64% pobrań niesie
+zawartość identyczną jak poprzednie pobranie tego okna, ale zawężenie unieważnień do buforów docelowych kopii usuwa tylko ok. 10% pobrań
+(pozostałe są zapisywane kopiami, które zapisują te same wartości) — czyli nadmiarowość nie wynika z nadgorliwego unieważniania.
+
+Profil CPU (patrz wyżej): klatka jest ograniczona opóźnieniem obiegów, nie CPU. Pozostaje strukturalna zmiana: serwer dołącza dane gorących okien do odpowiedzi
+na oczekiwanie (push przy zakończeniu fence), żeby błąd strony nie wymagał osobnego obiegu. Dodatkowo okno (nie pełny ekran) dało 16,4 FPS (pojedynczy przebieg).
+Sporadyczne awarie gry przy starcie (ok. 1 na 4 przebiegi, przyczyna nieustalona; log kończy się na vkd3d-proton SetPageFaultEnablement).

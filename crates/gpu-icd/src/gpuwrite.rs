@@ -47,6 +47,8 @@ struct MemUse {
 #[derive(Default)]
 pub struct GpuWrites {
     bufs: HashMap<u64, (u64, u32)>,
+    /// Bufor → (pamięć, przesunięcie) z ostatniego `vkBindBufferMemory`.
+    bound: HashMap<u64, (u64, u64)>,
     mems: HashMap<u64, MemUse>,
 }
 
@@ -57,6 +59,7 @@ impl GpuWrites {
 
     pub fn buffer_destroyed(&mut self, id: u64) {
         self.bufs.remove(&id);
+        self.bound.remove(&id);
     }
 
     pub fn memory_freed(&mut self, memory: u64) {
@@ -64,6 +67,7 @@ impl GpuWrites {
     }
 
     pub fn bind_buffer(&mut self, memory: u64, buffer: u64, offset: u64) {
+        self.bound.insert(buffer, (memory, offset));
         let e = self.mems.entry(memory).or_default();
         if let Some(&(size, usage)) = self.bufs.get(&buffer) {
             if e.sample.len() < 6 {
@@ -81,6 +85,25 @@ impl GpuWrites {
             Some(&(size, _)) if size > 0 => e.ranges.push((offset, size)),
             _ => e.whole = true,
         }
+    }
+
+    /// Czy do pamięci przypisano obraz.
+    pub fn has_images(&self, memory: u64) -> bool {
+        self.mems.get(&memory).is_none_or(|e| e.whole)
+    }
+
+    /// Zakresy `(offset, długość)` pamięci zajęte przez podane bufory (te, które są do niej przypisane).
+    pub fn ranges_written(&self, memory: u64, buffers: &[u64]) -> Vec<(u64, u64)> {
+        let mut v: Vec<(u64, u64)> = buffers
+            .iter()
+            .filter_map(|b| match (self.bound.get(b), self.bufs.get(b)) {
+                (Some(&(m, off)), Some(&(size, _))) if m == memory && size > 0 => Some((off, size)),
+                _ => None,
+            })
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     pub fn bind_image(&mut self, memory: u64) {
@@ -210,5 +233,25 @@ mod tests {
         assert!(usage_is_read_only(0x1) && usage_is_read_only(0x10 | 0x80 | 0x40));
         assert!(!usage_is_read_only(0) && !usage_is_read_only(0x2) && !usage_is_read_only(0x10 | 0x20));
         assert!(!usage_is_read_only(0x20000) && !usage_is_read_only(0x1 | 0x8000_0000) && !usage_is_read_only(u32::MAX));
+    }
+
+    #[test]
+    fn written_ranges_cover_only_the_listed_buffers_bound_to_that_memory() {
+        let mut g = GpuWrites::default();
+        g.buffer_created(1, 4096, u32::MAX);
+        g.buffer_created(2, 8192, u32::MAX);
+        g.buffer_created(3, 100, u32::MAX);
+        g.bind_buffer(10, 1, 0);
+        g.bind_buffer(10, 2, 65536);
+        g.bind_buffer(11, 3, 0);
+        assert_eq!(g.ranges_written(10, &[2]), vec![(65536, 8192)]);
+        assert_eq!(g.ranges_written(10, &[2, 1, 2]), vec![(0, 4096), (65536, 8192)]);
+        assert!(g.ranges_written(10, &[3]).is_empty());
+        assert!(g.ranges_written(10, &[99]).is_empty());
+        g.buffer_destroyed(2);
+        assert_eq!(g.ranges_written(10, &[2, 1]), vec![(0, 4096)]);
+        assert!(!g.has_images(10));
+        g.bind_image(10);
+        assert!(g.has_images(10) && g.has_images(404));
     }
 }

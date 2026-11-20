@@ -23,6 +23,12 @@ pub const PAGE: usize = 4096;
 pub const FETCH_WINDOW_MIN: usize = 16;
 pub const FETCH_WINDOW_MAX: usize = 4096;
 
+/// Najmniejsze okno pobrania w stronach (`GPU_ICD_LAZY_WINDOW_MIN`, potęga dwójki 16..4096): większe okno = mniej obiegów przy odczytach rozproszonych.
+fn window_min() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_LAZY_WINDOW_MIN").ok().and_then(|v| v.parse::<usize>().ok()).filter(|v| v.is_power_of_two() && (FETCH_WINDOW_MIN..=FETCH_WINDOW_MAX).contains(v)).unwrap_or(FETCH_WINDOW_MIN))
+}
+
 const SYS_USERFAULTFD: i64 = 323;
 const O_CLOEXEC: i64 = 0o2000000;
 const O_NONBLOCK: i64 = 0o4000;
@@ -99,6 +105,10 @@ pub static FAULTS_FETCHED: AtomicU64 = AtomicU64::new(0);
 pub static FETCHED_BYTES: AtomicU64 = AtomicU64::new(0);
 /// Czas obsługi pobrań z serwera przy błędach stron (ns): skan zapisów aplikacji + obieg po sieci; cały czas stoi wątek aplikacji.
 pub static FETCH_NS: AtomicU64 = AtomicU64::new(0);
+pub static FETCH_FLUSH_NS: AtomicU64 = AtomicU64::new(0);
+pub static FETCH_CALL_NS: AtomicU64 = AtomicU64::new(0);
+pub static FETCH_LOCK_NS: AtomicU64 = AtomicU64::new(0);
+pub static FETCH_WORK_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Stan jednej leniwej pamięci.
 struct State {
@@ -114,9 +124,12 @@ struct State {
     /// do takiej strony tuż przed zrzutem nie byłby widoczny w skanie i nigdy nie dotarłby na serwer (GPU czytałoby stare argumenty rysowania pośredniego
     /// i wieszało się). Te strony skan musi więc zawsze zweryfikować porównaniem skrótów (patrz `take_recheck`).
     recheck: Vec<(usize, usize)>,
+    /// Okna (początek bajtowy → długość w stronach) pobierane przy prawdziwych błędach stron, z licznikiem: kandydaci do pobrania z wyprzedzeniem.
+    hot: std::collections::HashMap<usize, (usize, u32)>,
 }
 
 pub struct LazyRegion {
+    prefetch_queued: std::sync::atomic::AtomicBool,
     /// Identyfikator pamięci w protokole (dla `fetch`).
     pub memory: u64,
     /// Instancja sterownika (`InstanceObj`), do której należy pamięć: pobranie idzie jej połączeniem.
@@ -197,7 +210,7 @@ impl LazyRegion {
             return None;
         }
         let pages = len / PAGE;
-        let region = Arc::new(LazyRegion { memory, owner, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: FETCH_WINDOW_MIN, last_end: usize::MAX, recheck: Vec::new() }) });
+        let region = Arc::new(LazyRegion { prefetch_queued: std::sync::atomic::AtomicBool::new(false), memory, owner, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: window_min(), last_end: usize::MAX, recheck: Vec::new(), hot: Default::default() }) });
         h.regions.write().unwrap_or_else(|e| e.into_inner()).insert(a, region.clone());
         Some(region)
     }
@@ -291,8 +304,17 @@ fn handler(hub: Arc<Hub>) {
         }
         let addr = u64::from_le_bytes(msg[16..24].try_into().unwrap_or([0; 8])) as usize;
         serve_fault(&hub, addr);
+        // Diagnostyka: czy w czasie obsługi czekały już kolejne błędy stron (obsługa jest szeregowa: jeden wątek, jedno pobranie naraz).
+        let mut p2 = PollFd { fd, events: POLLIN, revents: 0 };
+        // SAFETY: `p2` żyje przez czas wywołania.
+        if unsafe { poll(&mut p2 as *mut PollFd, 1, 0) } > 0 {
+            FAULT_BACKLOG.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
+
+/// Ile razy po obsłużeniu błędu strony czekał już następny.
+pub static FAULT_BACKLOG: AtomicU64 = AtomicU64::new(0);
 
 /// `UFFDIO_CONTINUE` z obsługą błędu. Jego porażka (np. brak strony w pamięci podręcznej stron widoku własnego, gdy pobranie się nie udało) zostawiała
 /// wątek aplikacji uśpiony w `handle_userfault` bez końca (zawieszenie Cyberpunka 2026-11-19, stos: redDispatcher8 w jądrze, gpu-icd-lazy w poll).
@@ -348,6 +370,156 @@ fn cont(hub: &Hub, start: usize, len: usize, own: Option<usize>) {
     unsafe { ioctl(fd, UFFDIO_WAKE, range.as_mut_ptr()) };
 }
 
+/// Diagnostyka (`GPU_ICD_FETCHLOG=ścieżka`): dopisuje „czas_µs pamięć offset długość” przy każdym pobraniu; do analizy powtarzalności odczytów.
+fn fetch_log(memory: u64, off: usize, len: usize, data: Option<usize>) {
+    use std::io::Write;
+    static F: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    let f = F.get_or_init(|| std::env::var("GPU_ICD_FETCHLOG").ok().and_then(|p| std::fs::File::create(p).ok()).map(Mutex::new));
+    if let Some(f) = f {
+        let t = T0.get_or_init(std::time::Instant::now).elapsed().as_micros();
+        let mut w = f.lock().unwrap_or_else(|e| e.into_inner());
+        // Skrót zawartości pobranego okna: czy dane różnią się od poprzedniego pobrania tego samego okna (diagnostyka nadmiarowych unieważnień).
+        let h = data.map(|p| {
+            // SAFETY: okno `[p, p+len)` właśnie wpisano w widok własny regionu (żywe odwzorowanie).
+            let sl = unsafe { std::slice::from_raw_parts(p as *const u64, len / 8) };
+            sl.iter().fold(0xcbf29ce484222325u64, |h, &w| (h ^ w).wrapping_mul(0x100000001b3).rotate_left(5))
+        });
+        let _ = writeln!(w, "{t} {memory:x} {off} {len} {:x}", h.unwrap_or(0));
+    }
+}
+
+
+/// Pobiera okno wokół `off` (wspólne dla błędu strony i pobrania z wyprzedzeniem). `pre` = Some(strony): okno narzucone, bez zmiany stanu okna
+/// adaptacyjnego i bez zliczania gorących okien. Zwraca, czy strona `off` nadal wymaga odwzorowania przez wołającego.
+fn fetch_for(hub: &Hub, r: &Arc<LazyRegion>, off: usize, pre: Option<usize>) -> bool {
+    let mut continue_fault_page = true;
+    // Do 3 prób: unieważnienie w trakcie pobierania unieważnia jego wynik (dane mogły się zdezaktualizować).
+    for _ in 0..3 {
+        let (plan, epoch) = {
+            let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
+            let page = off / PAGE;
+            if !st.stale.is_stale(page) {
+                break; // strona świeża (zrzucona z widoku): wystarczy ją odwzorować, okno zostaje bez zmian
+            }
+            let window = match pre {
+                Some(w) => w,
+                None => {
+                    // Błąd tuż za poprzednim oknem = odczyt sekwencyjny: okno rośnie; w przeciwnym razie wraca do minimum.
+                    st.window = if page == st.last_end { (st.window * 2).min(FETCH_WINDOW_MAX) } else { window_min() };
+                    st.window
+                }
+            };
+            let plan = st.stale.plan_fetch(off, window);
+            if pre.is_none() {
+                if let Some(&(_, b)) = plan.last() {
+                    st.last_end = b / PAGE;
+                }
+                if let Some(&(a, b)) = plan.first() {
+                    let e = st.hot.entry(a).or_insert((0, 0));
+                    *e = ((b - a) / PAGE, e.1 + 1);
+                    if st.hot.len() > 256 {
+                        st.hot.clear();
+                    }
+                }
+            }
+            (plan, st.epoch)
+        };
+        if plan.is_empty() {
+            break;
+        }
+        let Some(fetch) = hub.fetch.get() else { break };
+        let mut ok = true;
+        let t_fetch = std::time::Instant::now();
+        for &(a, b) in &plan {
+            ok &= fetch(r, a, b - a);
+            fetch_log(r.memory, a, b - a, if ok { Some(r.own + a) } else { None });
+            FETCHED_BYTES.fetch_add((b - a) as u64, Ordering::Relaxed);
+        }
+        if pre.is_some() {
+            PREFETCH_NS.fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            PREFETCHED.fetch_add(1, Ordering::Relaxed);
+        } else {
+            FETCH_NS.fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            FAULTS_FETCHED.fetch_add(1, Ordering::Relaxed);
+        }
+        if !ok {
+            break;
+        }
+        // Oznaczenie świeżości, bity `present` i odwzorowanie stron dzieją się pod blokadą stanu, więc `invalidate` (też pod nią) nie
+        // wcisnie się między nie: inaczej odwzorowanie stałoby się po zrzucie i aplikacja widziałaby nieaktualne dane bez błędu strony.
+        let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.epoch == epoch {
+            for &(a, b) in &plan {
+                st.stale.mark_fresh(a, b);
+                for p in a / PAGE..b.div_ceil(PAGE) {
+                    st.present[p / 64] |= 1 << (p % 64);
+                }
+                cont(hub, r.app + a, b - a, Some(r.own + a));
+                if (a..b).contains(&off) {
+                    continue_fault_page = false;
+                }
+            }
+            break;
+        }
+    }
+    continue_fault_page
+}
+
+pub static PREFETCHED: AtomicU64 = AtomicU64::new(0);
+pub static PREFETCH_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Pobieranie z wyprzedzeniem (`GPU_ICD_PREFETCH=1`): po unieważnieniu pamięci osobny wątek pobiera okna, które aplikacja czytała przy poprzednich
+/// błędach stron (≥ 3 razy), zanim aplikacja ich dotknie; błąd strony i obieg po sieci znikają z jej ścieżki krytycznej.
+pub fn prefetch_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_PREFETCH").is_some())
+}
+
+struct Prefetcher {
+    q: Mutex<Vec<Arc<LazyRegion>>>,
+    cv: std::sync::Condvar,
+}
+
+fn prefetcher() -> &'static Prefetcher {
+    static P: OnceLock<&'static Prefetcher> = OnceLock::new();
+    P.get_or_init(|| {
+        let p: &'static Prefetcher = Box::leak(Box::new(Prefetcher { q: Mutex::new(Vec::new()), cv: std::sync::Condvar::new() }));
+        let _ = std::thread::Builder::new().name("gpu-icd-prefetch".into()).spawn(move || loop {
+            let r = {
+                let mut q = p.q.lock().unwrap_or_else(|e| e.into_inner());
+                while q.is_empty() {
+                    q = p.cv.wait(q).unwrap_or_else(|e| e.into_inner());
+                }
+                q.remove(0)
+            };
+            let Some(hub) = hub() else { continue };
+            let mut hot: Vec<(usize, usize, u32)> = {
+                let st = r.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.hot.iter().filter(|(_, v)| v.1 >= 3).map(|(&a, v)| (a, v.0, v.1)).collect()
+            };
+            hot.sort_by(|a, b| b.2.cmp(&a.2));
+            for (a, pages, _) in hot.into_iter().take(8) {
+                fetch_for(&hub, &r, a, Some(pages));
+            }
+            r.prefetch_queued.store(false, Ordering::Release);
+        });
+        p
+    })
+}
+
+impl LazyRegion {
+    /// Zleca pobranie gorących okien tej pamięci z wyprzedzeniem (po `invalidate`).
+    pub fn prefetch_hot(self: &Arc<Self>) {
+        if !prefetch_enabled() || self.prefetch_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let p = prefetcher();
+        p.q.lock().unwrap_or_else(|e| e.into_inner()).push(self.clone());
+        p.cv.notify_one();
+    }
+}
+
 fn serve_fault(hub: &Hub, addr: usize) {
     FAULTS.fetch_add(1, Ordering::Relaxed);
     let page_addr = addr & !(PAGE - 1);
@@ -358,54 +530,7 @@ fn serve_fault(hub: &Hub, addr: usize) {
     let mut continue_fault_page = true;
     if let Some(r) = region {
         let off = page_addr - r.app;
-        // Do 3 prób: unieważnienie w trakcie pobierania unieważnia jego wynik (dane mogły się zdezaktualizować).
-        for _ in 0..3 {
-            let (plan, epoch) = {
-                let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
-                // Błąd tuż za poprzednim oknem = odczyt sekwencyjny: okno rośnie; w przeciwnym razie wraca do minimum.
-                let page = off / PAGE;
-                if !st.stale.is_stale(page) {
-                    break; // strona świeża (zrzucona z widoku): wystarczy ją odwzorować, okno zostaje bez zmian
-                }
-                st.window = if page == st.last_end { (st.window * 2).min(FETCH_WINDOW_MAX) } else { FETCH_WINDOW_MIN };
-                let plan = st.stale.plan_fetch(off, st.window);
-                if let Some(&(_, b)) = plan.last() {
-                    st.last_end = b / PAGE;
-                }
-                (plan, st.epoch)
-            };
-            if plan.is_empty() {
-                break;
-            }
-            let Some(fetch) = hub.fetch.get() else { break };
-            let mut ok = true;
-            let t_fetch = std::time::Instant::now();
-            for &(a, b) in &plan {
-                ok &= fetch(&r, a, b - a);
-                FETCHED_BYTES.fetch_add((b - a) as u64, Ordering::Relaxed);
-            }
-            FETCH_NS.fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            FAULTS_FETCHED.fetch_add(1, Ordering::Relaxed);
-            if !ok {
-                break;
-            }
-            // Oznaczenie świeżości, bity `present` i odwzorowanie stron dzieją się pod blokadą stanu, więc `invalidate` (też pod nią) nie
-            // wcisnie się między nie: inaczej odwzorowanie stałoby się po zrzucie i aplikacja widziałaby nieaktualne dane bez błędu strony.
-            let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());
-            if st.epoch == epoch {
-                for &(a, b) in &plan {
-                    st.stale.mark_fresh(a, b);
-                    for p in a / PAGE..b.div_ceil(PAGE) {
-                        st.present[p / 64] |= 1 << (p % 64);
-                    }
-                    cont(hub, r.app + a, b - a, Some(r.own + a));
-                    if (a..b).contains(&off) {
-                        continue_fault_page = false;
-                    }
-                }
-                break;
-            }
-        }
+        continue_fault_page = fetch_for(hub, &r, off, None);
         if continue_fault_page {
             // Strona świeża albo pobranie się nie udało: odwzoruj samą stronę błędu (pod blokadą, z tego samego powodu co wyżej).
             let mut st = r.state.lock().unwrap_or_else(|e| e.into_inner());

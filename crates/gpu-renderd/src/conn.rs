@@ -108,6 +108,12 @@ fn stats_on() -> bool {
     *ON.get_or_init(|| std::env::var_os("GPU_RENDERD_STATS").is_some())
 }
 
+/// `GPU_RENDERD_FLUSH_READS=1`: odpowiedź na odczyt pamięci wychodzi od razu, a nie razem z odpowiedziami na całą kolejkę żądań.
+fn flush_reads() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_RENDERD_FLUSH_READS").is_some())
+}
+
 fn note_read(queue: std::time::Duration, exec: std::time::Duration) {
     use std::sync::atomic::Ordering::Relaxed;
     let q = queue.as_micros() as u64;
@@ -365,6 +371,7 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
                 group_left = 0;
             }
             let handled_delta = delta_item(&req).is_some();
+            let sync_read = matches!(req, Request::MemRead { .. } | Request::MemReadDelta { .. } | Request::MemReadDeltaRanges { .. });
             let is_read = stats_on() && matches!(req, Request::MemRead { .. } | Request::MemReadDelta { .. } | Request::MemReadDeltaRanges { .. });
             let started = std::time::Instant::now();
             let response = session.handle_request(req);
@@ -383,6 +390,10 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
             // Encode and send the response
             let response_frame = Frame::new(frame.header.stream, flags::CRC, frame.header.seq, frame.header.epoch, response.encode())?;
             pending.extend_from_slice(&response_frame.encode());
+            // Odczyt pamięci blokuje wątek gry po stronie klienta: nie czekamy z odpowiedzią, aż opróżni się kolejka następnych żądań.
+            if sync_read && flush_reads() {
+                flush_pending(writer, &mut pending)?;
+            }
 
             // Check if authentication was successful
             if !session.is_authenticated() {

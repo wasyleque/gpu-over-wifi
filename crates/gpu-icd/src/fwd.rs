@@ -43,11 +43,14 @@ pub struct DispObj {
     /// aktualizacja, wykonanie buforów wtórnych itd.; patrz `xfer_table`). Pamięci, do których GPU pisze tylko tak, nie wymagają
     /// odświeżania po pracy bez takich poleceń.
     xfer_write: std::sync::atomic::AtomicBool,
+    /// Bufory docelowe poleceń zapisu transferem nagranych od `Begin`/`Reset` oraz znacznik „nie umiemy ich wskazać” (`GPU_ICD_LAZY_XFER_GATE`).
+    xfer_dst: std::sync::Mutex<Vec<u64>>,
+    xfer_unknown: std::sync::atomic::AtomicBool,
 }
 
 impl DispObj {
     pub(crate) fn new(id: u64) -> DispObj {
-        DispObj { loader_data: 0, id, inst: 0, pending: std::sync::Mutex::new(Vec::new()), xfer_write: std::sync::atomic::AtomicBool::new(false) }
+        DispObj { loader_data: 0, id, inst: 0, pending: std::sync::Mutex::new(Vec::new()), xfer_write: std::sync::atomic::AtomicBool::new(false), xfer_dst: std::sync::Mutex::new(Vec::new()), xfer_unknown: std::sync::atomic::AtomicBool::new(false) }
     }
 
     /// Dopisuje zakodowane polecenie; zwraca, czy bufor osiągnął próg opróżnienia.
@@ -803,13 +806,17 @@ impl InstState {
             SETTLE_NS[1].fetch_add(t_s.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             SETTLE_BY[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        let t_f = std::time::Instant::now();
         self.flush();
+        crate::lazymap::FETCH_FLUSH_NS.fetch_add(t_f.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let mut done = 0usize;
         while done < len {
             let n = (len - done).min(MEM_CHUNK);
             self.stats.roundtrips += 1;
             self.stats.memr_bytes += n as u64;
+            let t_c = std::time::Instant::now();
             let (ticket, r) = self.client.call_t(&Request::MemRead { memory, offset: offset + done as u64, len: n as u32 });
+            crate::lazymap::FETCH_CALL_NS.fetch_add(t_c.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             match r {
                 Ok(Response::Data(d)) if d.len() == n => {
                     if let Some(s) = self.mems.get_mut(&memory) {
@@ -842,15 +849,39 @@ impl InstState {
             if !s.mapped {
                 continue;
             }
+            // `GPU_ICD_LAZY_XFER_GATE=1`: pamięć z odczytem leniwym to HOST_CACHED, czyli sterty odczytu (D3D12 READBACK: GPU pisze tylko kopiowaniem); gdy zgłoszona praca
+            // nie miała poleceń zapisu transferem, nic się w niej nie zmieniło (bufory vkd3d mają użycie ffffffff, więc statycznie tego nie widać).
+            // Gdy znamy bufory docelowe kopii (i w pamięci nie ma obrazów), unieważniamy tylko ich zakresy.
+            let mut only: Option<Vec<(u64, u64)>> = None;
+            if lazy_xfer_gate() {
+                if !self.xfer_dirty {
+                    LAZY_GATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+                if !self.xfer_unknown && !self.gpuw.has_images(*id) {
+                    let v = self.gpuw.ranges_written(*id, &self.xfer_written);
+                    if v.is_empty() {
+                        LAZY_GATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    only = Some(v);
+                }
+            }
             let ranges = match self.gpuw.plan(*id) {
+                _ if only.is_some() => only.take().unwrap_or_default(),
                 crate::gpuwrite::Plan::Skip => continue,
                 crate::gpuwrite::Plan::Whole => vec![(0, r.len() as u64)],
                 crate::gpuwrite::Plan::Ranges(v) => v,
             };
             r.invalidate(&ranges);
+            r.prefetch_hot();
             n += 1;
         }
         self.stats.lazy_invalidations += n;
+        if lazy_xfer_gate() {
+            self.xfer_written.clear();
+            self.xfer_unknown = false;
+        }
     }
 
     /// Czy pamięć `id` trzeba odświeżyć po oczekiwaniu: bufory deskryptorów pomijamy (GPU ich nie pisze), pamięci pisane tylko transferem odświeżamy,
@@ -1512,15 +1543,64 @@ pub fn xfer_audit_stats() -> (u64, u64, u64) {
 ///
 /// # Safety
 /// `cb` to uchwyt bufora poleceń (wskaźnik na `DispObj`) albo 0.
-unsafe fn note_cb_write(op: u16, name: &str, cb: u64) {
+unsafe fn note_cb_write(op: u16, name: &str, cb: u64, slots: &[u64]) {
     if cb == 0 {
         return;
     }
     let obj = &*(cb as *const DispObj);
     if matches!(name, "vkBeginCommandBuffer" | "vkResetCommandBuffer") {
         obj.xfer_write.store(false, std::sync::atomic::Ordering::Relaxed);
+        obj.xfer_unknown.store(false, std::sync::atomic::Ordering::Relaxed);
+        obj.xfer_dst.lock().unwrap_or_else(|e| e.into_inner()).clear();
     } else if xfer_table().get(op as usize).copied().unwrap_or(true) {
         obj.xfer_write.store(true, std::sync::atomic::Ordering::Relaxed);
+        if lazy_xfer_gate() {
+            match xfer_dst_buffer(name, slots) {
+                XferDst::Buffer(b) => {
+                    let mut v = obj.xfer_dst.lock().unwrap_or_else(|e| e.into_inner());
+                    if !v.contains(&b) {
+                        v.push(b);
+                    }
+                }
+                XferDst::None => {}
+                XferDst::Unknown => obj.xfer_unknown.store(true, std::sync::atomic::Ordering::Relaxed),
+            }
+        }
+    }
+}
+
+enum XferDst {
+    Buffer(u64),
+    /// Polecenie zapisuje tylko obraz (nie bufor).
+    None,
+    Unknown,
+}
+
+/// Bufor docelowy polecenia zapisu transferem (wg układu parametrów Vulkana). Pamięci z obrazami są i tak unieważniane w całości, więc zapis obrazu nie jest buforem.
+///
+/// # Safety
+/// `slots` to wartości parametrów polecenia; dla wariantów `*2` slot 1 to wskaźnik na strukturę informacyjną.
+unsafe fn xfer_dst_buffer(name: &str, slots: &[u64]) -> XferDst {
+    use std::ptr::read_unaligned as rd;
+    let n = name.trim_end_matches("KHR");
+    let at = |i: usize| slots.get(i).copied().filter(|&b| b != 0).map(XferDst::Buffer).unwrap_or(XferDst::Unknown);
+    let info = |off: usize| match slots.get(1).copied() {
+        Some(p) if p != 0 => match rd((p as *const u8).add(off) as *const u64) {
+            0 => XferDst::Unknown,
+            b => XferDst::Buffer(b),
+        },
+        _ => XferDst::Unknown,
+    };
+    match n {
+        "vkCmdCopyBuffer" => at(2),
+        "vkCmdFillBuffer" | "vkCmdUpdateBuffer" => at(1),
+        "vkCmdCopyImageToBuffer" => at(3),
+        "vkCmdCopyQueryPoolResults" => at(4),
+        // VkCopyBufferInfo2: dstBuffer @24; VkCopyImageToBufferInfo2: dstBuffer @32.
+        "vkCmdCopyBuffer2" => info(24),
+        "vkCmdCopyImageToBuffer2" => info(32),
+        "vkCmdCopyImage" | "vkCmdCopyImage2" | "vkCmdCopyBufferToImage" | "vkCmdCopyBufferToImage2" | "vkCmdBlitImage" | "vkCmdBlitImage2" | "vkCmdResolveImage" | "vkCmdResolveImage2" => XferDst::None,
+        _ => XferDst::Unknown,
     }
 }
 
@@ -1528,16 +1608,20 @@ unsafe fn note_cb_write(op: u16, name: &str, cb: u64) {
 ///
 /// # Safety
 /// `slots` z wywołania aplikacji zgodnego z sygnaturą: wskaźniki i liczniki struktur zgłoszenia muszą być ważne.
-unsafe fn submit_may_write(name: &str, slots: &[u64]) -> bool {
+unsafe fn submit_may_write(name: &str, slots: &[u64], dsts: &mut Vec<u64>, unknown: &mut bool) -> bool {
     use std::ptr::read_unaligned as rd;
     if slots.len() < 4 || slots[2] == 0 {
-        return slots.get(1).copied().unwrap_or(1) != 0;
+        let w = slots.get(1).copied().unwrap_or(1) != 0;
+        *unknown |= w;
+        return w;
     }
     let (count, infos) = (slots[1] as usize, slots[2] as *const u8);
     if count > 4096 {
+        *unknown = true;
         return true;
     }
     let v2 = name.starts_with("vkQueueSubmit2");
+    let mut any = false;
     for i in 0..count {
         // VkSubmitInfo (72 B): commandBufferCount @40, pCommandBuffers @48. VkSubmitInfo2 (64 B): commandBufferInfoCount @32, pCommandBufferInfos @40.
         let (base, n, list) = if v2 {
@@ -1552,17 +1636,30 @@ unsafe fn submit_may_write(name: &str, slots: &[u64]) -> bool {
             continue;
         }
         if list == 0 || n > 4096 {
+            *unknown = true;
             return true;
         }
         for k in 0..n {
             // VkCommandBufferSubmitInfo (32 B): commandBuffer @16.
             let cb = if v2 { rd((list as *const u8).add(k * 32 + 16) as *const u64) } else { rd((list as *const u8).add(k * 8) as *const u64) };
-            if cb == 0 || (*(cb as *const DispObj)).xfer_write.load(std::sync::atomic::Ordering::Relaxed) {
+            if cb == 0 {
+                *unknown = true;
                 return true;
+            }
+            let obj = &*(cb as *const DispObj);
+            if obj.xfer_write.load(std::sync::atomic::Ordering::Relaxed) {
+                any = true;
+                if !lazy_xfer_gate() {
+                    return true;
+                }
+                if obj.xfer_unknown.load(std::sync::atomic::Ordering::Relaxed) {
+                    *unknown = true;
+                }
+                dsts.extend(obj.xfer_dst.lock().unwrap_or_else(|e| e.into_inner()).iter().copied());
             }
         }
     }
-    false
+    any
 }
 
 /// Które polecenia mogą iść szybką ścieżką: `vkCmd*` bez wyniku i bez parametrów wyjściowych, klasy FireAndForget. Żadne z nich nie ma
@@ -1636,7 +1733,7 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
     if matches!(cmd.name, "vkBeginCommandBuffer" | "vkResetCommandBuffer") {
         drop((*cb).take());
     }
-    note_cb_write(op, cmd.name, slots[0]);
+    note_cb_write(op, cmd.name, slots[0], &slots);
     // SAFETY: uchwyt bufora poleceń to wskaźnik na obiekt ICD żyjący do `vkFreeCommandBuffers`/zniszczenia puli.
     if (*cb).push(&bytes) {
         let data = (*cb).take();
@@ -1815,13 +1912,13 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         // Początek nowego nagrywania albo reset: zaległości z przerwanego nagrywania (np. po `vkResetCommandPool`) są śmieciami i
         // nie mogą trafić do strumienia przed nowym `Begin` (serwer dostałby `vkCmd*` dla bufora, który nie nagrywa).
         "vkBeginCommandBuffer" | "vkResetCommandBuffer" if slots[0] != 0 => {
-            note_cb_write(op, cmd.name, slots[0]);
+            note_cb_write(op, cmd.name, slots[0], &slots);
             drop((*(slots[0] as *const DispObj)).take())
         }
         // Każde inne `vkCmd*`, które nie poszło szybką ścieżką, wchodzi do wspólnej partii natychmiast, więc zaległe polecenia TEGO bufora
         // muszą je poprzedzić (kolejność nagrywania w obrębie bufora).
         n if n.starts_with("vkCmd") && slots[0] != 0 && params.first().is_some_and(|p| p.type_name == "VkCommandBuffer") => {
-            note_cb_write(op, cmd.name, slots[0]);
+            note_cb_write(op, cmd.name, slots[0], &slots);
             drain_cb(&mut st, slots[0])
         }
         _ => {}
@@ -1961,6 +2058,10 @@ fn periodic_stats(stats: &Stats) {
             use std::sync::atomic::Ordering::Relaxed;
             let (n, ns) = (crate::lazymap::FAULTS_FETCHED.load(Relaxed).max(1), crate::lazymap::FETCH_NS.load(Relaxed));
             eprintln!("[gpu-icd] pobrania leniwe: {} razy, łączny czas {} ms (śr {} µs na pobranie), bajtów {} MB", n, ns / 1_000_000, ns / 1000 / n, crate::lazymap::FETCHED_BYTES.load(Relaxed) >> 20);
+            eprintln!("[gpu-icd] błędy stron: po obsłużeniu czekał następny {} razy z {}", crate::lazymap::FAULT_BACKLOG.load(Relaxed), crate::lazymap::FAULTS.load(Relaxed));
+            eprintln!("[gpu-icd] pominięte unieważnienia (bramka transferów): {}", LAZY_GATED.load(Relaxed));
+            eprintln!("[gpu-icd] pobrania z wyprzedzeniem: {} okien, czas {} ms", crate::lazymap::PREFETCHED.load(Relaxed), crate::lazymap::PREFETCH_NS.load(Relaxed) / 1_000_000);
+            eprintln!("[gpu-icd] pobrania leniwe: czekanie na blokadę instancji {} ms, praca pod blokadą (skan + obieg) {} ms, w tym flush {} ms i samo wywołanie MemRead {} ms", crate::lazymap::FETCH_LOCK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_WORK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_FLUSH_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_CALL_NS.load(Relaxed) / 1_000_000);
         }
         if flags().sem_cache {
             use std::sync::atomic::Ordering::Relaxed;
@@ -2603,8 +2704,17 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
             st.scan_pending = true;
         }
         st.gpu_dirty = true;
-        if flags().no_xfer_track || submit_may_write(cmd.name, slots) {
+        let (mut dsts, mut unknown) = (Vec::new(), flags().no_xfer_track);
+        if flags().no_xfer_track || submit_may_write(cmd.name, slots, &mut dsts, &mut unknown) {
             st.xfer_dirty = true;
+            if lazy_xfer_gate() {
+                st.xfer_unknown |= unknown;
+                for d in dsts {
+                    if !st.xfer_written.contains(&d) {
+                        st.xfer_written.push(d);
+                    }
+                }
+            }
         }
         st.submit_gen += 1;
     }
@@ -3092,7 +3202,8 @@ fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
     let Some(inst) = (unsafe { (r.owner as *const InstanceObj).as_ref() }).or_else(state) else { return false };
     crate::watchdog::set(0, crate::watchdog::LAZY_FETCH, off as u64);
     let _wd = WdGuard;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let t_lock = std::time::Instant::now();
+    let deadline = t_lock + std::time::Duration::from_secs(3);
     let mut st = loop {
         match inst.state.try_lock() {
             Ok(g) => break g,
@@ -3106,7 +3217,12 @@ fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
             }
         }
     };
-    st.read_mem_into_shadow(r.memory, off as u64, len)
+    use std::sync::atomic::Ordering::Relaxed;
+    let t_work = std::time::Instant::now();
+    crate::lazymap::FETCH_LOCK_NS.fetch_add((t_work - t_lock).as_nanos() as u64, Relaxed);
+    let ok = st.read_mem_into_shadow(r.memory, off as u64, len);
+    crate::lazymap::FETCH_WORK_NS.fetch_add(t_work.elapsed().as_nanos() as u64, Relaxed);
+    ok
 }
 
 /// Opis stanu połączenia do raportu watchdoga (bez blokowania: gdy blokada instancji jest zajęta, mówi o tym).
@@ -3118,6 +3234,13 @@ pub(crate) fn link_state() -> String {
         },
         None => "brak instancji".to_string(),
     }
+}
+
+static LAZY_GATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn lazy_xfer_gate() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_LAZY_XFER_GATE").is_some())
 }
 
 pub(crate) fn fast_commands() -> u64 {
