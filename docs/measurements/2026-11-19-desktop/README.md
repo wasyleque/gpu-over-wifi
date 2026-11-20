@@ -158,3 +158,13 @@ wejście NVENC zgodnie z formatem (ABGR dla RGBA), więc kolory po dekoderze są
 roślinność wychodziła cyjanowo-biała), przy raw/LZ4 kolory były dobre (potwierdzone przez użytkownika w drugim przebiegu). Błąd wprowadzony w 2527a43 (dedykowane
 połączenie wideo); test `swap_tests` pilnuje, że zamianę dostają tylko klatki raw/LZ4 w RGBA. Po poprawce zrzut ekranu z H.264 ma poprawne kolory (potwierdzone przez użytkownika).
 Wniosek: pomiary FPS z H.264 nie były dotknięte (zamiana nie zmienia kosztu), ale JAKOŚĆ obrazu była zła w CP — brakowało testu koloru end-to-end (do dodania).
+
+### Gorące okna dołączone do oczekiwań (`GPU_ICD_HOTPUSH=1`, 2026-11-20) — zmierzone, na razie gorzej
+
+Po `Sync` (oczekiwanie) klient dokłada w tym samym obiegu `MemRead` gorących okien leniwych pamięci (te, które aplikacja wcześniej czytała przy błędach stron; wynik wpisywany po
+`lazy_invalidate` i tylko gdy nikt nie zgłosił nowej pracy). Wyniki: wszystkie gorące okna przy każdym oczekiwaniu: **8,5 FPS** (209 tys. okien, 14,7 GB, pobrania leniwe −20%);
+okna skojarzone z kluczem oczekiwania (uchwyt pierwszego semafora/ogrodzenia): **11,1 FPS** (201 tys. okien, 13,2 GB, pobrania −22%).
+Log `GPU_ICD_FETCHLOG` z kluczem oczekiwania: tylko 9–11 różnych kluczy (dwa semafory czasowe, 100016 i 10000d), a okno czytane po jednym z nich w 40–86% przypadków, więc
+sam uchwyt semafora nie wskazuje, po którym oczekiwaniu okno będzie czytane (to ta sama liczba oczekiwań co ok. 28 na klatkę, różnią się wartością semafora).
+Wniosek: ~55 pobrań na klatkę jest rozproszone między ~28 oczekiwań na klatkę; skuteczny push wymaga klucza dokładniejszego niż uchwyt (np. para uchwyt + wartość
+oczekiwana modulo okres klatki albo numer oczekiwania w klatce) albo — przeciwnie — jednej zbiorczej odpowiedzi na końcu klatki. Do zbadania; opcja zostaje wyłączona.

@@ -125,7 +125,7 @@ struct State {
     /// i wieszało się). Te strony skan musi więc zawsze zweryfikować porównaniem skrótów (patrz `take_recheck`).
     recheck: Vec<(usize, usize)>,
     /// Okna (początek bajtowy → długość w stronach) pobierane przy prawdziwych błędach stron, z licznikiem: kandydaci do pobrania z wyprzedzeniem.
-    hot: std::collections::HashMap<usize, (usize, u32)>,
+    hot: std::collections::HashMap<(usize, u64), (usize, u32)>,
 }
 
 pub struct LazyRegion {
@@ -314,6 +314,8 @@ fn handler(hub: Arc<Hub>) {
 }
 
 /// Ile razy po obsłużeniu błędu strony czekał już następny.
+/// Klucz ostatnio rozpoczętego oczekiwania (uchwyt pierwszego semafora/ogrodzenia): do kojarzenia okien odczytu z oczekiwaniem, po którym są czytane.
+pub static LAST_WAIT_KEY: AtomicU64 = AtomicU64::new(0);
 pub static FAULT_BACKLOG: AtomicU64 = AtomicU64::new(0);
 
 /// `UFFDIO_CONTINUE` z obsługą błędu. Jego porażka (np. brak strony w pamięci podręcznej stron widoku własnego, gdy pobranie się nie udało) zostawiała
@@ -385,7 +387,7 @@ fn fetch_log(memory: u64, off: usize, len: usize, data: Option<usize>) {
             let sl = unsafe { std::slice::from_raw_parts(p as *const u64, len / 8) };
             sl.iter().fold(0xcbf29ce484222325u64, |h, &w| (h ^ w).wrapping_mul(0x100000001b3).rotate_left(5))
         });
-        let _ = writeln!(w, "{t} {memory:x} {off} {len} {:x}", h.unwrap_or(0));
+        let _ = writeln!(w, "{t} {memory:x} {off} {len} {:x} {:x}", h.unwrap_or(0), LAST_WAIT_KEY.load(Ordering::Relaxed));
     }
 }
 
@@ -416,7 +418,7 @@ fn fetch_for(hub: &Hub, r: &Arc<LazyRegion>, off: usize, pre: Option<usize>) -> 
                     st.last_end = b / PAGE;
                 }
                 if let Some(&(a, b)) = plan.first() {
-                    let e = st.hot.entry(a).or_insert((0, 0));
+                    let e = st.hot.entry((a, LAST_WAIT_KEY.load(Ordering::Relaxed))).or_insert((0, 0));
                     *e = ((b - a) / PAGE, e.1 + 1);
                     if st.hot.len() > 256 {
                         st.hot.clear();
@@ -496,7 +498,7 @@ fn prefetcher() -> &'static Prefetcher {
             let Some(hub) = hub() else { continue };
             let mut hot: Vec<(usize, usize, u32)> = {
                 let st = r.state.lock().unwrap_or_else(|e| e.into_inner());
-                st.hot.iter().filter(|(_, v)| v.1 >= 3).map(|(&a, v)| (a, v.0, v.1)).collect()
+                st.hot.iter().filter(|(_, v)| v.1 >= 3).map(|(&(a, _), v)| (a, v.0, v.1)).collect()
             };
             hot.sort_by(|a, b| b.2.cmp(&a.2));
             for (a, pages, _) in hot.into_iter().take(8) {
@@ -509,6 +511,30 @@ fn prefetcher() -> &'static Prefetcher {
 }
 
 impl LazyRegion {
+    /// Gorące okna (początek bajtowy, długość w bajtach) czytane po oczekiwaniu o kluczu `key` przy ≥ `min` prawdziwych błędach stron (najwyżej 8, najczęstsze pierwsze).
+    pub fn hot_windows(&self, min: u32, key: u64) -> Vec<(usize, usize)> {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v: Vec<(usize, usize, u32)> = st.hot.iter().filter(|(&(_, k), c)| k == key && c.1 >= min).map(|(&(a, _), c)| (a, c.0 * PAGE, c.1)).collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2));
+        v.into_iter().take(8).map(|(a, l, _)| (a, l)).collect()
+    }
+
+    /// Dane `[off, off+len)` właśnie wpisano w widok własny (odpowiedź serwera dołączona do oczekiwania): oznacz je jako świeże i odwzoruj w widoku
+    /// aplikacji, żeby pierwszy odczyt nie kończył się błędem strony. Wołać PO `invalidate` tego samego oczekiwania.
+    pub fn install_fresh(&self, off: usize, len: usize) {
+        let Some(h) = hub() else { return };
+        let (a, b) = (off & !(PAGE - 1), (off + len).div_ceil(PAGE) * PAGE);
+        if b > self.len || a >= b {
+            return;
+        }
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.stale.mark_fresh(a, b);
+        for p in a / PAGE..b / PAGE {
+            st.present[p / 64] |= 1 << (p % 64);
+        }
+        cont(&h, self.app + a, b - a, Some(self.own + a));
+    }
+
     /// Zleca pobranie gorących okien tej pamięci z wyprzedzeniem (po `invalidate`).
     pub fn prefetch_hot(self: &Arc<Self>) {
         if !prefetch_enabled() || self.prefetch_queued.swap(true, Ordering::AcqRel) {

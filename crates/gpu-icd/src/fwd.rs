@@ -884,6 +884,26 @@ impl InstState {
         }
     }
 
+    /// Gorące okna leniwych pamięci do dołączenia do oczekiwania: (pamięć, offset, długość); do 8 okien na pamięć, razem najwyżej 4 MiB, okno ≤ 1 MiB.
+    fn hot_requests(&self, key: u64) -> Vec<(u64, usize, usize)> {
+        let mut out = Vec::new();
+        let mut total = 0usize;
+        for (id, s) in self.mems.iter() {
+            let Some(r) = &s.lazy else { continue };
+            if !s.mapped {
+                continue;
+            }
+            for (a, l) in r.hot_windows(3, key) {
+                if l == 0 || l > (1 << 20) || total + l > (4 << 20) || a + l > r.len() {
+                    continue;
+                }
+                total += l;
+                out.push((*id, a, l));
+            }
+        }
+        out
+    }
+
     /// Czy pamięć `id` trzeba odświeżyć po oczekiwaniu: bufory deskryptorów pomijamy (GPU ich nie pisze), pamięci pisane tylko transferem odświeżamy,
     /// gdy zgłoszona praca miała polecenia zapisu; co 64. pominięcie jest audytowane, a pamięć przyłapana na zmianie jest odświeżana już zawsze.
     fn needs_refresh(&self, id: u64) -> bool {
@@ -2059,6 +2079,7 @@ fn periodic_stats(stats: &Stats) {
             let (n, ns) = (crate::lazymap::FAULTS_FETCHED.load(Relaxed).max(1), crate::lazymap::FETCH_NS.load(Relaxed));
             eprintln!("[gpu-icd] pobrania leniwe: {} razy, łączny czas {} ms (śr {} µs na pobranie), bajtów {} MB", n, ns / 1_000_000, ns / 1000 / n, crate::lazymap::FETCHED_BYTES.load(Relaxed) >> 20);
             eprintln!("[gpu-icd] błędy stron: po obsłużeniu czekał następny {} razy z {}", crate::lazymap::FAULT_BACKLOG.load(Relaxed), crate::lazymap::FAULTS.load(Relaxed));
+            eprintln!("[gpu-icd] gorące okna dołączone do oczekiwań: {} okien, {} MB", HOT_PUSHED.load(Relaxed), HOT_PUSHED_BYTES.load(Relaxed) >> 20);
             eprintln!("[gpu-icd] pominięte unieważnienia (bramka transferów): {}", LAZY_GATED.load(Relaxed));
             eprintln!("[gpu-icd] pobrania z wyprzedzeniem: {} okien, czas {} ms", crate::lazymap::PREFETCHED.load(Relaxed), crate::lazymap::PREFETCH_NS.load(Relaxed) / 1_000_000);
             eprintln!("[gpu-icd] pobrania leniwe: czekanie na blokadę instancji {} ms, praca pod blokadą (skan + obieg) {} ms, w tym flush {} ms i samo wywołanie MemRead {} ms", crate::lazymap::FETCH_LOCK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_WORK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_FLUSH_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_CALL_NS.load(Relaxed) / 1_000_000);
@@ -2923,6 +2944,22 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         let req = st.delta_request(*id);
         reqs.push(req);
     }
+    if cmd.class == CmdClass::Sync {
+        // Klucz oczekiwania: nazwa polecenia + uchwyt pierwszego semafora/ogrodzenia (VkSemaphoreWaitInfo: semaphoreCount @20, pSemaphores @24).
+        let first = match cmd.name {
+            "vkWaitSemaphores" | "vkWaitSemaphoresKHR" if slots.len() >= 2 && slots[1] != 0 => {
+                let ps = std::ptr::read_unaligned((slots[1] as *const u8).add(24) as *const u64);
+                if ps != 0 { std::ptr::read_unaligned(ps as *const u64) } else { 0 }
+            }
+            "vkWaitForFences" if slots.len() >= 3 && slots[2] != 0 => std::ptr::read_unaligned(slots[2] as *const u64),
+            _ => 0,
+        };
+        crate::lazymap::LAST_WAIT_KEY.store(first ^ (cmd.name.len() as u64) << 56, std::sync::atomic::Ordering::Relaxed);
+    }
+    let hot: Vec<(u64, usize, usize)> = if hotpush() && cmd.class == CmdClass::Sync && st.gpu_dirty { st.hot_requests(crate::lazymap::LAST_WAIT_KEY.load(std::sync::atomic::Ordering::Relaxed)) } else { Vec::new() };
+    for &(memory, off, len) in &hot {
+        reqs.push(Request::MemRead { memory, offset: off as u64, len: len as u32 });
+    }
     let ticket = st.client.send_many(&reqs).ok();
     // Oczekiwanie na semafor bez limitu czasu wraca do gry od razu, gdy po nim nie ma czego odświeżać z serwera: serwer wykona je w kolejności strumienia
     // (przed każdym późniejszym zapisem pamięci i poleceniem), więc GPU skończy pracę, zanim cokolwiek, co gra zrobi potem, dotrze do niego; odczyty
@@ -2931,10 +2968,10 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         // Diagnostyka: czemu to oczekiwanie nie wraca wcześniej (0: wraca, 1: odświeżenia pamięci, 2: limit czasu poniżej progu (odpytywanie), 3: brak kontraktu).
         use std::sync::atomic::Ordering::Relaxed;
         let timeout = slots.get(2).copied().unwrap_or(0);
-        let k = if !pre_ids.is_empty() { 1 } else if timeout < EARLY_MIN_TIMEOUT_NS { if timeout == 0 { 2 } else { 4 } } else if !contract_active() { 3 } else { 0 };
+        let k = if !pre_ids.is_empty() || !hot.is_empty() { 1 } else if timeout < EARLY_MIN_TIMEOUT_NS { if timeout == 0 { 2 } else { 4 } } else if !contract_active() { 3 } else { 0 };
         WAIT_KIND[k].fetch_add(1, Relaxed);
     }
-    if let (Some(t), true) = (ticket, cmd.class == CmdClass::Sync && pre_ids.is_empty() && cmd.name.starts_with("vkWaitSemaphores") && slots.get(2).is_some_and(|t| *t >= EARLY_MIN_TIMEOUT_NS) && contract_active()) {
+    if let (Some(t), true) = (ticket, cmd.class == CmdClass::Sync && pre_ids.is_empty() && hot.is_empty() && cmd.name.starts_with("vkWaitSemaphores") && slots.get(2).is_some_and(|t| *t >= EARLY_MIN_TIMEOUT_NS) && contract_active()) {
         st.client.shared().defer(t);
         if flags().sem_cache {
             sem_raise_from_wait(slots[1]);
@@ -2952,6 +2989,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         slots_ptr: slots.as_mut_ptr(),
         slots_len: slots.len(),
         pre_ids,
+        hot,
         alloc_ctx,
         speculated,
         audited,
@@ -2972,6 +3010,7 @@ pub(crate) struct Pending {
     slots_ptr: *mut u64,
     slots_len: usize,
     pre_ids: Vec<u64>,
+    hot: Vec<(u64, usize, usize)>,
     alloc_ctx: Option<(u64, Vec<u64>)>,
     speculated: bool,
     audited: bool,
@@ -2995,6 +3034,7 @@ pub(crate) struct Responses {
     q: Result<Response, gpu_renderd::client::ClientError>,
     sy: Result<Response, gpu_renderd::client::ClientError>,
     deltas: Vec<Option<Vec<u8>>>,
+    hot: Vec<Option<Vec<u8>>>,
 }
 
 impl Pending {
@@ -3002,13 +3042,15 @@ impl Pending {
     pub(crate) fn receive(&self) -> Responses {
         if !self.sent_ok {
             let closed = || Err(gpu_renderd::client::ClientError::Closed);
-            return Responses { q: closed(), sy: closed(), deltas: vec![None; self.pre_ids.len()] };
+            return Responses { q: closed(), sy: closed(), deltas: vec![None; self.pre_ids.len()], hot: vec![None; self.hot.len()] };
         }
         let q = self.shared.recv_at(self.base);
         let sy = self.shared.recv_at(self.base + 1);
         // Odpowiedzi na odświeżenia przychodzą zawsze, więc czytamy je od razu (także przy późniejszym błędzie), żeby nie rozsynchronizować strumienia.
         let deltas = (0..self.pre_ids.len()).map(|i| if let Ok(Response::Data(d)) = self.shared.recv_at(self.base + 2 + i as u64) { Some(d) } else { None }).collect();
-        Responses { q, sy, deltas }
+        let n0 = self.base + 2 + self.pre_ids.len() as u64;
+        let hot = (0..self.hot.len()).map(|i| if let Ok(Response::Data(d)) = self.shared.recv_at(n0 + i as u64) { Some(d) } else { None }).collect();
+        Responses { q, sy, deltas, hot }
     }
 }
 
@@ -3035,6 +3077,7 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
     let slots: &mut [u64] = std::slice::from_raw_parts_mut(p.slots_ptr, p.slots_len);
     let args = slots.as_ptr() as *const u8;
     let fail = |e: i32| -> u64 { e as u32 as u64 };
+    let hot_data = r.hot;
     let (speculated, audited, desc_key, alloc_ctx) = (p.speculated, p.audited, p.desc_key.clone(), p.alloc_ctx.clone());
     // Odpowiedzi na odświeżenia przyszły razem z resztą (czytane bez blokady), więc tu tylko je wpisujemy.
     let t_refresh = std::time::Instant::now();
@@ -3182,6 +3225,24 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
         if st.gpu_dirty {
             st.lazy_invalidate();
         }
+        // Odczyty gorących okien dołączone do oczekiwania: dane są z chwili po zakończeniu pracy GPU. Wpisujemy je tylko, gdy w międzyczasie nikt nie zgłosił
+        // nowej pracy (jej zapisy GPU nie byłyby w nich ujęte), i dopiero po unieważnieniu, żeby oznaczenie świeżości nie zostało przez nie zdjęte.
+        if !hot_data.is_empty() && st.submit_gen == p.submit_gen {
+            let base = p.base + 2 + p.pre_ids.len() as u64;
+            for (i, ((memory, off, len), d)) in p.hot.iter().zip(hot_data).enumerate() {
+                let Some(d) = d else { continue };
+                if d.len() != *len {
+                    continue;
+                }
+                let lazy = st.mems.get(memory).and_then(|s| s.lazy.clone());
+                if let (Some(r), Some(s)) = (lazy, st.mems.get_mut(memory)) {
+                    s.apply_at(*off, &d, base + i as u64);
+                    r.install_fresh(*off, *len);
+                    HOT_PUSHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    HOT_PUSHED_BYTES.fetch_add(*len as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         if refreshed {
             // Pamięci zostały odświeżone w tym samym obiegu co oczekiwanie. Jeśli w międzyczasie (gdy czekaliśmy bez blokady) inny wątek
             // zgłosił pracę, jego zapisy GPU nie były objęte tym odświeżeniem, więc stan "brudny" zostaje.
@@ -3239,6 +3300,15 @@ pub(crate) fn link_state() -> String {
         },
         None => "brak instancji".to_string(),
     }
+}
+
+static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HOT_PUSHED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `GPU_ICD_HOTPUSH=1`: oczekiwanie (Sync) niesie w tym samym obiegu odczyty gorących okien leniwych pamięci; dane wracają razem z jego odpowiedzią.
+fn hotpush() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GPU_ICD_HOTPUSH").is_some())
 }
 
 static LAZY_GATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

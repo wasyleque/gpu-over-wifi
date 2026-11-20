@@ -29,7 +29,7 @@ PY"
 if [ "${BENCH_FULLSCREEN:-1}" = 1 ]; then
   r "python3 - <<'PY'
 import json, pathlib
-p = pathlib.Path('$res').parents[2] / 'AppData/Local/CD Projekt Red/Cyberpunk 2077/UserSettings.json'
+p = pathlib.Path('$res').parents[3] / 'AppData/Local/CD Projekt Red/Cyberpunk 2077/UserSettings.json'
 d = json.loads(p.read_text())
 def walk(x):
     if isinstance(x, dict):
