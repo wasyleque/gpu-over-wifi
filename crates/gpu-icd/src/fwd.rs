@@ -925,6 +925,7 @@ impl InstState {
                 crate::gpuwrite::Plan::Ranges(v) => v,
             };
             r.invalidate(&ranges);
+            r.note_inv_ticket(self.wait_ticket);
             r.prefetch_hot();
             n += 1;
         }
@@ -937,7 +938,7 @@ impl InstState {
 
     /// Gorące okna leniwych pamięci (pamięć, [(offset, długość)]) do różnicowego odczytu dołączonego do oczekiwania (`GPU_ICD_HOTDELTA`): okna czytane przy
     /// ≥ 3 prawdziwych błędach stron; razem najwyżej 4 MiB na oczekiwanie (serwer porównuje je z tym, co już wysłał, i odsyła tylko zmienione strony).
-    fn hot_requests(&self) -> Vec<(u64, Vec<(usize, usize)>)> {
+    fn hot_requests(&self) -> Vec<(u64, Vec<(usize, usize)>, u64)> {
         let mut out = Vec::new();
         let mut total = 0usize;
         for (id, s) in self.mems.iter() {
@@ -954,7 +955,7 @@ impl InstState {
                 wins.push((a, l));
             }
             if !wins.is_empty() {
-                out.push((*id, wins));
+                out.push((*id, wins, r.epoch()));
             }
         }
         out
@@ -2135,7 +2136,8 @@ fn periodic_stats(stats: &Stats) {
             let (n, ns) = (crate::lazymap::FAULTS_FETCHED.load(Relaxed).max(1), crate::lazymap::FETCH_NS.load(Relaxed));
             eprintln!("[gpu-icd] pobrania leniwe: {} razy, łączny czas {} ms (śr {} µs na pobranie), bajtów {} MB", n, ns / 1_000_000, ns / 1000 / n, crate::lazymap::FETCHED_BYTES.load(Relaxed) >> 20);
             eprintln!("[gpu-icd] błędy stron: po obsłużeniu czekał następny {} razy z {}", crate::lazymap::FAULT_BACKLOG.load(Relaxed), crate::lazymap::FAULTS.load(Relaxed));
-            eprintln!("[gpu-icd] gorące okna dołączone do oczekiwań: {} okien, {} MB", HOT_PUSHED.load(Relaxed), HOT_PUSHED_BYTES.load(Relaxed) >> 20);
+            eprintln!("[gpu-icd] pod blokadą w oczekiwaniach: unieważnienie leniwych pamięci {} ms, wpisanie i odwzorowanie gorących okien {} ms", INV_NS.load(Relaxed) / 1_000_000, HOT_APPLY_NS.load(Relaxed) / 1_000_000);
+            eprintln!("[gpu-icd] gorące okna dołączone do oczekiwań: {} okien, {} MB; pominięte (odpowiedź niekompletna {}, nowa praca w międzyczasie {})", HOT_PUSHED.load(Relaxed), HOT_PUSHED_BYTES.load(Relaxed) >> 20, HOT_SKIP_MORE.load(Relaxed), HOT_SKIP_GEN.load(Relaxed));
             let qn = FETCH_Q_N.load(Relaxed).max(1);
             eprintln!("[gpu-icd] kolejka nadawcza przed odczytem leniwym: średnio {} KB w {:.1} partiach ({} odczytów)", FETCH_Q_BYTES.load(Relaxed) / qn / 1024, FETCH_Q_ITEMS.load(Relaxed) as f64 / qn as f64, qn);
             eprintln!("[gpu-icd] kanał odczytów: {} odczytów, średnio {} µs, ucieczek do strumienia sterującego {}", crate::readchan::READS.load(Relaxed), crate::readchan::READ_NS.load(Relaxed) / 1000 / crate::readchan::READS.load(Relaxed).max(1), crate::readchan::FALLBACKS.load(Relaxed));
@@ -3015,8 +3017,8 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         };
         crate::lazymap::LAST_WAIT_KEY.store(first ^ (cmd.name.len() as u64) << 56, std::sync::atomic::Ordering::Relaxed);
     }
-    let hot: Vec<(u64, Vec<(usize, usize)>)> = if hotpush() && cmd.class == CmdClass::Sync && st.gpu_dirty { st.hot_requests() } else { Vec::new() };
-    for (memory, wins) in &hot {
+    let hot: Vec<(u64, Vec<(usize, usize)>, u64)> = if hotpush() && cmd.class == CmdClass::Sync && st.gpu_dirty { st.hot_requests() } else { Vec::new() };
+    for (memory, wins, _) in &hot {
         let cached = st.mem_cached.get(memory).copied().unwrap_or(true);
         reqs.push(Request::MemReadDeltaRanges { memory: *memory, ranges: wins.iter().map(|&(a, l)| (a as u64, l as u64)).collect(), cached });
     }
@@ -3038,6 +3040,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         }
         st.stats.early_waits += 1;
         if st.gpu_dirty {
+            st.wait_ticket = t;
             st.lazy_invalidate();
         }
         st.gpu_dirty = false;
@@ -3070,7 +3073,7 @@ pub(crate) struct Pending {
     slots_ptr: *mut u64,
     slots_len: usize,
     pre_ids: Vec<u64>,
-    hot: Vec<(u64, Vec<(usize, usize)>)>,
+    hot: Vec<(u64, Vec<(usize, usize)>, u64)>,
     alloc_ctx: Option<(u64, Vec<u64>)>,
     speculated: bool,
     audited: bool,
@@ -3282,15 +3285,22 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
         }
     }
     if cmd.class == CmdClass::Sync && result == 0 {
+        // Licznik unieważnień gorących pamięci tuż przed naszym unieważnieniem: gdy różni się od tego z chwili wysyłki, inne oczekiwanie zdążyło w międzyczasie
+        // unieważnić pamięć, więc nasze dane (z wcześniejszego miejsca strumienia) nie mogą być oznaczone jako świeże.
+        let inv_before: Vec<Option<u64>> = p.hot.iter().map(|(m, _, _)| st.mems.get(m).and_then(|s| s.lazy.as_ref()).and_then(|r| r.inv_ticket())).collect();
         if st.gpu_dirty {
+            st.wait_ticket = p.base;
+            let t_inv = std::time::Instant::now();
             st.lazy_invalidate();
+            INV_NS.fetch_add(t_inv.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
+        let t_hot = std::time::Instant::now();
         // Różnicowe odczyty gorących okien dołączone do oczekiwania: dane (zmienione strony) zawsze wpisujemy do kopii, bo serwer uznał je za dostarczone (jego
         // punkt odniesienia przesunął się); oznaczenie „świeże” i odwzorowanie w widoku aplikacji tylko, gdy odpowiedź jest kompletna i nikt w międzyczasie nie
         // zgłosił nowej pracy (jej zapisów GPU w tych danych nie ma), a unieważnienie tego oczekiwania już się odbyło.
         if !hot_data.is_empty() {
             let base = p.base + 2 + p.pre_ids.len() as u64;
-            for (i, ((memory, wins), d)) in p.hot.iter().zip(hot_data).enumerate() {
+            for (i, (((memory, wins, _epoch0), d), inv_b)) in p.hot.iter().zip(hot_data).zip(inv_before.iter()).enumerate() {
                 let Some(d) = d else { continue };
                 let Some((more, segs)) = gpu_proto::pagediff::decode_segments(&d) else { continue };
                 let ticket = base + i as u64;
@@ -3300,7 +3310,14 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
                     }
                 }
                 HOT_PUSHED_BYTES.fetch_add(segs.iter().map(|(_, b)| b.len() as u64).sum::<u64>(), std::sync::atomic::Ordering::Relaxed);
-                if !more && st.submit_gen == p.submit_gen {
+                // Świeże tylko, gdy wszystkie dotychczasowe unieważnienia pochodzą z oczekiwań wcześniejszych w strumieniu niż nasze (nasz odczyt jest od nich nowszy).
+                let fresh_ok = inv_b.is_none_or(|t| t < p.base);
+                if more {
+                    HOT_SKIP_MORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else if !fresh_ok {
+                    HOT_SKIP_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if !more && fresh_ok {
                     if let Some(r) = st.mems.get(memory).and_then(|s| s.lazy.clone()) {
                         for &(a, l) in wins {
                             r.install_fresh(a, l);
@@ -3310,6 +3327,7 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
                 }
             }
         }
+        HOT_APPLY_NS.fetch_add(t_hot.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         if refreshed {
             // Pamięci zostały odświeżone w tym samym obiegu co oczekiwanie. Jeśli w międzyczasie (gdy czekaliśmy bez blokady) inny wątek
             // zgłosił pracę, jego zapisy GPU nie były objęte tym odświeżeniem, więc stan "brudny" zostaje.
@@ -3468,6 +3486,10 @@ fn lock_with_timeout(inst: &InstanceObj) -> Option<std::sync::MutexGuard<'_, Ins
 }
 
 static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static INV_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HOT_APPLY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HOT_SKIP_MORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HOT_SKIP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HOT_PUSHED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Oczekiwanie (Sync) niesie w tym samym obiegu RÓŻNICOWY odczyt gorących okien leniwych pamięci (serwer odsyła tylko zmienione strony); aplikacja czyta je lokalnie,

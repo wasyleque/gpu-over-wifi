@@ -224,3 +224,11 @@ oczekiwaniu) przegrywał na przepustowości (14 GB); wersja różnicowa dokłada
 i odsyła tylko zmienione strony (64% okien jest identycznych), a klient po `lazy_invalidate` wpisuje je i odwzorowuje w widoku aplikacji (`install_fresh`), więc odczyt jest lokalny. Dane zawsze trafiają do kopii (punkt
 odniesienia serwera się przesuwa), a oznaczenie „świeże” tylko gdy odpowiedź kompletna i nikt nie zgłosił nowej pracy. Wyniki: 25,46 / 25,07 / 25,15 FPS (maks 58) wobec 15,50 bez; pobrania leniwe 55 → 29,6 tys.,
 dołączone dane 731 MB na przebieg. Obraz poprawny (zrzuty). Oczekiwania z gorącymi oknami blokują (nie wracają wcześniej), ale zastępują oczekiwanie + osobny odczyt jednym obiegiem.
+
+### Co dalej po przełomie (2026-11-21)
+
+- Świeżość okien liczona biletem strumienia (`inv_ticket`: dane z odczytu są świeże, gdy wszystkie dotychczasowe unieważnienia pochodzą z oczekiwań wcześniejszych w strumieniu niż nasze), zamiast „nikt nie zgłosił pracy”:
+  pominięte instalacje spadły z 144 tys. (2/3) do 14 tys., pobrania leniwe z ok. 55 tys. do 1,7 tys. na przebieg. FPS pozostał ok. 25–27, więc wąskim gardłem nie jest już odczyt.
+- Nowa ścieżka krytyczna: blokada instancji (czekanie 384–408 s, trzymanie 131–138 s w przebiegu; `WaitSemaphores` trzyma ją 0,33 ms × 344 tys.). Pod blokadą w oczekiwaniach: skan pamięci 66–82 s, flush 12–16 s,
+  unieważnienie leniwych pamięci 7,5 s, wpisanie i odwzorowanie gorących okien 13 s. Skan hot/cold (25,37) i na 4 wątkach (25,75) wobec bazy 25,85 — nadal neutralne, więc sam skan nie ogranicza FPS
+  (11 wątków gry czeka na blokadzie, ale to obciążenie przesuwa się między wątkami). Zostają do zbadania: oczekiwania, które blokują grę (gorące okna wyłączają powrót wcześniejszy), i konkurencja o blokadę.

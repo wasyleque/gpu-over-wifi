@@ -126,6 +126,8 @@ struct State {
     recheck: Vec<(usize, usize)>,
     /// Okna (początek bajtowy → długość w stronach) pobierane przy prawdziwych błędach stron, z licznikiem: kandydaci do pobrania z wyprzedzeniem.
     hot: std::collections::HashMap<(usize, u64), (usize, u32)>,
+    /// Bilet strumienia najnowszego oczekiwania, które unieważniło tę pamięć: dane z odczytu o niższym bilecie nie mogą być już oznaczone jako świeże.
+    inv_ticket: Option<u64>,
 }
 
 pub struct LazyRegion {
@@ -210,7 +212,7 @@ impl LazyRegion {
             return None;
         }
         let pages = len / PAGE;
-        let region = Arc::new(LazyRegion { prefetch_queued: std::sync::atomic::AtomicBool::new(false), memory, owner, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: window_min(), last_end: usize::MAX, recheck: Vec::new(), hot: Default::default() }) });
+        let region = Arc::new(LazyRegion { prefetch_queued: std::sync::atomic::AtomicBool::new(false), memory, owner, app: a, own: o, len, state: Mutex::new(State { stale: LazyPages::new(len), present: vec![0; pages.div_ceil(64)], epoch: 0, window: window_min(), last_end: usize::MAX, recheck: Vec::new(), hot: Default::default(), inv_ticket: None }) });
         h.regions.write().unwrap_or_else(|e| e.into_inner()).insert(a, region.clone());
         Some(region)
     }
@@ -526,6 +528,22 @@ impl LazyRegion {
         let mut v: Vec<(usize, usize, u32)> = by.into_iter().filter(|(_, c)| c.1 >= min).map(|(a, c)| (a, c.0 * PAGE, c.1)).collect();
         v.sort_by(|a, b| b.2.cmp(&a.2));
         v.into_iter().take(32).map(|(a, l, _)| (a, l)).collect()
+    }
+
+    /// Licznik unieważnień tej pamięci (rośnie przy każdym `invalidate`).
+    pub fn epoch(&self) -> u64 {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).epoch
+    }
+
+    /// Zapisuje bilet oczekiwania, które właśnie unieważniło tę pamięć (największy dotychczasowy).
+    pub fn note_inv_ticket(&self, t: u64) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.inv_ticket = Some(st.inv_ticket.map_or(t, |x| x.max(t)));
+    }
+
+    /// Bilet najnowszego oczekiwania, które unieważniło pamięć (`None`: żadne).
+    pub fn inv_ticket(&self) -> Option<u64> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).inv_ticket
     }
 
     /// Dane `[off, off+len)` właśnie wpisano w widok własny (odpowiedź serwera dołączona do oczekiwania): oznacz je jako świeże i odwzoruj w widoku

@@ -121,6 +121,8 @@ struct InstState {
     /// `GPU_ICD_LAZY_XFER_GATE`: bufory docelowe kopii w pracy zgłoszonej od ostatniego unieważnienia i znacznik „nie wiadomo, co zapisano”.
     xfer_written: Vec<u64>,
     xfer_unknown: bool,
+    /// Bilet strumienia oczekiwania, które właśnie unieważnia pamięci leniwe (ustawiany przed `lazy_invalidate`).
+    wait_ticket: u64,
     /// Był `vkQueueSubmit` od ostatniego skanu odwzorowanej pamięci: skan (zapisy na serwer) następuje tuż przed wysłaniem partii, patrz `settle_memory`.
     scan_pending: bool,
     /// Chwila ostatniego wypchnięcia zapisów pamięci przy `vkEndCommandBuffer` (`GPU_ICD_EAGER_PUSH_US`).
@@ -406,6 +408,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             xfer_dirty: false,
             xfer_written: Vec::new(),
             xfer_unknown: false,
+            wait_ticket: 0,
             scan_pending: false,
             last_push: std::time::Instant::now(),
             submit_gen: 0,
