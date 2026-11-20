@@ -88,3 +88,9 @@ Cyberpunk: 1084 klatek w 68,9 s (15,7 FPS; powtórka 16,22 → rozrzut ±0,5). S
 z 1,7 ms na pobranie serwer to ok. 0,22 ms. Reszta jest po stronie klienta: callback `fetch` robi najpierw skan (settle, ~0,7 ms średnio = 96 s / 128 tys.),
 potem wysyłkę zaległej paczki i obieg (RTT ~0,25 ms). Wniosek: skan jest składnikiem pobrania, więc redukcja skanu (B) skraca oba kubełki naraz.
 Priorytet pobrań w pipeline serwera nie ma sensu; push (A) ukryłby tylko ~0,5 ms obiegu.
+
+### Czysty przebieg benchmarka (tylko benchmark, bez menu/ładowania; tools/cp-bench.sh) – 2026-11-20
+15,52 FPS, 1088 klatek w 70,1 s, ICD 25d8e0f0 z GPU_ICD_SCAN_THREADS=4. Skany: obieg synchroniczny 42 635 skanów = **36,4 s (0,85 ms/skan)**, flush 10 873 = 9,3 s, leniwy 59 933 = 3,2 s.
+**Korekta wcześniejszych rachunków:** skanów całej areny jest ~39 na klatkę (nie ~10), razem ok. 45,7 s z 70 s przebiegu, jeśli leżą na ścieżce krytycznej wątku gry (do potwierdzenia pomiarem wątkowym). Skan na 4 wątkach **nie przyspieszył** (0,85 ms vs 0,88 ms przy jednym wątku): jądro najpewniej serializuje PAGEMAP_SCAN z WP_MATCHING na jednej areno-VMA, więc skan równoległy odpada jako dźwignia.
+"Łączny czas pobrań leniwych" (144 s w 70 s przebiegu) to suma czasu WĄTKÓW, nie czas ścianowy: wcześniejsze wnioski "pobranie leniwe = największy kubełek" były zawyżone sumowaniem współbieżnych wątków.
+Wniosek: dźwignią numer jeden jest liczba i obszar skanów całej areny (hot/cold z pułapką synchroniczną wymaga `vm.unprivileged_userfaultfd=1`).
