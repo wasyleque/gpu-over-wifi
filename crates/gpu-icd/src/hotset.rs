@@ -56,6 +56,38 @@ impl HotSet {
             .collect()
     }
 
+    /// Odnotowuje zapisane bloki (bez przeglądania pozostałych).
+    pub fn note_written(&mut self, scan: u64, written: impl IntoIterator<Item = usize>) {
+        for b in written {
+            if let Some(s) = self.blocks.get_mut(b) {
+                *s = State::Hot(scan);
+            }
+        }
+    }
+
+    /// Gorące bloki bez zapisu od co najmniej `cool_after` skanów.
+    pub fn candidates(&self, scan: u64) -> Vec<usize> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| match s {
+                State::Hot(last) if scan.saturating_sub(*last) >= self.cool_after => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Ustawia blok jako gorący od skanu `scan` (nowy przydział albo awans).
+    pub fn reset(&mut self, b: usize, scan: u64) {
+        if let Some(s) = self.blocks.get_mut(b) {
+            *s = State::Hot(scan);
+        }
+    }
+
+    pub fn set_cool_after(&mut self, n: u64) {
+        self.cool_after = n;
+    }
+
     pub fn cooled(&mut self, b: usize) {
         if let Some(s) = self.blocks.get_mut(b) {
             *s = State::Cold;

@@ -1997,6 +1997,9 @@ fn periodic_stats(stats: &Stats) {
         if let Some(r) = crate::memtrack::block_report() {
             eprintln!("[gpu-icd] {r}");
         }
+        if let Some(r) = crate::memtrack::hotcold_report() {
+            eprintln!("[gpu-icd] {r}");
+        }
         {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] oczekiwania na semafor wg przyczyny: wracają wcześniej {}, z odświeżeniem pamięci {}, odpytywanie (limit 0) {}, krótki limit czasu {}, bez kontraktu {}", WAIT_KIND[0].load(Relaxed), WAIT_KIND[1].load(Relaxed), WAIT_KIND[2].load(Relaxed), WAIT_KIND[4].load(Relaxed), WAIT_KIND[3].load(Relaxed));
