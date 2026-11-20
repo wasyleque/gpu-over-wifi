@@ -23,6 +23,7 @@ const PAGEMAP_SCAN: u64 = 0xc060_6610;
 const PM_SCAN_WP_MATCHING: u64 = 1;
 const PM_SCAN_CHECK_WPASYNC: u64 = 2;
 const PAGE_IS_WRITTEN: u64 = 2;
+const PAGE_IS_WPALLOWED: u64 = 1;
 pub const PAGE: usize = 4096;
 
 extern "C" {
@@ -190,6 +191,53 @@ impl Tracker {
         let t = Tracker { _uffd: None, pagemap, base, len };
         t.take_dirty(0, len)?;
         Some(t)
+    }
+
+    /// Jak `take_dirty`, ale jednym wywołaniem obejmuje także zakresy bez śledzenia asynchronicznego (zimne bloki z pułapką synchroniczną):
+    /// maska `WPALLOWED | WRITTEN` sprawia, że strony poza uffd z `WP_ASYNC` nie trafiają na listę, a flaga `CHECK_WPASYNC` nie przerywa skanu.
+    pub fn take_dirty_skip_cold(&self, offset: usize, len: usize) -> Option<Vec<(usize, usize)>> {
+        if !offset.is_multiple_of(PAGE) || !len.is_multiple_of(PAGE) || offset.checked_add(len)? > self.len {
+            return None;
+        }
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        let (mut cur, end) = ((self.base + offset) as u64, (self.base + offset + len) as u64);
+        let mut regions = [PageRegion::default(); 256];
+        while cur < end {
+            let mut arg = PmScanArg {
+                size: std::mem::size_of::<PmScanArg>() as u64,
+                flags: PM_SCAN_WP_MATCHING,
+                start: cur,
+                end,
+                walk_end: 0,
+                vec: regions.as_mut_ptr() as u64,
+                vec_len: regions.len() as u64,
+                max_pages: 0,
+                category_inverted: 0,
+                category_mask: PAGE_IS_WRITTEN | PAGE_IS_WPALLOWED,
+                category_anyof_mask: 0,
+                return_mask: PAGE_IS_WRITTEN,
+            };
+            // SAFETY: jak w `take_dirty`.
+            let t_io = std::time::Instant::now();
+            let n = unsafe { ioctl(self.pagemap.as_raw_fd(), PAGEMAP_SCAN, &mut arg as *mut PmScanArg) };
+            IOCTL_NS.fetch_add(t_io.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            IOCTL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 0 {
+                return None;
+            }
+            for r in &regions[..n as usize] {
+                let (a, b) = (r.start as usize - self.base, r.end as usize - self.base);
+                match out.last_mut() {
+                    Some(last) if last.1 == a => last.1 = b,
+                    _ => out.push((a, b)),
+                }
+            }
+            if arg.walk_end <= cur {
+                break;
+            }
+            cur = arg.walk_end;
+        }
+        Some(out)
     }
 
     /// Zakresy bajtów `[od, do)` względem początku obszaru zapisane od ostatniego wywołania dla tego zakresu; jednocześnie
@@ -1271,6 +1319,18 @@ mod scan_cost_bench {
             for b in (off / BLOCK..(off + len) / BLOCK).step_by(2) {
                 a.cool_block(hc, b, &mut sink);
             }
+            // zapisy: jedna strona w gorącym bloku (nieparzystym) i jedna w zimnym (parzystym)
+            let hot_page = off + BLOCK + 5 * PAGE;
+            // SAFETY: strona przydziału.
+            unsafe { std::ptr::write_volatile(a.ptr(hot_page), 9) };
+            let r = a.tracker.take_dirty_skip_cold(off, len).expect("skan");
+            eprintln!("6a) skan skip_cold: zwrócono {} zakresów; gorąca strona {}; zimne bloki nie powinny się pojawić", r.len(), if r.iter().any(|&(s, e)| s <= hot_page && hot_page < e) { "ZGŁOSZONA" } else { "POMINIĘTA (BŁĄD)" });
+            let cold_in = r.iter().filter(|&&(s, e)| (s / BLOCK..=(e - 1) / BLOCK).any(|b| b % 2 == (off / BLOCK) % 2)).count();
+            eprintln!("6b) zakresów dotykających zimnych bloków: {cold_in}");
+            time("6) JEDNO wywołanie skip_cold na całej arenie z 288 zimnymi blokami", &|| {
+                a.tracker.take_dirty_skip_cold(off, len).map(|v| v.len()).unwrap_or(0);
+                len / PAGE / 2
+            });
             time("5) scan_range całej areny przy co drugim bloku zimnym (288 zimnych)", &|| {
                 let mut s = Vec::new();
                 a.scan_range(hc, off, len, &mut s);

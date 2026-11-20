@@ -101,3 +101,15 @@ Arena 576 MiB zapełniona: **jeden przedział 296 µs** (2 ns/stronę); 64 MiB j
 Skan nie może przejść przez zimny blok jednym wywołaniem: PM_SCAN_CHECK_WPASYNC przerywa skan na stronach bez WP_ASYNC (a bez tej flagi strony poza uffd liczyłyby się jako "zapisane").
 Przebieg HOTCOLD=1 (cool_after 400): 447 zimnych bloków, ochłodzeń 11,4 tys., ogrzań 11,0 tys., 1,09 mln stron przez pułapkę, FPS 14,99 (bez zmiany), skan sync 0,9 ms bez zmiany.
 Wniosek: pułapka jest poprawna (testy z wyrocznią), ale dźwignia jest słabsza: koszt skanu rośnie z liczbą przedziałów, a bloki zapisywane co 100–500 skanów cykają gorący-zimny (koszt chłodzenia/ogrzania ok. 250 µs).
+
+### Wynik: hot/cold i skan równoległy NIE zmieniają FPS (Cyberpunk, czyste przebiegi cp-bench, ICD b2ece42c) – 2026-11-20
+| konfiguracja | średnia FPS | czas skanów sync (s) | skanów sync | uwagi |
+|---|---|---|---|---|
+| baza, SCANSTAT wyłączony | 14,69 | 45,4 | 40 955 | |
+| HOTCOLD=1, cool_after 2000, SCANSTAT wyłączony | 14,72 | 45,5 | 43 721 | take_dirty_all 34,9 s z czego ioctl 32,1 s w 670 tys. wywołań (48 µs) |
+| HOTCOLD=1, cool_after 400 (SCANSTAT włączony) | 14,99 | 29,5 | 32 829 | 11,4 tys. ochłodzeń, 1,09 mln stron przez pułapkę |
+| 4 wątki skanu (SCAN_THREADS=4) | 15,52 | 36,4 | 42 635 | skan nie przyspieszył |
+Rozrzut między przebiegami ok. ±0,5 FPS, więc wszystko mieści się w szumie. Skracanie skanów (o 13–16 s z 45 s) nie przekłada się na FPS, więc skan NIE jest ścieżką krytyczną klatki (albo jest nią tylko częściowo).
+Co jeszcze widać: wątki robocze gry (redDispatcher x10) mają po ~120 s CPU każdy, GameThread ~184 s: klient (Ryzen 5 1600X) jest nasycony CPU; blokada instancji: czekanie 304 s sumarycznie (WaitSemaphores trzyma ją 52 s, w tym skan+flush), obiegi: GetDescriptorEXT 29,5 tys. po 1,27 ms = 37,5 s.
+Następny krok oparty na dowodach: profil CPU wątku GameThread (perf na desktopie: wymaga `pacman -S perf` i `kernel.perf_event_paranoid=-1`), zanim ruszymy kolejną "rewolucję".
+Stan kodu: HOTCOLD i SCAN_THREADS zostają jako opcje (domyślnie wyłączone), testy z wyrocznią (potwierdzone mutacją) chronią poprawność hot/cold dla przyszłych zastosowań (np. gdy skan stanie się ścieżką krytyczną na słabszym kliencie).
