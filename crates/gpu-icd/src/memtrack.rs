@@ -238,6 +238,57 @@ struct ArenaState {
 /// Statystyka per przydział areny (`GPU_ICD_SCANSTAT=1`): offset -> (długość, skany z zapisem, strony zapisane). Do oceny, jaka część skanowanego obszaru bywa w ogóle zapisywana.
 static ALLOC_HITS: std::sync::Mutex<Option<std::collections::HashMap<usize, (usize, u64, u64)>>> = std::sync::Mutex::new(None);
 
+/// Statystyka bloków 256 stron (1 MiB) w arenie: blok -> (skany z zapisem, numer ostatniego skanu z zapisem); plus sumy rozmiaru zbioru gorącego w oknach 20/100/500 skanów.
+static BLOCK_HITS: std::sync::Mutex<Option<BlockStat>> = std::sync::Mutex::new(None);
+#[derive(Default)]
+struct BlockStat {
+    blocks: std::collections::HashMap<usize, (u64, u64)>,
+    scans: u64,
+    per_scan_blocks: u64,
+    window_sum: [u64; 3],
+    window_n: u64,
+}
+const BLOCK_PAGES: usize = 256;
+const WINDOWS: [u64; 3] = [20, 100, 500];
+
+fn scanstat_blocks(out: &[(usize, usize)]) {
+    let mut g = BLOCK_HITS.lock().unwrap_or_else(|e| e.into_inner());
+    let b = g.get_or_insert_with(Default::default);
+    b.scans += 1;
+    let n = b.scans;
+    let mut seen: std::collections::HashSet<usize> = Default::default();
+    for &(x, y) in out {
+        let (f, l) = (x / PAGE / BLOCK_PAGES, (y - 1) / PAGE / BLOCK_PAGES);
+        for blk in f..=l {
+            if seen.insert(blk) {
+                let e = b.blocks.entry(blk).or_insert((0, 0));
+                e.0 += 1;
+                e.1 = n;
+            }
+        }
+    }
+    b.per_scan_blocks += seen.len() as u64;
+    if n % 16 == 0 {
+        for (i, w) in WINDOWS.iter().enumerate() {
+            b.window_sum[i] += b.blocks.values().filter(|v| v.1 + w > n).count() as u64;
+        }
+        b.window_n += 1;
+    }
+}
+
+pub fn block_report() -> Option<String> {
+    let g = BLOCK_HITS.lock().unwrap_or_else(|e| e.into_inner());
+    let b = g.as_ref()?;
+    let wn = b.window_n.max(1);
+    let ever = b.blocks.len();
+    let hot1 = b.blocks.values().filter(|v| v.0 * 100 >= b.scans).count();
+    Some(format!(
+        "bloki 1 MiB po {} skanach: zapisane kiedykolwiek {ever}, w >=1% skanów {hot1}; średnio {:.1} bloków zapisanych na skan; zbiór gorący (bloki zapisane w ostatnich 20/100/500 skanach) średnio {:.0}/{:.0}/{:.0} bloków",
+        b.scans, b.per_scan_blocks as f64 / b.scans.max(1) as f64,
+        b.window_sum[0] as f64 / wn as f64, b.window_sum[1] as f64 / wn as f64, b.window_sum[2] as f64 / wn as f64
+    ))
+}
+
 fn scanstat_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var_os("GPU_ICD_SCANSTAT").is_some())
@@ -372,6 +423,7 @@ impl Arena {
         SCAN_RANGES.fetch_add(out.len() as u64, std::sync::atomic::Ordering::Relaxed);
         SCAN_DIRTY_PAGES.fetch_add(out.iter().map(|r| ((r.1 - r.0) / PAGE) as u64).sum::<u64>(), std::sync::atomic::Ordering::Relaxed);
         if scanstat_on() {
+            scanstat_blocks(&out);
             let g = self.st.lock().unwrap_or_else(|e| e.into_inner());
             let mut h = ALLOC_HITS.lock().unwrap_or_else(|e| e.into_inner());
             let m = h.get_or_insert_with(Default::default);
