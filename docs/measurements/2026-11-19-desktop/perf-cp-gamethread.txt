@@ -1,0 +1,60 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 193K of event 'cpu/cycles/P'
+# Event count (approx.): 1382822828547
+#
+# Overhead  Shared Object                Symbol                                                                                                                                                                                                                                                                                                                                 
+# ........  ...........................  .......................................................................................................................................................................................................................................................................................................................................
+#
+     0.63%  ntdll.so                     [.] __wine_syscall_dispatcher
+     0.41%  [kernel.kallsyms]            [k] do_syscall_64
+     0.37%  [JIT] tid 1976584            [.] 0x000000014026de35
+     0.36%  [kernel.kallsyms]            [k] update_se
+     0.34%  [kernel.kallsyms]            [k] getrusage
+     0.31%  [kernel.kallsyms]            [k] update_curr
+     0.30%  [kernel.kallsyms]            [k] _copy_to_user
+     0.29%  [kernel.kallsyms]            [k] pick_task_fair
+     0.20%  [kernel.kallsyms]            [k] __schedule
+     0.20%  [kernel.kallsyms]            [k] entry_SYSCALL_64
+     0.18%  [vdso]                       [.] __vdso_clock_gettime
+     0.17%  [kernel.kallsyms]            [k] update_rq_clock
+     0.16%  [kernel.kallsyms]            [k] entry_SYSCALL_64_after_hwframe
+     0.13%  [kernel.kallsyms]            [k] __do_sys_getrusage
+     0.13%  [kernel.kallsyms]            [k] get_task_mm
+     0.12%  [kernel.kallsyms]            [k] native_sched_clock
+     0.11%  [kernel.kallsyms]            [k] task_cputime_adjusted
+     0.11%  [kernel.kallsyms]            [k] rep_movs_alternative
+     0.10%  [kernel.kallsyms]            [k] do_sched_yield
+     0.09%  ntdll.so                     [.] NtYieldExecution
+     0.09%  [kernel.kallsyms]            [k] _raw_spin_lock
+     0.09%  [kernel.kallsyms]            [k] srso_untrain_ret
+     0.08%  [kernel.kallsyms]            [k] yield_task_fair
+     0.08%  win32u.so                    [.] NtUserPeekMessage
+     0.08%  [kernel.kallsyms]            [k] syscall_return_via_sysret
+     0.07%  [kernel.kallsyms]            [k] pick_eevdf
+     0.07%  [kernel.kallsyms]            [k] restart_burst_rescale_deadline_bore
+     0.06%  [kernel.kallsyms]            [k] pick_next_task
+     0.06%  win32u.so                    [.] peek_message
+     0.06%  [kernel.kallsyms]            [k] ns_to_kernel_old_timeval
+     0.06%  ntdll.so                     [.] NtQueryPerformanceCounter
+     0.05%  [kernel.kallsyms]            [k] _raw_spin_lock_irqsave
+     0.05%  [kernel.kallsyms]            [k] update_curr_bore
+     0.05%  libc.so.6                    [.] 0x00000000001137eb
+     0.05%  [kernel.kallsyms]            [k] prandom_u32_state
+     0.04%  [kernel.kallsyms]            [k] update_curr_dl_se
+     0.04%  [kernel.kallsyms]            [k] sched_clock_cpu
+     0.04%  win32u.so                    [.] get_shared_queue
+     0.04%  [kernel.kallsyms]            [k] x64_sys_call
+     0.04%  [kernel.kallsyms]            [k] cpuacct_charge
+     0.04%  [JIT] tid 1976584            [.] 0x00000001405426b3
+     0.04%  [kernel.kallsyms]            [k] schedule
+     0.04%  [JIT] tid 1976584            [.] 0x00000001422d6627
+     0.03%  [kernel.kallsyms]            [k] __cgroup_account_cputime
+     0.03%  [kernel.kallsyms]            [k] syscall_user_dispatch
+     0.03%  [kernel.kallsyms]            [k] _raw_spin_unlock
+     0.03%  [kernel.kallsyms]            [k] entry_SYSCALL_64_safe_stack
+     0.03%  [kernel.kallsyms]            [k] entry_untrain_ret
+     0.03%  win32u.so                    [.] window_surface_flush

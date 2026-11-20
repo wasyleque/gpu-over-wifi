@@ -1,0 +1,60 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 193K of event 'cpu/cycles/P'
+# Event count (approx.): 1382822828547
+#
+# Overhead  Command          Shared Object                  
+# ........  ...............  ...............................
+#
+     7.20%  redDispatcher4   [JIT] tid 1976584              
+     7.19%  redDispatcher5   [JIT] tid 1976584              
+     7.15%  redDispatcher10  [JIT] tid 1976584              
+     6.97%  redDispatcher9   [JIT] tid 1976584              
+     6.97%  redDispatcher8   [JIT] tid 1976584              
+     6.82%  redDispatcher1   [JIT] tid 1976584              
+     6.63%  redDispatcher7   [JIT] tid 1976584              
+     6.54%  redDispatcher2   [JIT] tid 1976584              
+     6.51%  redDispatcher6   [JIT] tid 1976584              
+     6.30%  redDispatcher3   [JIT] tid 1976584              
+     6.14%  redDispatcher11  [JIT] tid 1976584              
+     5.34%  GameThread       [kernel.kallsyms]              
+     1.58%  GameThread       [JIT] tid 1976584              
+     1.07%  gpu-icd-video    libc.so.6                      
+     1.06%  gpu-icd-video    libgpu_icd_pipelined.so        
+     1.05%  vkd3d_fence      [kernel.kallsyms]              
+     0.92%  gpu-icd-lazy     [kernel.kallsyms]              
+     0.89%  gpu-icd-video    [kernel.kallsyms]              
+     0.87%  GameThread       ntdll.so                       
+     0.69%  vkd3d_queue      [kernel.kallsyms]              
+     0.58%  gpu-icd-frame0   libgpu_icd_pipelined.so        
+     0.57%  gpu-icd-frame1   libgpu_icd_pipelined.so        
+     0.52%  gpu-icd-send     [kernel.kallsyms]              
+     0.35%  redDispatcher1   [kernel.kallsyms]              
+     0.35%  redDispatcher11  [kernel.kallsyms]              
+     0.34%  redDispatcher7   [kernel.kallsyms]              
+     0.34%  redDispatcher8   [kernel.kallsyms]              
+     0.33%  redDispatcher6   [kernel.kallsyms]              
+     0.33%  redDispatcher9   [kernel.kallsyms]              
+     0.33%  redDispatcher2   [kernel.kallsyms]              
+     0.33%  redDispatcher4   [kernel.kallsyms]              
+     0.32%  redDispatcher5   [kernel.kallsyms]              
+     0.32%  redDispatcher10  [kernel.kallsyms]              
+     0.31%  redDispatcher3   [kernel.kallsyms]              
+     0.31%  vkd3d_fence      libgpu_icd_pipelined.so        
+     0.29%  gpu-icd-video    libcuda.so.580.178.04          
+     0.26%  GameThread       libc.so.6                      
+     0.25%  vkd3d_queue      libgpu_icd_pipelined.so        
+     0.24%  GameThread       win32u.so                      
+     0.23%  gpu-icd-lazy     libc.so.6                      
+     0.21%  GameModWorker    ntdll.so                       
+     0.18%  GameThread       [vdso]                         
+     0.16%  GameThread       ntdll.dll                      
+     0.15%  gpu-icd-frame1   libc.so.6                      
+     0.14%  gpu-icd-frame0   libc.so.6                      
+     0.13%  gpu-icd-lazy     libgpu_icd_pipelined.so        
+     0.13%  RawTcpNetworkTh  [kernel.kallsyms]              
+     0.12%  gpu-icd-send     libgpu_icd_pipelined.so        
+     0.11%  GameModWorker    ntdll.dll                      

@@ -113,3 +113,14 @@ Rozrzut między przebiegami ok. ±0,5 FPS, więc wszystko mieści się w szumie.
 Co jeszcze widać: wątki robocze gry (redDispatcher x10) mają po ~120 s CPU każdy, GameThread ~184 s: klient (Ryzen 5 1600X) jest nasycony CPU; blokada instancji: czekanie 304 s sumarycznie (WaitSemaphores trzyma ją 52 s, w tym skan+flush), obiegi: GetDescriptorEXT 29,5 tys. po 1,27 ms = 37,5 s.
 Następny krok oparty na dowodach: profil CPU wątku GameThread (perf na desktopie: wymaga `pacman -S perf` i `kernel.perf_event_paranoid=-1`), zanim ruszymy kolejną "rewolucję".
 Stan kodu: HOTCOLD i SCAN_THREADS zostają jako opcje (domyślnie wyłączone), testy z wyrocznią (potwierdzone mutacją) chronią poprawność hot/cold dla przyszłych zastosowań (np. gdy skan stanie się ścieżką krytyczną na słabszym kliencie).
+
+## Profil CPU Cyberpunka (perf, 40 s w środku benchmarka, 14,9 FPS) — 2026-11-20
+
+`BENCH_PERF=1 tools/cp-bench.sh perf-baza` (surowe zestawienia: perf-cp-comm.txt, perf-cp-gamethread.txt).
+- 11 wątków `redDispatcher` zużywa po ok. 6–7% wszystkich próbek (razem ok. 70%), ale prawie cały ten czas to JEDNA ciasna pętla
+  (adresy 0x141969fa0..fca, ~40 bajtów): aktywne czekanie (spin) na pracę. **Nasycenie procesora klienta było fałszywym tropem** — to czekanie, nie praca.
+- Nasz ICD to tylko kilka % (gpu-icd-video ok. 3%, frame0/1 ok. 1%, lazy 0,9%).
+- `GameThread` (główny wątek) jest zajęty ok. 8% próbek (≈78% czasu), z czego większość to JĄDRO: `getrusage`, `sched_yield`, zegary — pętla czekania
+  Wine/gry, a nie obliczenia gry (JIT tylko 1,6%).
+- Wniosek: klatka jest ograniczona OPÓŹNIENIEM (gra czeka na wyniki od GPU/ICD), a nie mocą CPU. To wskazuje na obiegi (leniwe pobrania:
+  61 232 razy, śr. 2,36 ms, łącznie 144 s sumy wątków; skany synchroniczne 43,9 s; GetDescriptorEXT), czyli na redukcję liczby i czasu obiegów (R1/R3), nie na tańszy skan.

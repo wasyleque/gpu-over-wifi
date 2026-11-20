@@ -37,6 +37,11 @@ until r 'pgrep -f "[C]yberpunk2077.exe" >/dev/null'; do
   [ $(( $(date +%s) - t0 )) -gt 240 ] && { echo "gra nie wystartowała w 240 s"; r 'tail -5 /tmp/heroic-launch.log'; exit 2; }; sleep 5
 done
 echo "gra wystartowała po $(( $(date +%s) - t0 )) s"
+if [ "${BENCH_PERF:-0}" = 1 ]; then
+  # profil CPU całej gry (wszystkie wątki) w środku benchmarka: perf record 40 s po BENCH_PERF_DELAY s
+  sleep "${BENCH_PERF_DELAY:-90}"
+  r 'pid=$(pgrep -f "[C]yberpunk2077.exe" | head -1); cd ~/gpu-hub-client && perf record -F 499 -g -p $pid -o perf.data -- sleep 40 >perf.out 2>&1; perf report -i perf.data --no-children --sort comm,dso -g none --stdio 2>/dev/null | head -60 > perf-comm.txt; perf report -i perf.data --no-children --comm GameThread --sort dso,sym -g none --stdio 2>/dev/null | head -60 > perf-game.txt' || echo "perf nie zadziałał"
+fi
 while r 'pgrep -f "[C]yberpunk2077.exe" >/dev/null'; do
   [ $(( $(date +%s) - t0 )) -gt "$timeout" ] && { echo "przekroczono czas $timeout s"; r 'pkill -f '[C]yberpunk2077.exe''; break; }; sleep 10
 done
