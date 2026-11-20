@@ -469,7 +469,9 @@ impl InstState {
     /// Wysyła zgromadzoną partię poleceń (bez czekania na odpowiedź).
     pub(crate) fn flush(&mut self) {
         if self.scan_pending {
+            let t_s = std::time::Instant::now();
             self.settle_memory();
+            SETTLE_NS[0].fetch_add(t_s.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             SETTLE_BY[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if self.batch.is_empty() {
@@ -792,11 +794,13 @@ impl InstState {
         // Zapisy aplikacji, jeszcze nieprzeskanowane (odroczony skan), leżą w tej samej kopii, do której zaraz wpiszemy dane z serwera: najpierw je
         // wysyłamy, inaczej pobranie okna nadpisałoby je starą zawartością (GPU czytałoby stare argumenty rysowania i zawieszało się).
         if self.mems.get(&memory).is_some_and(|s| s.lazy.is_some()) {
+            let t_s = std::time::Instant::now();
             if flags().lazy_scan_one {
                 self.settle_memory_one(memory);
             } else {
                 self.settle_memory();
             }
+            SETTLE_NS[1].fetch_add(t_s.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             SETTLE_BY[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         self.flush();
@@ -1951,6 +1955,7 @@ fn periodic_stats(stats: &Stats) {
         {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] skany pamięci wg przyczyny [flush, odczyt leniwy, EndCommandBuffer, G1, obieg synchroniczny]: {:?}", SETTLE_BY.iter().map(|c| c.load(Relaxed)).collect::<Vec<_>>());
+            eprintln!("[gpu-icd] czas skanów wg przyczyny w ms [flush, odczyt leniwy, EndCommandBuffer, G1, obieg synchroniczny]: {:?}", SETTLE_NS.iter().map(|c| c.load(Relaxed) / 1_000_000).collect::<Vec<_>>());
         }
         {
             use std::sync::atomic::Ordering::Relaxed;
@@ -2258,6 +2263,7 @@ struct SemState {
 }
 static SEM: std::sync::Mutex<Option<HashMap<u64, SemState>>> = std::sync::Mutex::new(None);
 /// Przyczyny skanu pamięci hosta (settle_memory): [wypchnięcie partii, odczyt leniwy, wypchnięcie przy EndCommandBuffer, spekulacja G1, obieg synchroniczny].
+pub static SETTLE_NS: [std::sync::atomic::AtomicU64; 5] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 pub static SETTLE_BY: [std::sync::atomic::AtomicU64; 5] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 pub static SEM_LOCAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SEM_REFRESH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2778,7 +2784,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         return Step::Done(fail(deferred_fail));
     }
     if st.scan_pending {
+        let t_s = std::time::Instant::now();
         st.settle_memory();
+        SETTLE_NS[4].fetch_add(t_s.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         SETTLE_BY[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     st.stats.query_bytes += bytes.len() as u64;
