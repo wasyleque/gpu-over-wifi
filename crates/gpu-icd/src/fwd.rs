@@ -167,6 +167,8 @@ impl Stats {
 /// Flagi diagnostyczne czytane RAZ (zmienne środowiskowe nie zmieniają się w trakcie procesu, a odczyt przy każdym poleceniu
 /// kosztował zauważalnie przy setkach tysięcy poleceń na sekundę).
 pub struct Flags {
+    /// L1: przy odczycie leniwym skanuj tylko pamięć, której okno pobieramy (`GPU_ICD_LAZY_SCAN_ONE=1`), nie całą arenę.
+    pub lazy_scan_one: bool,
     /// G3: lokalna, monotoniczna odpowiedź na `vkGetSemaphoreCounterValue` z odświeżaniem w tle (`GPU_ICD_SEM_CACHE=1`).
     pub sem_cache: bool,
     /// G1: spekulacyjny `vkGetDescriptorEXT` zaraz po `vkCreateImageView` (`GPU_ICD_DESC_PREFETCH=1`).
@@ -206,6 +208,7 @@ pub fn flags() -> &'static Flags {
     F.get_or_init(|| Flags {
         desc_prefetch: std::env::var_os("GPU_ICD_DESC_PREFETCH").is_some(),
         sem_cache: std::env::var_os("GPU_ICD_SEM_CACHE").is_some(),
+        lazy_scan_one: std::env::var_os("GPU_ICD_LAZY_SCAN_ONE").is_some(),
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),
@@ -686,6 +689,17 @@ impl InstState {
         self.stats.t_settle_ns += t.elapsed().as_nanos() as u64;
     }
 
+    /// Jak `settle_memory`, ale tylko dla JEDNEJ pamięci i bez zerowania `scan_pending`: odczyt leniwy musi wysłać zapisy aplikacji do okna, które zaraz
+    /// nadpisze danymi serwera, a zapisy do innych pamięci nie są zagrożone (pełny skan areny kosztował ok. 680 µs przy każdym z 83 tys. błędów strony).
+    pub(crate) fn settle_memory_one(&mut self, id: u64) {
+        let t = std::time::Instant::now();
+        let held = std::mem::take(&mut self.batch);
+        self.write_mapped_ids(vec![id], None);
+        let mut tail = std::mem::replace(&mut self.batch, held);
+        self.batch.append(&mut tail);
+        self.stats.t_settle_ns += t.elapsed().as_nanos() as u64;
+    }
+
     /// Przed `vkQueueSubmit`: serwer musi zobaczyć wszystko, co aplikacja wpisała w odwzorowaną pamięć.
     fn write_mapped(&mut self) {
         let ids: Vec<u64> = self.mems.iter().filter(|(_, s)| s.mapped).map(|(i, _)| *i).collect();
@@ -700,6 +714,11 @@ impl InstState {
             self.stats.scan_tracked_n += 1;
             self.stats.scan_tracked_ns += ns;
         }
+        self.write_mapped_ids(ids, bulk);
+    }
+
+    /// Wysyła zapisy aplikacji dla podanych pamięci (`bulk`: wynik skanu zbiorczego areny albo `None` = skan każdej z osobna).
+    fn write_mapped_ids(&mut self, ids: Vec<u64>, bulk: Option<Vec<(usize, usize)>>) {
         for id in ids {
             let t0 = std::time::Instant::now();
             let Some(((ranges, tracked, hashed), len)) = self.mems.get_mut(&id).map(|s| (s.changed_from_bulk_or_scan(bulk.as_deref()), s.data.len())) else { continue };
@@ -749,6 +768,7 @@ impl InstState {
         }
     }
 
+
     pub(crate) fn read_mem(&mut self, memory: u64, offset: u64, len: usize) -> Option<Vec<u8>> {
         self.flush();
         let mut out = Vec::with_capacity(len);
@@ -772,7 +792,11 @@ impl InstState {
         // Zapisy aplikacji, jeszcze nieprzeskanowane (odroczony skan), leżą w tej samej kopii, do której zaraz wpiszemy dane z serwera: najpierw je
         // wysyłamy, inaczej pobranie okna nadpisałoby je starą zawartością (GPU czytałoby stare argumenty rysowania i zawieszało się).
         if self.mems.get(&memory).is_some_and(|s| s.lazy.is_some()) {
-            self.settle_memory();
+            if flags().lazy_scan_one {
+                self.settle_memory_one(memory);
+            } else {
+                self.settle_memory();
+            }
             SETTLE_BY[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         self.flush();
