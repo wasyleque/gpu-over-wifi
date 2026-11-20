@@ -220,6 +220,96 @@ impl Tracker {
     }
 }
 
+/// Najmniejszy obszar (bajty), od którego opłaca się skan równoległy (wybudzenie wątku kosztuje dziesiątki µs, skan 1 MiB ok. 1,5 µs·256).
+const PAR_MIN_BYTES: usize = 64 << 20;
+
+/// Liczba wątków skanu (`GPU_ICD_SCAN_THREADS`, domyślnie 1 = skan w wątku wołającym).
+fn scan_threads() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_SCAN_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).map_or(1, |n| n.clamp(1, 16)))
+}
+
+/// Dzieli przedziały `(offset, długość)` na najwyżej `parts` kawałków o zbliżonym rozmiarze (wyrównanych do strony), zachowując kolejność.
+fn split_extents(extents: &[(usize, usize)], parts: usize) -> Vec<Vec<(usize, usize)>> {
+    let total: usize = extents.iter().map(|e| e.1).sum();
+    let per = (total / parts.max(1)).div_ceil(PAGE).max(1) * PAGE;
+    let mut chunks: Vec<Vec<(usize, usize)>> = vec![Vec::new()];
+    let mut room = per;
+    for &(mut o, mut l) in extents {
+        while l > 0 {
+            if room == 0 && chunks.len() < parts {
+                chunks.push(Vec::new());
+                room = per;
+            }
+            let take = if chunks.len() >= parts { l } else { l.min(room) };
+            chunks.last_mut().map(|c| c.push((o, take)));
+            o += take;
+            l -= take;
+            room = room.saturating_sub(take);
+        }
+    }
+    chunks
+}
+
+type ScanJob = (usize, Vec<(usize, usize)>, std::sync::mpsc::Sender<(usize, Option<Vec<(usize, usize)>>)>);
+
+/// Wątki robocze skanu (tworzone przy pierwszym użyciu); działają na `'static` trackerze areny.
+fn pool(tracker: &'static Tracker, n: usize) -> &'static std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>> {
+    static P: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ScanJob>();
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        for i in 0..n.saturating_sub(1) {
+            let rx = rx.clone();
+            let _ = std::thread::Builder::new().name(format!("icd-scan-{i}")).spawn(move || loop {
+                let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                let Ok((idx, ext, reply)) = job else { return };
+                let mut out = Vec::new();
+                let mut ok = true;
+                for (o, l) in ext {
+                    match tracker.take_dirty(o, l) {
+                        Some(v) => out.extend(v),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                let _ = reply.send((idx, ok.then_some(out)));
+            });
+        }
+        std::sync::Mutex::new(tx)
+    })
+}
+
+fn par_scan(tracker: &Tracker, extents: &[(usize, usize)], threads: usize) -> Option<Vec<(usize, usize)>> {
+    let chunks = split_extents(extents, threads);
+    // SAFETY: tracker należy do areny (`'static`, nigdy nie jest zwalniana); wątki robocze używają go tylko do `take_dirty(&self)`.
+    let tracker_static: &'static Tracker = unsafe { &*(tracker as *const Tracker) };
+    let tx = pool(tracker_static, threads).lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let (rtx, rrx) = std::sync::mpsc::channel();
+    let n = chunks.len();
+    let mut mine = Vec::new();
+    for (i, c) in chunks.into_iter().enumerate() {
+        if i == 0 {
+            mine = c;
+        } else if tx.send((i, c, rtx.clone())).is_err() {
+            return None;
+        }
+    }
+    let mut parts: Vec<Option<Vec<(usize, usize)>>> = vec![None; n];
+    let mut first = Vec::new();
+    for (o, l) in mine {
+        first.extend(tracker.take_dirty(o, l)?);
+    }
+    parts[0] = Some(first);
+    for _ in 1..n {
+        let (idx, r) = rrx.recv().ok()?;
+        parts[idx] = Some(r?);
+    }
+    Some(parts.into_iter().flatten().flatten().collect())
+}
+
 /// Jedna wspólna arena adresów dla kopii wszystkich odwzorowanych pamięci: jeden zarejestrowany obszar, więc ślad zapisów całej gry pobieramy jednym
 /// (lub kilkoma przy dziurach) wywołaniem `PAGEMAP_SCAN` zamiast wywołania na każdą pamięć (w Cyberpunku ponad 200 skanów na klatkę po ok. 60 µs,
 /// w tym haszowanie małych pamięci bez śledzenia jądrowego).
@@ -414,9 +504,19 @@ impl Arena {
             v
         };
         let mut out: Vec<(usize, usize)> = Vec::new();
-        for &(o, l) in &extents {
-            SCAN_PAGES.fetch_add((l / PAGE) as u64, std::sync::atomic::Ordering::Relaxed);
-            out.extend(self.tracker.take_dirty(o, l)?);
+        let threads = scan_threads();
+        let total: usize = extents.iter().map(|e| e.1).sum();
+        if threads > 1 && total >= PAR_MIN_BYTES {
+            // Skan równoległy: rozłączne kawałki areny skanują wątki robocze i bieżący; wynik składamy w kolejności offsetów.
+            for &(_, l) in &extents {
+                SCAN_PAGES.fetch_add((l / PAGE) as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            out = par_scan(&self.tracker, &extents, threads)?;
+        } else {
+            for &(o, l) in &extents {
+                SCAN_PAGES.fetch_add((l / PAGE) as u64, std::sync::atomic::Ordering::Relaxed);
+                out.extend(self.tracker.take_dirty(o, l)?);
+            }
         }
         SCAN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         SCAN_EXTENTS.fetch_add(extents.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -676,4 +776,30 @@ mod tests {
         a.free(ob, PAGE * 8);
     }
 
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn split_covers_everything_in_order_and_page_aligned() {
+        let ext = vec![(0usize, 10 * PAGE), (20 * PAGE, 30 * PAGE), (100 * PAGE, PAGE)];
+        for parts in 1..=8 {
+            let chunks = split_extents(&ext, parts);
+            assert!(chunks.len() <= parts);
+            let flat: Vec<(usize, usize)> = chunks.into_iter().flatten().collect();
+            let total: usize = flat.iter().map(|e| e.1).sum();
+            assert_eq!(total, 41 * PAGE);
+            assert!(flat.iter().all(|(o, l)| o % PAGE == 0 && l % PAGE == 0 && *l > 0));
+            assert!(flat.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0));
+        }
+    }
+
+    #[test]
+    fn split_balances_sizes() {
+        let chunks = split_extents(&[(0, 400 * PAGE)], 4);
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|c| c.iter().map(|e| e.1).sum::<usize>() == 100 * PAGE));
+    }
 }
