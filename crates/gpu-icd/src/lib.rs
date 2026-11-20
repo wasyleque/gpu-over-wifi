@@ -23,6 +23,8 @@ mod exts;
 mod fwd;
 mod local;
 mod memreq;
+#[allow(dead_code)] // podłączane w następnym kroku (skan tylko gorących bloków)
+mod hotset;
 mod memtrack;
 mod present;
 mod swapchain;
