@@ -94,3 +94,10 @@ Priorytet pobrań w pipeline serwera nie ma sensu; push (A) ukryłby tylko ~0,5 
 **Korekta wcześniejszych rachunków:** skanów całej areny jest ~39 na klatkę (nie ~10), razem ok. 45,7 s z 70 s przebiegu, jeśli leżą na ścieżce krytycznej wątku gry (do potwierdzenia pomiarem wątkowym). Skan na 4 wątkach **nie przyspieszył** (0,85 ms vs 0,88 ms przy jednym wątku): jądro najpewniej serializuje PAGEMAP_SCAN z WP_MATCHING na jednej areno-VMA, więc skan równoległy odpada jako dźwignia.
 "Łączny czas pobrań leniwych" (144 s w 70 s przebiegu) to suma czasu WĄTKÓW, nie czas ścianowy: wcześniejsze wnioski "pobranie leniwe = największy kubełek" były zawyżone sumowaniem współbieżnych wątków.
 Wniosek: dźwignią numer jeden jest liczba i obszar skanów całej areny (hot/cold z pułapką synchroniczną wymaga `vm.unprivileged_userfaultfd=1`).
+
+### Model kosztu PAGEMAP_SCAN (test `scan_cost_model`, maszyna deweloperska, bez rywalizacji z wątkami gry) – 2026-11-20
+Arena 576 MiB zapełniona: **jeden przedział 296 µs** (2 ns/stronę); 64 MiB jednym przedziałem 32 µs; **64 rozproszone przedziały po 1 MiB (razem 64 MiB) 161 µs**; 1 MiB 2,1 µs;
+**co drugi blok zimny (288 przedziałów) 771 µs, czyli GORZEJ niż pełny skan** (stały koszt ok. 2 µs na wywołanie × liczba przedziałów). W grze pełny skan trwa 0,9 ms (3× więcej niż bez rywalizacji).
+Skan nie może przejść przez zimny blok jednym wywołaniem: PM_SCAN_CHECK_WPASYNC przerywa skan na stronach bez WP_ASYNC (a bez tej flagi strony poza uffd liczyłyby się jako "zapisane").
+Przebieg HOTCOLD=1 (cool_after 400): 447 zimnych bloków, ochłodzeń 11,4 tys., ogrzań 11,0 tys., 1,09 mln stron przez pułapkę, FPS 14,99 (bez zmiany), skan sync 0,9 ms bez zmiany.
+Wniosek: pułapka jest poprawna (testy z wyrocznią), ale dźwignia jest słabsza: koszt skanu rośnie z liczbą przedziałów, a bloki zapisywane co 100–500 skanów cykają gorący-zimny (koszt chłodzenia/ogrzania ok. 250 µs).
