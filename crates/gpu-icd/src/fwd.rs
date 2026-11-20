@@ -467,6 +467,7 @@ impl InstState {
     pub(crate) fn flush(&mut self) {
         if self.scan_pending {
             self.settle_memory();
+            SETTLE_BY[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if self.batch.is_empty() {
             return;
@@ -772,6 +773,7 @@ impl InstState {
         // wysyłamy, inaczej pobranie okna nadpisałoby je starą zawartością (GPU czytałoby stare argumenty rysowania i zawieszało się).
         if self.mems.get(&memory).is_some_and(|s| s.lazy.is_some()) {
             self.settle_memory();
+            SETTLE_BY[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         self.flush();
         let mut done = 0usize;
@@ -1777,6 +1779,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             if gap > 0 && st.last_push.elapsed().as_micros() as u64 >= gap {
                 // Zapisy aplikacji idą przed zebranymi poleceniami (jak przy zgłoszeniu), a łącze pracuje, gdy gra jeszcze nagrywa.
                 st.settle_memory();
+                SETTLE_BY[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 st.last_push = std::time::Instant::now();
                 st.stats.eager_pushes += 1;
             }
@@ -1921,6 +1924,10 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!("[gpu-icd] skany pamięci wg przyczyny [flush, odczyt leniwy, EndCommandBuffer, G1, obieg synchroniczny]: {:?}", SETTLE_BY.iter().map(|c| c.load(Relaxed)).collect::<Vec<_>>());
+        }
         if flags().sem_cache {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] licznik semaforów (G3): lokalnie {}, odświeżeń w tle {}, blokująco do serwera {}", SEM_LOCAL.load(Relaxed), SEM_REFRESH.load(Relaxed), SEM_SYNC.load(Relaxed));
@@ -2221,6 +2228,8 @@ struct SemState {
     inflight: bool,
 }
 static SEM: std::sync::Mutex<Option<HashMap<u64, SemState>>> = std::sync::Mutex::new(None);
+/// Przyczyny skanu pamięci hosta (settle_memory): [wypchnięcie partii, odczyt leniwy, wypchnięcie przy EndCommandBuffer, spekulacja G1, obieg synchroniczny].
+pub static SETTLE_BY: [std::sync::atomic::AtomicU64; 5] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 pub static SEM_LOCAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SEM_REFRESH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static SEM_SYNC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2370,6 +2379,7 @@ unsafe fn prefetch_view_descriptors(st: &mut InstState, dev: u64, view: u64) {
         }
         if st.scan_pending {
             st.settle_memory();
+            SETTLE_BY[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let mut reqs: Vec<Request> = Vec::with_capacity(3);
         if !st.batch.is_empty() {
@@ -2740,6 +2750,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     }
     if st.scan_pending {
         st.settle_memory();
+        SETTLE_BY[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     st.stats.query_bytes += bytes.len() as u64;
     st.stats.roundtrips += 1;
