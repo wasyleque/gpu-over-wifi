@@ -27,4 +27,4 @@ Zrzut: `benchmark-result-baseline-options-off.png`.
 
 **Wniosek: dzisiejsze zmiany (odczyt różnicowy gorących okien, kanał odczytów, pobranie bez blokady) nie zmieniają wyniku Tomb Raidera** (różnica 0,2 FPS, w granicach szumu), co zgadza się ze statystykami
 (przy opcjach wyłączonych: 1 774 pobrań leniwych, 110 MB; przy włączonych: 3). Poprawa względem minipc (25–26 → 28,4) pochodzi więc z innego komputera klienta (desktop) i z wcześniejszych prac, a nie z dzisiejszego przełomu,
-który dotyczy wzorca „stałe okna odczytu GPU->CPU po każdym oczekiwaniu” (vkd3d/DX12). Obie gry uruchomiono z okna (Tomb Raider nie startuje w pełnym ekranie, uwaga użytkownika).
+który dotyczy wzorca „stałe okna odczytu GPU->CPU po każdym oczekiwaniu” (vkd3d/DX12). Oba przebiegi Tomb Raidera szły w pełnym ekranie: gra startuje w oknie, a użytkownik przełączał ją ręcznie skrótem Super+F (pełny ekran Hyprland/Omarchy) przed benchmarkiem.
