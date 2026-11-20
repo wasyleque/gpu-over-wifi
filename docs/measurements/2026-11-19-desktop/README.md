@@ -81,3 +81,10 @@ skan pamięci 96 s; oczekiwanie na odpowiedzi serwera 48 s; wysyłka różnic 11
 Wniosek: pobranie leniwe (1,6 ms, ~6× RTT) jest największym kubełkiem, przed skanem. 1,6 ms ≫ RTT 0,25 ms, więc pobranie
 czeka głównie w kolejce serwera za nieprzetworzonymi paczkami (do potwierdzenia pomiarem po stronie serwera), nie na łączu.
 Konsultacja (DeepSeek v4-pro): kolejność B (skan tylko gorących zakresów) → A (push/wątek odczytu) → C (tokeny deskryptorów); czwarta dźwignia: dwie klatki w locie.
+
+### Kolejka serwera przy pobraniach leniwych (serwer f525c802, ICD 1ac1e730) – 2026-11-20
+Cyberpunk: 1084 klatek w 68,9 s (15,7 FPS; powtórka 16,22 → rozrzut ±0,5). Serwer, ~100 tys. odczytów pamięci:
+**śr. kolejka 0,22 ms (maks 9,8 ms), śr. wykonanie 4 µs.** Hipoteza „pobranie stoi w kolejce serwera" **odrzucona pomiarem**:
+z 1,7 ms na pobranie serwer to ok. 0,22 ms. Reszta jest po stronie klienta: callback `fetch` robi najpierw skan (settle, ~0,7 ms średnio = 96 s / 128 tys.),
+potem wysyłkę zaległej paczki i obieg (RTT ~0,25 ms). Wniosek: skan jest składnikiem pobrania, więc redukcja skanu (B) skraca oba kubełki naraz.
+Priorytet pobrań w pipeline serwera nie ma sensu; push (A) ukryłby tylko ~0,5 ms obiegu.

@@ -93,6 +93,32 @@ fn flush_pending<W: Write>(writer: &mut W, pending: &mut Vec<u8>) -> Result<(), 
 struct Incoming {
     frame: Frame,
     req: Option<Request>,
+    /// Chwila, w której wątek odczytu skończył składać ramkę (pomiar kolejki przed wykonaniem; tylko do statystyk).
+    at: std::time::Instant,
+}
+
+/// Statystyki odczytów pamięci (GPU_RENDERD_STATS): ile ramka czekała w kolejce za wcześniejszymi żądaniami i ile trwało samo wykonanie.
+static RD_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RD_QUEUE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RD_EXEC_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RD_QUEUE_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn stats_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("GPU_RENDERD_STATS").is_some())
+}
+
+fn note_read(queue: std::time::Duration, exec: std::time::Duration) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let q = queue.as_micros() as u64;
+    RD_QUEUE_US.fetch_add(q, Relaxed);
+    RD_EXEC_US.fetch_add(exec.as_micros() as u64, Relaxed);
+    RD_QUEUE_MAX_US.fetch_max(q, Relaxed);
+    let n = RD_N.fetch_add(1, Relaxed) + 1;
+    if n % 5000 == 0 {
+        let (q, e) = (RD_QUEUE_US.load(Relaxed), RD_EXEC_US.load(Relaxed));
+        eprintln!("gpu-renderd: odczyty pamięci {n}: śr. kolejka {} µs (maks {} µs), śr. wykonanie {} µs", q / n, RD_QUEUE_MAX_US.load(Relaxed), e / n);
+    }
 }
 
 /// Źródło ramek pętli połączenia: `next` czeka na następną (`Ok(None)` = czysty EOF), `try_next` oddaje tylko to, co jest już gotowe.
@@ -113,7 +139,7 @@ impl<R: Read> FrameSource for DirectSource<'_, R> {
     fn next(&mut self) -> Result<Option<Incoming>, ServeError> {
         loop {
             if let Some(frame) = self.fr.next_frame()? {
-                return Ok(Some(Incoming { frame, req: None }));
+                return Ok(Some(Incoming { frame, req: None, at: std::time::Instant::now() }));
             }
             match self.reader.read(&mut self.buf) {
                 Ok(0) => {
@@ -131,7 +157,7 @@ impl<R: Read> FrameSource for DirectSource<'_, R> {
     }
 
     fn try_next(&mut self) -> Result<Option<Incoming>, ServeError> {
-        Ok(self.fr.next_frame()?.map(|frame| Incoming { frame, req: None }))
+        Ok(self.fr.next_frame()?.map(|frame| Incoming { frame, req: None, at: std::time::Instant::now() }))
     }
 }
 
@@ -184,7 +210,7 @@ fn spawn_reader<R: Read + Send + 'static>(mut reader: R, authed: std::sync::Arc<
                                 req = Some(r);
                             }
                         }
-                        if tx.send(Ok(Some(Incoming { frame, req }))).is_err() {
+                        if tx.send(Ok(Some(Incoming { frame, req, at: std::time::Instant::now() }))).is_err() {
                             return;
                         }
                     }
@@ -278,7 +304,7 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
                     }
                 },
             };
-            let Incoming { frame, req } = incoming;
+            let Incoming { frame, req, at } = incoming;
             // Check if frame is on the correct stream or has ZSTD compression (unsupported)
             if frame.header.stream != STREAM_CONTROL || frame.header.flags & flags::ZSTD != 0 {
                 flush_pending(writer, &mut pending)?;
@@ -339,7 +365,12 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
                 group_left = 0;
             }
             let handled_delta = delta_item(&req).is_some();
+            let is_read = stats_on() && matches!(req, Request::MemRead { .. } | Request::MemReadDelta { .. } | Request::MemReadDeltaRanges { .. });
+            let started = std::time::Instant::now();
             let response = session.handle_request(req);
+            if is_read {
+                note_read(started.saturating_duration_since(at), started.elapsed());
+            }
             authed.store(session.is_authenticated(), std::sync::atomic::Ordering::Relaxed);
             let Some(response) = response else { continue };
             if handled_delta && group_left > 0 {
