@@ -792,6 +792,13 @@ impl Link {
         Ok(first)
     }
 
+    /// Wysyła żądanie z odpowiedzią i zwraca jego bilet; odpowiedź odbiera `Shared::recv_at(bilet)` (bez blokady instancji).
+    pub fn send_t(&mut self, req: &Request) -> Result<u64, ClientError> {
+        let ticket = self.sent;
+        self.send(req)?;
+        Ok(ticket)
+    }
+
     /// Jak `call`, ale zwraca też bilet odpowiedzi (do wersjonowania stron: odpowiedź o niższym bilecie nie nadpisuje nowszej).
     pub fn call_t(&mut self, req: &Request) -> (u64, Result<Response, ClientError>) {
         let ticket = self.sent;

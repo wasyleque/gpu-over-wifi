@@ -168,3 +168,10 @@ Log `GPU_ICD_FETCHLOG` z kluczem oczekiwania: tylko 9–11 różnych kluczy (dwa
 sam uchwyt semafora nie wskazuje, po którym oczekiwaniu okno będzie czytane (to ta sama liczba oczekiwań co ok. 28 na klatkę, różnią się wartością semafora).
 Wniosek: ~55 pobrań na klatkę jest rozproszone między ~28 oczekiwań na klatkę; skuteczny push wymaga klucza dokładniejszego niż uchwyt (np. para uchwyt + wartość
 oczekiwana modulo okres klatki albo numer oczekiwania w klatce) albo — przeciwnie — jednej zbiorczej odpowiedzi na końcu klatki. Do zbadania; opcja zostaje wyłączona.
+
+### Pobranie leniwe bez blokady instancji w obiegu po sieci (0.3.23, domyślnie włączone) — mały, powtarzalny zysk
+
+Wysyłka `MemRead` pod blokadą, odbiór odpowiedzi BEZ niej, wpis danych znów pod blokadą (kontrola epoki jak dotąd). Pary naprzemienne (pełny ekran 1920x1080, CP):
+z odblokowaniem 15,66 / 15,24 / 15,55 FPS, bez: 14,48 / 15,08 (+ wcześniejsze bazy 14,56–15,18), czyli ok. +0,7 FPS (+5%); czekanie na blokadę
+przy pobraniach 25 s → 12 s. Sam obieg nadal ~2,3 ms: czyste 64 KB po łączu 10.42.0.x to 0,50 ms (p99 0,61), więc ok. 1,3 ms to kolejka wysyłki za
+wcześniejszymi (kompresowanymi) danymi + serwer. Następny krok do zmierzenia: osobny kanał odczytu z zależnością „po bilecie N strumienia głównego”.

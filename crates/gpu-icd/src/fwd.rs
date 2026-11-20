@@ -793,6 +793,39 @@ impl InstState {
     }
 
     /// Czyta zakres pamięci z serwera prosto do jej lokalnej kopii (z wersjonowaniem stron po biletach odpowiedzi); `false` przy błędzie.
+    /// Pierwsza faza pobrania okna bez trzymania blokady podczas obiegu po sieci (`GPU_ICD_LAZY_UNLOCK=1`): rozlicza zapisy aplikacji, wysyła `MemRead` (kawałki)
+    /// i zwraca bilety z uchwytem odbioru; odpowiedzi odbiera wołający BEZ blokady instancji, a potem wpisuje je przez `finish_mem_read`.
+    pub(crate) fn begin_mem_read(&mut self, memory: u64, offset: u64, len: usize) -> Option<(std::sync::Arc<crate::link::Shared>, Vec<(u64, u64, usize)>)> {
+        if self.mems.get(&memory).is_some_and(|s| s.lazy.is_some()) {
+            if flags().lazy_scan_one {
+                self.settle_memory_one(memory);
+            } else {
+                self.settle_memory();
+            }
+        }
+        self.flush();
+        let mut tickets = Vec::new();
+        let mut done = 0usize;
+        while done < len {
+            let n = (len - done).min(MEM_CHUNK);
+            self.stats.roundtrips += 1;
+            self.stats.memr_bytes += n as u64;
+            let t = self.client.send_t(&Request::MemRead { memory, offset: offset + done as u64, len: n as u32 }).ok()?;
+            tickets.push((t, offset + done as u64, n));
+            done += n;
+        }
+        Some((self.client.shared(), tickets))
+    }
+
+    /// Druga faza: wpisuje odebrane dane do kopii pamięci (pod blokadą instancji).
+    pub(crate) fn finish_mem_read(&mut self, memory: u64, got: Vec<(u64, u64, Vec<u8>)>) {
+        for (ticket, off, d) in got {
+            if let Some(s) = self.mems.get_mut(&memory) {
+                s.apply_at(off as usize, &d, ticket);
+            }
+        }
+    }
+
     pub(crate) fn read_mem_into_shadow(&mut self, memory: u64, offset: u64, len: usize) -> bool {
         // Zapisy aplikacji, jeszcze nieprzeskanowane (odroczony skan), leżą w tej samej kopii, do której zaraz wpiszemy dane z serwera: najpierw je
         // wysyłamy, inaczej pobranie okna nadpisałoby je starą zawartością (GPU czytałoby stare argumenty rysowania i zawieszało się).
@@ -3286,6 +3319,40 @@ fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     let t_work = std::time::Instant::now();
     crate::lazymap::FETCH_LOCK_NS.fetch_add((t_work - t_lock).as_nanos() as u64, Relaxed);
+    if lazy_unlock() {
+        // Obieg po sieci bez blokady instancji: inne wątki gry wywołują w tym czasie API, a kolejne błędy stron mogą wysyłać swoje żądania.
+        let Some((shared, tickets)) = st.begin_mem_read(r.memory, off as u64, len) else { return false };
+        drop(st);
+        let mut got = Vec::with_capacity(tickets.len());
+        let mut ok = true;
+        for (t, o, n) in tickets {
+            match shared.recv_at(t) {
+                Ok(Response::Data(d)) if d.len() == n => got.push((t, o, d)),
+                _ => ok = false,
+            }
+        }
+        FETCH_CALL_NS_ADD(t_work.elapsed().as_nanos() as u64);
+        if !ok {
+            return false;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut st = loop {
+            match inst.state.try_lock() {
+                Ok(g) => break g,
+                Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        crate::lazymap::FETCH_TIMEOUTS.fetch_add(1, Relaxed);
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            }
+        };
+        st.finish_mem_read(r.memory, got);
+        crate::lazymap::FETCH_WORK_NS.fetch_add(t_work.elapsed().as_nanos() as u64, Relaxed);
+        return true;
+    }
     let ok = st.read_mem_into_shadow(r.memory, off as u64, len);
     crate::lazymap::FETCH_WORK_NS.fetch_add(t_work.elapsed().as_nanos() as u64, Relaxed);
     ok
@@ -3300,6 +3367,18 @@ pub(crate) fn link_state() -> String {
         },
         None => "brak instancji".to_string(),
     }
+}
+
+#[allow(non_snake_case)]
+fn FETCH_CALL_NS_ADD(ns: u64) {
+    crate::lazymap::FETCH_CALL_NS.fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Pobranie leniwe nie trzyma blokady instancji podczas obiegu po sieci (od 0.3.23 domyślnie; `GPU_ICD_LAZY_UNLOCK=0` przywraca stare zachowanie).
+/// Pomiar CP (pełny ekran): 15,24 / 15,55 / 15,66 FPS wobec 14,48 / 15,08 bez (naprzemiennie), czekanie na blokadę przy pobraniach 25 s → 12 s.
+fn lazy_unlock() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_LAZY_UNLOCK").map(|v| v != "0").unwrap_or(true))
 }
 
 static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
