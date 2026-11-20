@@ -196,3 +196,22 @@ teraz niszczymy je w kolejności zależności przed `vkDestroyDevice` — fds st
   poleceniami piszącymi do tej samej pamięci (odczyt krótki, ale trzeba pokazać, że semantyka nie jest słabsza niż dziś, gdy MemRead też nie czeka na GPU), brak dostępu wątku odczytu do
   stanu sesji (backend należy do wątku wykonawczego: potrzebny wspólny dostęp do odwzorowań pamięci). Test z konsultacji: zapis 0xAA + oczekiwanie, odczyt z zależnością, natychmiast zapis 0xBB —
   odczyt nie może zwrócić 0xBB ani mieszanki; test zakleszczeń (wiele odczytów + intensywny strumień główny).
+
+### Kanał odczytów (0.3.26, domyślnie włączony) i co naprawdę czeka — 2026-11-20
+
+Drugie połączenie TCP (`AttachReads`, protokół: `AttachReads`, `MemReadAfter { after, memory, offset, len }`), z którego serwer czyta wspólny widok odwzorowanej pamięci
+(`readview.rs`: tabela odwzorowań pod `RwLock` — wątek odczytu trzyma blokadę odczytu przez cały czas kopiowania, a wykonawca usuwa wpis przed `vkUnmapMemory`/`vkFreeMemory`;
+licznik wykonanych ramek strumienia sterującego, zależność liczona 16-bitowo z zawijaniem). Klient liczy zależność jako późniejszą z: ostatniej ramki `Sync` i ostatniej ramki zapisu tej
+pamięci (`Link::read_dep`), więc zapisy aplikacji nigdy nie znikają z odczytu, a odczyt nie czeka na polecenia nowsze niż oczekiwanie na GPU. Odmowa serwera (pamięć jeszcze nie odwzorowana w jego
+widoku) wraca do zwykłego odczytu strumieniem sterującym bez wyłączania kanału; błąd transportu wyłącza kanał.
+Wynik (pary naprzemienne, pełny ekran): z kanałem 15,67 / 16,12 FPS, bez 15,42 / 15,23 (wcześniej z: 15,48–16,24; bez: 15,0–15,6), czyli ok. +0,5 FPS. Testy: `readview` (czekanie z zawijaniem,
+odczyt, usuwanie), `conn` (połączenie odczytów end-to-end z żądaniami z błędami), kodek protokołu.
+**Kluczowe odkrycie (statystyki serwera):** kolejka żądania na serwerze 7 µs, sama kopia 1 µs, a **czekanie na zależność średnio 1,3 ms** (do 1,9 ms) — odczyt czeka na to, aż wykonawca
+dojdzie do ostatniego oczekiwania na GPU. Czyli ok. 1,3 ms z ok. 2,3 ms na pobranie to realny czas pracy GPU i wykonania poleceń przed oczekiwaniem (28 oczekiwań na klatkę, każde
+to łańcuch: wysłanie → wykonanie zgłoszenia → praca GPU → powrót), a nie sieć ani kolejki. Dalszy zysk wymaga skrócenia łańcucha (mniej oczekiwań na klatkę albo wcześniejsze wypychanie pracy), nie przyspieszenia samego odczytu.
+
+### Błędy Xid 32 i restart serwera (2026-11-20)
+
+W dzienniku jądra hub-a co 30–60 min (17:27, 17:54, 18:24, 18:36, 19:20, 20:23, 21:41 czasu hub-a) pojawia się `NVRM: Xid 32` (uszkodzony strumień poleceń GPU) z procesu gpu-renderd, jeszcze
+przed zmianami z tego dnia; po nim `vkCreateDevice` wisi ok. 126 s i zwraca -4, a gra się wywala. Serwer po `VK_ERROR_DEVICE_LOST` kończy się po 3 s (kod 75), a `gpu-renderd` działa teraz jako
+usługa `systemd --user` (`~/.config/systemd/user/gpu-renderd.service`, `Restart=always`), więc wraca sam. Przyczyna samych Xid 32 (prawdopodobnie błędne dane w strumieniu poleceń) nieustalona — do zbadania.

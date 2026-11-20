@@ -118,6 +118,23 @@ fn ns_since(t: Option<std::time::Instant>) -> u64 {
     t.map_or(0, |t| t.elapsed().as_nanos() as u64)
 }
 
+/// Po `VK_ERROR_DEVICE_LOST` sterownik NVIDIA zostaje w złym stanie (błąd Xid 32 w dzienniku jądra; kolejne `vkCreateDevice` wisiały 126 s i kończyły się tym samym błędem),
+/// więc proces kończy się po chwili (na dostarczenie odpowiedzi błędu do klienta) i pozostaje zrestartować go nadzorcy (systemd `--user`, `Restart=always`).
+/// `GPU_RENDERD_EXIT_ON_LOST=0` wyłącza.
+fn device_lost_exit(cmd: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if std::env::var("GPU_RENDERD_EXIT_ON_LOST").map(|v| v == "0").unwrap_or(false) {
+        return;
+    }
+    ONCE.call_once(|| {
+        eprintln!("gpu-renderd: {cmd} zwróciło VK_ERROR_DEVICE_LOST; proces kończy się za 3 s (restart przez nadzorcę), bo sterownik jest w złym stanie");
+        let _ = std::thread::Builder::new().name("lost-exit".into()).spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::process::exit(75);
+        });
+    });
+}
+
 /// Rodzaje obiektów potomnych urządzenia w kolejności niszczenia (zależne przed tymi, od których zależą).
 const CHILD_KINDS_IN_DESTROY_ORDER: [&str; 21] = [
     "VkPipeline",
@@ -157,6 +174,8 @@ pub struct Replayer {
     instance: VkInstance,
     fns: HashMap<u16, *const c_void>,
     maps: HashMap<u64, *mut u8>,
+    /// Widok dla połączenia odczytów: lustro tabeli `maps` (patrz `readview`).
+    read_view: Option<std::sync::Arc<crate::readview::ReadView>>,
     /// Lustro "ostatnio przesłane w to miejsce" po pamięci (RAM serwera), słownik dla zapisów `MemWriteZstdPfx`: zeros na początku, każdy zapis pamięci
     /// kopiuje tu swoje bajty, więc jest identyczne z lustrem klienta niezależnie od tego, co GPU zrobiło z pamięcią.
     mirror: HashMap<u64, Vec<u8>>,
@@ -257,7 +276,7 @@ fn code(e: CodecError) -> i32 {
 
 impl Replayer {
     pub fn new(lib: Arc<LibVulkan>) -> Replayer {
-        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), mirror: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new(), copy: Default::default() }
+        Replayer { lib, registry: Registry::new(), instance: std::ptr::null_mut(), fns: HashMap::new(), maps: HashMap::new(), read_view: None, mirror: HashMap::new(), pages: HashMap::new(), last_ret: 0, last_name: "", pool_desc: HashMap::new(), pool_sets: HashMap::new(), failed_allocs: 0, scratch: Vec::new(), copy: Default::default() }
     }
 
     pub fn registered_handles(&self) -> usize {
@@ -435,6 +454,9 @@ impl Replayer {
                 eprintln!("replay: odmowa alokacji {result}: {} ; pula: {}", gpu_proto::debug::describe_descriptor_set_alloc(info), self.pool_desc.get(&pool).map_or("(nieznana)", |s| s.as_str()));
             }
         }
+        if result == -4 {
+            device_lost_exit(cmd.name);
+        }
         if result < 0 {
             eprintln!("replay: {} zwróciło {result}", cmd.name);
             return if tolerate { Ok(result) } else { Err(result) };
@@ -491,6 +513,9 @@ impl Replayer {
         };
         for id in ids {
             self.registry.unregister(*id);
+            if let Some(v) = &self.read_view {
+                v.remove(*id);
+            }
             self.maps.remove(id);
             self.mirror.remove(id);
             self.pages.remove(id);
@@ -511,6 +536,12 @@ impl Replayer {
             return Err(r as u32 as i32);
         }
         self.maps.insert(memory, ptr);
+        if let Some(v) = self.read_view.clone() {
+            if let Ok(inv) = self.func_by_name("vkInvalidateMappedMemoryRanges") {
+                v.set_invalidate(inv);
+            }
+            v.insert(memory, crate::readview::MapInfo { ptr: ptr as usize, size: e.size, device: e.parent, memory: e.real });
+        }
         Ok((ptr, e, e.parent))
     }
 
@@ -721,7 +752,11 @@ impl Replayer {
     }
 
     /// Niszczy wszystkie urządzenia sesji (po `vkDeviceWaitIdle`); wywoływane przed zniszczeniem instancji.
-        pub fn destroy_devices(&mut self) {
+        pub fn set_read_view(&mut self, view: std::sync::Arc<crate::readview::ReadView>) {
+        self.read_view = Some(view);
+    }
+
+    pub fn destroy_devices(&mut self) {
         let devices: Vec<(u64, Entry)> = self.registry_devices();
         for (id, e) in devices {
             if let (Ok(wait), Ok(destroy)) = (self.func_by_name("vkDeviceWaitIdle"), self.func_by_name("vkDestroyDevice")) {
@@ -755,6 +790,9 @@ impl Replayer {
                             if m.parent != e.real {
                                 continue;
                             }
+                            if let Some(v) = &self.read_view {
+                                v.remove(mid);
+                            }
                             if self.maps.remove(&mid).is_some() {
                                 call_thunk(unmap, &[e.real, m.real], &[]);
                             }
@@ -767,6 +805,9 @@ impl Replayer {
                 }
             }
             self.registry.unregister(id);
+        }
+        if let Some(v) = &self.read_view {
+            v.clear();
         }
         self.maps.clear();
         self.mirror.clear();

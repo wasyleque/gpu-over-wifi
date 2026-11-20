@@ -24,6 +24,7 @@ mod fwd;
 mod local;
 mod memreq;
 mod niceness;
+mod readchan;
 mod coldtrap;
 #[allow(dead_code)]
 mod hotset;

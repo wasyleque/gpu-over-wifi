@@ -537,6 +537,9 @@ pub struct Link {
     /// Numer tury następnego zapisu z prefiksem (nadawany pod blokadą instancji) i pamięci zwolnione od ostatniej tury.
     mturn: u64,
     forget_pending: Vec<u64>,
+    /// Numer (16 bitów) ostatniej wysłanej ramki `Sync` i ostatniej ramki zapisu dla każdej pamięci: zależność odczytu na kanale odczytów (`read_dep`).
+    last_sync: u16,
+    mem_last: std::collections::HashMap<u64, u16>,
 }
 
 impl Link {
@@ -632,7 +635,7 @@ impl Link {
             workers.push(h);
         }
         let direct = if std::env::var_os("GPU_ICD_SYNC_SEND").is_some() { Some(Mutex::new(direct_stream)) } else { None };
-        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0, mirror: Arc::new(MirrorGate { st: Default::default(), cv: Condvar::new(), dead: Default::default() }), mturn: 0, forget_pending: Vec::new() })
+        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0, mirror: Arc::new(MirrorGate { st: Default::default(), cv: Condvar::new(), dead: Default::default() }), mturn: 0, forget_pending: Vec::new(), last_sync: seq, mem_last: Default::default() })
     }
 
     /// Opis stanu kolejki odpowiedzi (do diagnostyki zawieszeń).
@@ -648,6 +651,13 @@ impl Link {
         (q.bytes as usize, q.queue.len())
     }
 
+    /// Ramka strumienia sterującego, po której serwer może czytać `memory` na kanale odczytów: późniejsza z ostatniego `Sync` (GPU skończyło pracę
+    /// zgłoszoną przed nim) i ostatniego zapisu tej pamięci przez aplikację (jej zapisy nie mogą zniknąć z odczytu).
+    pub fn read_dep(&self, memory: u64) -> u16 {
+        let w = self.mem_last.get(&memory).copied().unwrap_or(self.last_sync);
+        if (w.wrapping_sub(self.last_sync) as i16) >= 0 { w } else { self.last_sync }
+    }
+
     pub fn shared(&self) -> Arc<Shared> {
         self.shared.clone()
     }
@@ -660,6 +670,9 @@ impl Link {
 
     fn frame(&mut self, req: &Request, out: &mut Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
+        if matches!(req, Request::Sync) {
+            self.last_sync = self.seq;
+        }
         let frame = Frame::new(0, flags::CRC, self.seq, 0, req.encode()).map_err(ClientError::Frame)?;
         out.extend_from_slice(&frame.encode());
         Ok(())
@@ -673,6 +686,7 @@ impl Link {
     /// robi wątek nadawczy. Wołający oddaje własną kopię bajtów.
     pub fn send_mem(&mut self, memory: u64, offset: u64, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
+        self.mem_last.insert(memory, self.seq);
         let input = if mem_pfx() {
             // Prefiks i aktualizację lustra robi wątek roboczy w kolejności tur (numer nadajemy tu, pod blokadą instancji).
             JobInput::MemPfx(self.seq, memory, offset, raw, self.next_turn())
@@ -700,6 +714,7 @@ impl Link {
     /// (przed zapisem któregokolwiek fragmentu), potem lustro przejmuje nowe bajty; kolejność w strumieniu jak w `send_mem`.
     pub fn send_mem_group(&mut self, memory: u64, parts: &[(u64, &[u8])]) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
+        self.mem_last.insert(memory, self.seq);
         let total: usize = parts.iter().map(|p| p.1.len()).sum();
         let t0 = std::time::Instant::now();
         let mut raw = Vec::with_capacity(total);
@@ -735,6 +750,7 @@ impl Link {
     /// Zapis fragmentów jednej pamięci (patrz `Request::MemWriteRuns`); kolejność w strumieniu jak w `send_mem`, kompresja w wątku roboczym.
     pub fn send_mem_runs(&mut self, memory: u64, runs: Vec<(u64, u32)>, pages: Vec<(u32, u64)>, raw: Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
+        self.mem_last.insert(memory, self.seq);
         let job = Arc::new(Job { len: raw.len(), input: Mutex::new(Some(JobInput::Runs((self.seq, memory, runs, pages, raw)))), output: Mutex::new(None), done: Condvar::new() });
         if self.direct.is_none() && !self.workers.is_empty() {
             self.out.work.lock().unwrap_or_else(|e| e.into_inner()).push_back(job.clone());

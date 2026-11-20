@@ -58,6 +58,40 @@ fn video_loop<W: Write>(rx: std::sync::mpsc::Receiver<Vec<u8>>, writer: &mut W) 
     Ok(())
 }
 
+/// Pętla połączenia odczytów: na każde `MemReadAfter` czeka, aż wykonawca sesji skończy ramkę `after`, czyta wspólny widok pamięci i odpowiada (w kolejności żądań).
+/// Wątek wykonawczy sesji nie jest tu wstrzymywany ani pytany: odczyty nie czekają na polecenia późniejsze niż `after`.
+fn reads_loop<S: FrameSource, W: Write>(source: &mut S, writer: &mut W, view: &crate::readview::ReadView) -> Result<(), ServeError> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    loop {
+        let Some(Incoming { frame, req, at }) = source.next()? else { return Ok(()) };
+        let req = req.map(Ok).unwrap_or_else(|| Request::decode(&frame.payload));
+        let reply = match req {
+            Ok(Request::MemReadAfter { after, memory, offset, len }) => {
+                let t0 = std::time::Instant::now();
+                let waited = view.wait_for(after as u16, WAIT);
+                let t_wait = t0.elapsed();
+                if !waited {
+                    Response::Error { code: ERR_PROTOCOL, message: "timeout waiting for the control stream".to_string() }
+                } else {
+                    let t1 = std::time::Instant::now();
+                    let r = view.read(memory, offset, len);
+                    if stats_on() {
+                        note_chan_read(t0.saturating_duration_since(at), t_wait, t1.elapsed());
+                    }
+                    match r {
+                        Ok(d) => Response::Data(d),
+                        Err(c) => Response::Error { code: c, message: "read failed".to_string() },
+                    }
+                }
+            }
+            Ok(_) => Response::Error { code: ERR_PROTOCOL, message: "only MemReadAfter on a reads connection".to_string() },
+            Err(e) => return Err(ServeError::Msg(e)),
+        };
+        send_reply(writer, &frame, &reply)?;
+        writer.flush()?;
+    }
+}
+
 /// Żądanie odczytu różnic pamięci jako (pamięć, zakresy albo `None` = cała pamięć); inne żądania dają `None`.
 fn delta_item(req: &Request) -> Option<DeltaItem> {
     match req {
@@ -112,6 +146,23 @@ fn stats_on() -> bool {
 fn flush_reads() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var_os("GPU_RENDERD_FLUSH_READS").is_some())
+}
+
+static CH_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CH_QUEUE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CH_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CH_READ_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Statystyki kanału odczytów (`GPU_RENDERD_STATS`): kolejka od przyjścia ramki, czekanie na zależność, sama kopia.
+fn note_chan_read(queue: std::time::Duration, wait: std::time::Duration, read: std::time::Duration) {
+    use std::sync::atomic::Ordering::Relaxed;
+    CH_QUEUE_US.fetch_add(queue.as_micros() as u64, Relaxed);
+    CH_WAIT_US.fetch_add(wait.as_micros() as u64, Relaxed);
+    CH_READ_US.fetch_add(read.as_micros() as u64, Relaxed);
+    let n = CH_N.fetch_add(1, Relaxed) + 1;
+    if n % 5000 == 0 {
+        eprintln!("gpu-renderd: kanał odczytów {n}: śr. kolejka {} µs, czekanie na zależność {} µs, kopia {} µs", CH_QUEUE_US.load(Relaxed) / n, CH_WAIT_US.load(Relaxed) / n, CH_READ_US.load(Relaxed) / n);
+    }
 }
 
 fn note_read(queue: std::time::Duration, exec: std::time::Duration) {
@@ -344,6 +395,21 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
                 send_reply(writer, &frame, &reply)?;
                 continue;
             }
+            // Połączenie odczytów: po uwierzytelnieniu `AttachReads` zamienia to połączenie w kanał `MemReadAfter` sesji sterującej.
+            if let (Request::AttachReads { session: sid }, true) = (&req, session.is_authenticated()) {
+                flush_pending(writer, &mut pending)?;
+                match crate::readview::find(*sid) {
+                    Some(view) => {
+                        send_reply(writer, &frame, &Response::U32(0))?;
+                        writer.flush()?;
+                        return reads_loop(source, writer, &view);
+                    }
+                    None => {
+                        send_reply(writer, &frame, &Response::Error { code: ERR_PROTOCOL, message: "unknown session".to_string() })?;
+                        continue;
+                    }
+                }
+            }
             // Kolejne żądania odczytu różnic pamięci, które już przyszły (klient odświeża po jednym oczekiwaniu kilka pamięci), idą do backendu jako
             // grupa: jedna kopia GPU i jeden płotek zamiast jednego na pamięć. Odpowiedzi nadal wychodzą po jednej, w kolejności żądań.
             if let Some(item) = delta_item(&req) {
@@ -375,6 +441,8 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
             let is_read = stats_on() && matches!(req, Request::MemRead { .. } | Request::MemReadDelta { .. } | Request::MemReadDeltaRanges { .. });
             let started = std::time::Instant::now();
             let response = session.handle_request(req);
+            // Połączenie odczytów czeka na ramki sterujące po numerze: ramka jest zakończona (także blokujące oczekiwanie na GPU).
+            session.read_view().advance(frame.header.seq);
             if is_read {
                 note_read(started.saturating_duration_since(at), started.elapsed());
             }
@@ -906,6 +974,52 @@ mod tests {
         let (mut v, _) = session();
         let mut input = req_frame(1, 0, &hello());
         input.extend(req_frame(2, 0, &Request::AttachVideo { session: 0xBAD }));
+        let mut out = Vec::new();
+        assert_eq!(serve_connection(&mut v, &mut Cursor::new(input), &mut out), Ok(()));
+        let r = parse_responses(&out);
+        assert!(matches!(r[1].1, Response::Error { .. }));
+    }
+
+    unsafe extern "C" fn test_invalidate(_d: u64, _c: u64, _r: u64) -> u64 {
+        0
+    }
+
+    #[test]
+    fn reads_connection_answers_memreadafter_from_the_shared_view_after_the_awaited_frame() {
+        let (mut control, _) = session();
+        control.handle_request(hello());
+        let Some(Response::Handle(id)) = control.handle_request(Request::SessionId) else { panic!() };
+        let data: Vec<u8> = (0..=255u8).collect();
+        let view = crate::readview::find(id).expect("widok zarejestrowany pod identyfikatorem sesji");
+        view.set_invalidate(test_invalidate as *const () as *const std::ffi::c_void);
+        view.insert(9, crate::readview::MapInfo { ptr: data.as_ptr() as usize, size: 256, device: 1, memory: 2 });
+        view.advance(7); // wykonawca sesji skończył ramkę 7
+        let (mut reads, _) = session();
+        let mut input = req_frame(1, 0, &hello());
+        input.extend(req_frame(2, 0, &Request::AttachReads { session: id }));
+        input.extend(req_frame(3, 0, &Request::MemReadAfter { after: 7, memory: 9, offset: 16, len: 4 }));
+        input.extend(req_frame(4, 0, &Request::MemReadAfter { after: 6, memory: 9, offset: 250, len: 100 })); // poza rozmiarem
+        input.extend(req_frame(5, 0, &Request::MemReadAfter { after: 3, memory: 404, offset: 0, len: 1 })); // nieznana pamięć
+        input.extend(req_frame(6, 0, &Request::SessionId)); // inne żądanie na połączeniu odczytów jest błędem, nie wykonuje się
+        let mut out = Vec::new();
+        let _ = serve_connection(&mut reads, &mut Cursor::new(input), &mut out);
+        let r = parse_responses(&out);
+        assert_eq!(r[0].1, Response::HelloOk { version: PROTOCOL_VERSION });
+        assert_eq!(r[1].1, Response::U32(0), "odpowiedź na AttachReads");
+        assert_eq!(r[2].1, Response::Data(vec![16, 17, 18, 19]));
+        assert!(matches!(r[3].1, Response::Error { .. }));
+        assert!(matches!(r[4].1, Response::Error { .. }));
+        assert!(matches!(r[5].1, Response::Error { .. }), "SessionId na połączeniu odczytów");
+        assert_eq!(r[2].0.header.seq, 3, "numer ramki odpowiedzi = numer żądania");
+        control.cleanup();
+        assert!(crate::readview::find(id).is_none(), "po końcu sesji identyfikator jest wyrejestrowany");
+    }
+
+    #[test]
+    fn attach_reads_to_an_unknown_session_is_an_error_reply_and_the_connection_stays_a_control_connection() {
+        let (mut v, _) = session();
+        let mut input = req_frame(1, 0, &hello());
+        input.extend(req_frame(2, 0, &Request::AttachReads { session: 0xBAD }));
         let mut out = Vec::new();
         assert_eq!(serve_connection(&mut v, &mut Cursor::new(input), &mut out), Ok(()));
         let r = parse_responses(&out);

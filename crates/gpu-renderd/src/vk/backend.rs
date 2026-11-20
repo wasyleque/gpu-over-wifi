@@ -241,6 +241,10 @@ fn effective_api_version(requested: u32, loader: u32) -> u32 {
 }
 
 impl GpuBackend for VulkanBackend {
+    fn set_read_view(&mut self, view: std::sync::Arc<crate::readview::ReadView>) {
+        self.replay.set_read_view(view);
+    }
+
     fn instance_version(&mut self) -> Result<u32, i32> {
         let _g = GLOBAL_CALLS.lock().map_err(|_| VK_ERROR_INITIALIZATION_FAILED)?;
         let mut v = 0u32;

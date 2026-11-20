@@ -821,6 +821,20 @@ impl InstState {
         Some((self.client.shared(), tickets))
     }
 
+    /// Pierwsza faza pobrania kanałem odczytów (`GPU_ICD_READCHAN`): rozlicza zapisy aplikacji do tej pamięci (wysyła je strumieniem sterującym) i zwraca numer ramki,
+    /// po której serwer ma czytać (`Link::read_dep`), oraz numer biletu do wersjonowania stron. Bez `flush`: odczyt nie zależy od zaległej partii poleceń.
+    pub(crate) fn begin_chan_read(&mut self, memory: u64) -> (u16, u64) {
+        if self.mems.get(&memory).is_some_and(|s| s.lazy.is_some()) {
+            if flags().lazy_scan_one {
+                self.settle_memory_one(memory);
+            } else {
+                self.settle_memory();
+            }
+        }
+        self.stats.roundtrips += 1;
+        (self.client.read_dep(memory), self.client.next_ticket())
+    }
+
     /// Druga faza: wpisuje odebrane dane do kopii pamięci (pod blokadą instancji).
     pub(crate) fn finish_mem_read(&mut self, memory: u64, got: Vec<(u64, u64, Vec<u8>)>) {
         for (ticket, off, d) in got {
@@ -2119,6 +2133,7 @@ fn periodic_stats(stats: &Stats) {
             eprintln!("[gpu-icd] gorące okna dołączone do oczekiwań: {} okien, {} MB", HOT_PUSHED.load(Relaxed), HOT_PUSHED_BYTES.load(Relaxed) >> 20);
             let qn = FETCH_Q_N.load(Relaxed).max(1);
             eprintln!("[gpu-icd] kolejka nadawcza przed odczytem leniwym: średnio {} KB w {:.1} partiach ({} odczytów)", FETCH_Q_BYTES.load(Relaxed) / qn / 1024, FETCH_Q_ITEMS.load(Relaxed) as f64 / qn as f64, qn);
+            eprintln!("[gpu-icd] kanał odczytów: {} odczytów, średnio {} µs, ucieczek do strumienia sterującego {}", crate::readchan::READS.load(Relaxed), crate::readchan::READ_NS.load(Relaxed) / 1000 / crate::readchan::READS.load(Relaxed).max(1), crate::readchan::FALLBACKS.load(Relaxed));
             eprintln!("[gpu-icd] pominięte unieważnienia (bramka transferów): {}", LAZY_GATED.load(Relaxed));
             eprintln!("[gpu-icd] pobrania z wyprzedzeniem: {} okien, czas {} ms", crate::lazymap::PREFETCHED.load(Relaxed), crate::lazymap::PREFETCH_NS.load(Relaxed) / 1_000_000);
             eprintln!("[gpu-icd] pobrania leniwe: czekanie na blokadę instancji {} ms, praca pod blokadą (skan + obieg) {} ms, w tym flush {} ms i samo wywołanie MemRead {} ms", crate::lazymap::FETCH_LOCK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_WORK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_FLUSH_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_CALL_NS.load(Relaxed) / 1_000_000);
@@ -3326,6 +3341,36 @@ fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
     let t_work = std::time::Instant::now();
     crate::lazymap::FETCH_LOCK_NS.fetch_add((t_work - t_lock).as_nanos() as u64, Relaxed);
     if lazy_unlock() {
+        if let Some(ch) = crate::readchan::get() {
+            // Kanał odczytów: osobne połączenie, bez kolejki za zapisami strumienia sterującego; po błędzie wracamy do zwykłego odczytu.
+            let (dep, ticket) = st.begin_chan_read(r.memory);
+            drop(st);
+            let mut got = Vec::new();
+            let mut done = 0usize;
+            let mut ok = true;
+            while done < len {
+                let n = (len - done).min(MEM_CHUNK);
+                match ch.read(dep, r.memory, (off + done) as u64, n) {
+                    Some(d) => got.push((ticket, (off + done) as u64, d)),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+                done += n;
+            }
+            FETCH_CALL_NS_ADD(t_work.elapsed().as_nanos() as u64);
+            let Some(mut st2) = lock_with_timeout(inst) else { return false };
+            if ok {
+                st2.finish_mem_read(r.memory, got);
+                crate::lazymap::FETCH_WORK_NS.fetch_add(t_work.elapsed().as_nanos() as u64, Relaxed);
+                return true;
+            }
+            // Ucieczka: ten sam odczyt strumieniem sterującym (pod tą samą blokadą, bez zwalniania jej w obiegu).
+            let ok = st2.read_mem_into_shadow(r.memory, off as u64, len);
+            crate::lazymap::FETCH_WORK_NS.fetch_add(t_work.elapsed().as_nanos() as u64, Relaxed);
+            return ok;
+        }
         // Obieg po sieci bez blokady instancji: inne wątki gry wywołują w tym czasie API, a kolejne błędy stron mogą wysyłać swoje żądania.
         let Some((shared, tickets)) = st.begin_mem_read(r.memory, off as u64, len) else { return false };
         drop(st);
@@ -3390,6 +3435,24 @@ fn lazy_unlock() -> bool {
 static FETCH_Q_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FETCH_Q_ITEMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FETCH_Q_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Blokada instancji z limitem 3 s (jak w `lazy_fetch`): po nim `None`, żeby wątek obsługi błędów stron nigdy nie zawisł.
+fn lock_with_timeout(inst: &InstanceObj) -> Option<std::sync::MutexGuard<'_, InstState>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match inst.state.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    crate::lazymap::FETCH_TIMEOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        }
+    }
+}
 
 static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HOT_PUSHED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

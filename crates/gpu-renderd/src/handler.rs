@@ -18,6 +18,8 @@ pub const MAX_INSTANCES: usize = 16;
 pub type DeltaItem = (u64, Option<Vec<(u64, u64)>>);
 
 pub trait GpuBackend {
+    /// Wspólny widok pamięci dla połączenia odczytów (patrz `readview`); domyślnie ignorowany (backendy bez odwzorowań).
+    fn set_read_view(&mut self, _view: std::sync::Arc<crate::readview::ReadView>) {}
     fn instance_version(&mut self) -> Result<u32, i32>;
     fn instance_extensions(&mut self) -> Result<Vec<(String, u32)>, i32>;
     fn create_instance(&mut self, api_version: u32, extensions: &[String]) -> Result<u64, i32>;
@@ -278,6 +280,9 @@ pub struct Session<B: GpuBackend> {
     async_error: i32,
     /// Identyfikator sesji i nadajnik ramek obrazu na jej połączenie wideo.
     session_id: u64,
+    /// Widok pamięci sesji dla połączenia odczytów i identyfikatory, pod którymi jest zarejestrowany.
+    read_view: std::sync::Arc<crate::readview::ReadView>,
+    read_ids: Vec<u64>,
     /// Wątek kodujący i wysyłający klatki na połączenie wideo (poza wątkiem poleceń: kodowanie klatki N nie wstrzymuje wykonywania klatki N+1).
     enc: EncPipe,
 }
@@ -285,8 +290,14 @@ pub struct Session<B: GpuBackend> {
 impl<B: GpuBackend> Session<B> {
     pub fn new(backend: B, token: Vec<u8>) -> Self {
         let (session_id, video_tx) = crate::videohub::new_session();
+        let read_view = crate::readview::ReadView::new();
+        crate::readview::register(session_id, &read_view);
+        let mut backend = backend;
+        backend.set_read_view(read_view.clone());
         Session {
             session_id,
+            read_view,
+            read_ids: vec![session_id],
             enc: EncPipe::new(video_tx),
             backend,
             token,
@@ -294,6 +305,10 @@ impl<B: GpuBackend> Session<B> {
             instances: Vec::new(),
             async_error: 0,
         }
+    }
+
+    pub fn read_view(&self) -> &crate::readview::ReadView {
+        &self.read_view
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -426,9 +441,12 @@ impl<B: GpuBackend> Session<B> {
                     let (id, tx) = crate::videohub::new_session();
                     crate::videohub::forget(self.session_id);
                     self.session_id = id;
+                    crate::readview::register(id, &self.read_view);
+                    self.read_ids.push(id);
                     self.enc.new_stream(tx); // nowy strumień zaczyna się od IDR
                     Response::Handle(id)
                 }
+                Request::AttachReads { .. } | Request::MemReadAfter { .. } => Response::Error { code: ERR_PROTOCOL, message: "reads only on a reads connection (AttachReads first)".to_string() },
                 Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
                 Request::PresentFrame { memory, len, seq, width, height, format, codec } => {
                     let r = self.present_frame(memory, len, seq, width, height, format, codec);
@@ -677,6 +695,10 @@ impl<B: GpuBackend> Session<B> {
     /// Wywoływane po rozłączeniu: niszczy wszystkie instancje, które sesja jeszcze trzyma.
     pub fn cleanup(&mut self) {
         crate::videohub::forget(self.session_id);
+        for id in self.read_ids.drain(..) {
+            crate::readview::forget(id);
+        }
+        self.read_view.clear();
         for (handle, _) in self.instances.drain(..) {
             let _ = self.backend.destroy_instance(handle);
         }
