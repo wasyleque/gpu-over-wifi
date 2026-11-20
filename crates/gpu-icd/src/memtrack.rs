@@ -229,81 +229,73 @@ fn scan_threads() -> usize {
     *V.get_or_init(|| std::env::var("GPU_ICD_SCAN_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).map_or(1, |n| n.clamp(1, 16)))
 }
 
-/// Dzieli przedziały `(offset, długość)` na najwyżej `parts` kawałków o zbliżonym rozmiarze (wyrównanych do strony), zachowując kolejność.
-fn split_extents(extents: &[(usize, usize)], parts: usize) -> Vec<Vec<(usize, usize)>> {
-    let total: usize = extents.iter().map(|e| e.1).sum();
-    let per = (total / parts.max(1)).div_ceil(PAGE).max(1) * PAGE;
-    let mut chunks: Vec<Vec<(usize, usize)>> = vec![Vec::new()];
-    let mut room = per;
+/// Rozmiar kawałka skanu równoległego: drobne kawałki wyrównują obciążenie (koszt zależy od stron faktycznie zapełnionych, nie od bajtów).
+const PAR_CHUNK: usize = 16 << 20;
+
+/// Dzieli przedziały `(offset, długość)` na kawałki po najwyżej `chunk` bajtów (wyrównane do strony), zachowując kolejność.
+fn split_extents(extents: &[(usize, usize)], chunk: usize) -> Vec<(usize, usize)> {
+    let chunk = chunk.div_ceil(PAGE).max(1) * PAGE;
+    let mut v = Vec::new();
     for &(mut o, mut l) in extents {
         while l > 0 {
-            if room == 0 && chunks.len() < parts {
-                chunks.push(Vec::new());
-                room = per;
-            }
-            let take = if chunks.len() >= parts { l } else { l.min(room) };
-            chunks.last_mut().map(|c| c.push((o, take)));
+            let take = l.min(chunk);
+            v.push((o, take));
             o += take;
             l -= take;
-            room = room.saturating_sub(take);
         }
     }
-    chunks
+    v
 }
 
-type ScanJob = (usize, Vec<(usize, usize)>, std::sync::mpsc::Sender<(usize, Option<Vec<(usize, usize)>>)>);
+type ScanReply = (usize, Option<Vec<(usize, usize)>>);
+type ScanJob = (usize, (usize, usize), std::sync::mpsc::Sender<ScanReply>);
+type Queue = std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ScanJob>>>;
 
-/// Wątki robocze skanu (tworzone przy pierwszym użyciu); działają na `'static` trackerze areny.
-fn pool(tracker: &'static Tracker, n: usize) -> &'static std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>> {
-    static P: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>>> = std::sync::OnceLock::new();
+fn run_job(tracker: &Tracker, job: ScanJob) {
+    let (idx, (o, l), reply) = job;
+    let _ = reply.send((idx, tracker.take_dirty(o, l)));
+}
+
+/// Wątki robocze skanu (tworzone przy pierwszym użyciu) i wspólna kolejka kawałków; działają na `'static` trackerze areny.
+fn pool(tracker: &'static Tracker, n: usize) -> &'static (std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>>, Queue) {
+    static P: std::sync::OnceLock<(std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>>, Queue)> = std::sync::OnceLock::new();
     P.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<ScanJob>();
-        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let rx: Queue = std::sync::Arc::new(std::sync::Mutex::new(rx));
         for i in 0..n.saturating_sub(1) {
             let rx = rx.clone();
             let _ = std::thread::Builder::new().name(format!("icd-scan-{i}")).spawn(move || loop {
                 let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                let Ok((idx, ext, reply)) = job else { return };
-                let mut out = Vec::new();
-                let mut ok = true;
-                for (o, l) in ext {
-                    match tracker.take_dirty(o, l) {
-                        Some(v) => out.extend(v),
-                        None => {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                let _ = reply.send((idx, ok.then_some(out)));
+                let Ok(job) = job else { return };
+                run_job(tracker, job);
             });
         }
-        std::sync::Mutex::new(tx)
+        (std::sync::Mutex::new(tx), rx)
     })
 }
 
 fn par_scan(tracker: &Tracker, extents: &[(usize, usize)], threads: usize) -> Option<Vec<(usize, usize)>> {
-    let chunks = split_extents(extents, threads);
+    let chunks = split_extents(extents, PAR_CHUNK);
     // SAFETY: tracker należy do areny (`'static`, nigdy nie jest zwalniana); wątki robocze używają go tylko do `take_dirty(&self)`.
     let tracker_static: &'static Tracker = unsafe { &*(tracker as *const Tracker) };
-    let tx = pool(tracker_static, threads).lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let (tx, rx) = pool(tracker_static, threads);
+    let tx = tx.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let (rtx, rrx) = std::sync::mpsc::channel();
     let n = chunks.len();
-    let mut mine = Vec::new();
     for (i, c) in chunks.into_iter().enumerate() {
-        if i == 0 {
-            mine = c;
-        } else if tx.send((i, c, rtx.clone())).is_err() {
-            return None;
+        tx.send((i, c, rtx.clone())).ok()?;
+    }
+    drop(rtx);
+    // Wątek wołający też bierze kawałki z kolejki, dopóki jakieś są.
+    loop {
+        let job = rx.lock().unwrap_or_else(|e| e.into_inner()).try_recv();
+        match job {
+            Ok(j) => run_job(tracker, j),
+            Err(_) => break,
         }
     }
     let mut parts: Vec<Option<Vec<(usize, usize)>>> = vec![None; n];
-    let mut first = Vec::new();
-    for (o, l) in mine {
-        first.extend(tracker.take_dirty(o, l)?);
-    }
-    parts[0] = Some(first);
-    for _ in 1..n {
+    for _ in 0..n {
         let (idx, r) = rrx.recv().ok()?;
         parts[idx] = Some(r?);
     }
@@ -785,21 +777,19 @@ mod split_tests {
     #[test]
     fn split_covers_everything_in_order_and_page_aligned() {
         let ext = vec![(0usize, 10 * PAGE), (20 * PAGE, 30 * PAGE), (100 * PAGE, PAGE)];
-        for parts in 1..=8 {
-            let chunks = split_extents(&ext, parts);
-            assert!(chunks.len() <= parts);
-            let flat: Vec<(usize, usize)> = chunks.into_iter().flatten().collect();
+        for chunk in [PAGE, 3 * PAGE, 7 * PAGE + 1, 64 * PAGE] {
+            let flat = split_extents(&ext, chunk);
             let total: usize = flat.iter().map(|e| e.1).sum();
             assert_eq!(total, 41 * PAGE);
-            assert!(flat.iter().all(|(o, l)| o % PAGE == 0 && l % PAGE == 0 && *l > 0));
+            assert!(flat.iter().all(|(o, l)| o % PAGE == 0 && l % PAGE == 0 && *l > 0 && *l <= chunk.div_ceil(PAGE) * PAGE));
             assert!(flat.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0));
         }
     }
 
     #[test]
-    fn split_balances_sizes() {
-        let chunks = split_extents(&[(0, 400 * PAGE)], 4);
-        assert_eq!(chunks.len(), 4);
-        assert!(chunks.iter().all(|c| c.iter().map(|e| e.1).sum::<usize>() == 100 * PAGE));
+    fn split_makes_equal_chunks() {
+        let flat = split_extents(&[(0, 400 * PAGE)], 100 * PAGE);
+        assert_eq!(flat.len(), 4);
+        assert!(flat.iter().all(|c| c.1 == 100 * PAGE));
     }
 }
