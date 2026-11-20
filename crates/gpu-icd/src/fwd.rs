@@ -1952,6 +1952,11 @@ fn periodic_stats(stats: &Stats) {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] skany pamięci wg przyczyny [flush, odczyt leniwy, EndCommandBuffer, G1, obieg synchroniczny]: {:?}", SETTLE_BY.iter().map(|c| c.load(Relaxed)).collect::<Vec<_>>());
         }
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (n, ns) = (crate::lazymap::FAULTS_FETCHED.load(Relaxed).max(1), crate::lazymap::FETCH_NS.load(Relaxed));
+            eprintln!("[gpu-icd] pobrania leniwe: {} razy, łączny czas {} ms (śr {} µs na pobranie), bajtów {} MB", n, ns / 1_000_000, ns / 1000 / n, crate::lazymap::FETCHED_BYTES.load(Relaxed) >> 20);
+        }
         if flags().sem_cache {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] licznik semaforów (G3): lokalnie {}, odświeżeń w tle {}, blokująco do serwera {}", SEM_LOCAL.load(Relaxed), SEM_REFRESH.load(Relaxed), SEM_SYNC.load(Relaxed));

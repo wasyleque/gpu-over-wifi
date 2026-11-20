@@ -97,6 +97,8 @@ pub static CONTINUE_FAILS: AtomicU64 = AtomicU64::new(0);
 pub static FAULTS: AtomicU64 = AtomicU64::new(0);
 pub static FAULTS_FETCHED: AtomicU64 = AtomicU64::new(0);
 pub static FETCHED_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Czas obsługi pobrań z serwera przy błędach stron (ns): skan zapisów aplikacji + obieg po sieci; cały czas stoi wątek aplikacji.
+pub static FETCH_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Stan jednej leniwej pamięci.
 struct State {
@@ -377,10 +379,12 @@ fn serve_fault(hub: &Hub, addr: usize) {
             }
             let Some(fetch) = hub.fetch.get() else { break };
             let mut ok = true;
+            let t_fetch = std::time::Instant::now();
             for &(a, b) in &plan {
                 ok &= fetch(&r, a, b - a);
                 FETCHED_BYTES.fetch_add((b - a) as u64, Ordering::Relaxed);
             }
+            FETCH_NS.fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
             FAULTS_FETCHED.fetch_add(1, Ordering::Relaxed);
             if !ok {
                 break;
