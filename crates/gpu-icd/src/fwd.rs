@@ -935,8 +935,9 @@ impl InstState {
         }
     }
 
-    /// Gorące okna leniwych pamięci do dołączenia do oczekiwania: (pamięć, offset, długość); do 8 okien na pamięć, razem najwyżej 4 MiB, okno ≤ 1 MiB.
-    fn hot_requests(&self, key: u64) -> Vec<(u64, usize, usize)> {
+    /// Gorące okna leniwych pamięci (pamięć, [(offset, długość)]) do różnicowego odczytu dołączonego do oczekiwania (`GPU_ICD_HOTDELTA`): okna czytane przy
+    /// ≥ 3 prawdziwych błędach stron; razem najwyżej 4 MiB na oczekiwanie (serwer porównuje je z tym, co już wysłał, i odsyła tylko zmienione strony).
+    fn hot_requests(&self) -> Vec<(u64, Vec<(usize, usize)>)> {
         let mut out = Vec::new();
         let mut total = 0usize;
         for (id, s) in self.mems.iter() {
@@ -944,12 +945,16 @@ impl InstState {
             if !s.mapped {
                 continue;
             }
-            for (a, l) in r.hot_windows(3, key) {
-                if l == 0 || l > (1 << 20) || total + l > (4 << 20) || a + l > r.len() {
+            let mut wins = Vec::new();
+            for (a, l) in r.hot_windows(3, None) {
+                if l == 0 || a + l > r.len() || total + l > (4 << 20) {
                     continue;
                 }
                 total += l;
-                out.push((*id, a, l));
+                wins.push((a, l));
+            }
+            if !wins.is_empty() {
+                out.push((*id, wins));
             }
         }
         out
@@ -3010,9 +3015,10 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         };
         crate::lazymap::LAST_WAIT_KEY.store(first ^ (cmd.name.len() as u64) << 56, std::sync::atomic::Ordering::Relaxed);
     }
-    let hot: Vec<(u64, usize, usize)> = if hotpush() && cmd.class == CmdClass::Sync && st.gpu_dirty { st.hot_requests(crate::lazymap::LAST_WAIT_KEY.load(std::sync::atomic::Ordering::Relaxed)) } else { Vec::new() };
-    for &(memory, off, len) in &hot {
-        reqs.push(Request::MemRead { memory, offset: off as u64, len: len as u32 });
+    let hot: Vec<(u64, Vec<(usize, usize)>)> = if hotpush() && cmd.class == CmdClass::Sync && st.gpu_dirty { st.hot_requests() } else { Vec::new() };
+    for (memory, wins) in &hot {
+        let cached = st.mem_cached.get(memory).copied().unwrap_or(true);
+        reqs.push(Request::MemReadDeltaRanges { memory: *memory, ranges: wins.iter().map(|&(a, l)| (a as u64, l as u64)).collect(), cached });
     }
     let ticket = st.client.send_many(&reqs).ok();
     // Oczekiwanie na semafor bez limitu czasu wraca do gry od razu, gdy po nim nie ma czego odświeżać z serwera: serwer wykona je w kolejności strumienia
@@ -3064,7 +3070,7 @@ pub(crate) struct Pending {
     slots_ptr: *mut u64,
     slots_len: usize,
     pre_ids: Vec<u64>,
-    hot: Vec<(u64, usize, usize)>,
+    hot: Vec<(u64, Vec<(usize, usize)>)>,
     alloc_ctx: Option<(u64, Vec<u64>)>,
     speculated: bool,
     audited: bool,
@@ -3279,21 +3285,28 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
         if st.gpu_dirty {
             st.lazy_invalidate();
         }
-        // Odczyty gorących okien dołączone do oczekiwania: dane są z chwili po zakończeniu pracy GPU. Wpisujemy je tylko, gdy w międzyczasie nikt nie zgłosił
-        // nowej pracy (jej zapisy GPU nie byłyby w nich ujęte), i dopiero po unieważnieniu, żeby oznaczenie świeżości nie zostało przez nie zdjęte.
-        if !hot_data.is_empty() && st.submit_gen == p.submit_gen {
+        // Różnicowe odczyty gorących okien dołączone do oczekiwania: dane (zmienione strony) zawsze wpisujemy do kopii, bo serwer uznał je za dostarczone (jego
+        // punkt odniesienia przesunął się); oznaczenie „świeże” i odwzorowanie w widoku aplikacji tylko, gdy odpowiedź jest kompletna i nikt w międzyczasie nie
+        // zgłosił nowej pracy (jej zapisów GPU w tych danych nie ma), a unieważnienie tego oczekiwania już się odbyło.
+        if !hot_data.is_empty() {
             let base = p.base + 2 + p.pre_ids.len() as u64;
-            for (i, ((memory, off, len), d)) in p.hot.iter().zip(hot_data).enumerate() {
+            for (i, ((memory, wins), d)) in p.hot.iter().zip(hot_data).enumerate() {
                 let Some(d) = d else { continue };
-                if d.len() != *len {
-                    continue;
+                let Some((more, segs)) = gpu_proto::pagediff::decode_segments(&d) else { continue };
+                let ticket = base + i as u64;
+                if let Some(s) = st.mems.get_mut(memory) {
+                    for (off, body) in &segs {
+                        s.apply_at(*off as usize, body, ticket);
+                    }
                 }
-                let lazy = st.mems.get(memory).and_then(|s| s.lazy.clone());
-                if let (Some(r), Some(s)) = (lazy, st.mems.get_mut(memory)) {
-                    s.apply_at(*off, &d, base + i as u64);
-                    r.install_fresh(*off, *len);
-                    HOT_PUSHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    HOT_PUSHED_BYTES.fetch_add(*len as u64, std::sync::atomic::Ordering::Relaxed);
+                HOT_PUSHED_BYTES.fetch_add(segs.iter().map(|(_, b)| b.len() as u64).sum::<u64>(), std::sync::atomic::Ordering::Relaxed);
+                if !more && st.submit_gen == p.submit_gen {
+                    if let Some(r) = st.mems.get(memory).and_then(|s| s.lazy.clone()) {
+                        for &(a, l) in wins {
+                            r.install_fresh(a, l);
+                            HOT_PUSHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 }
             }
         }
@@ -3457,10 +3470,11 @@ fn lock_with_timeout(inst: &InstanceObj) -> Option<std::sync::MutexGuard<'_, Ins
 static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HOT_PUSHED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// `GPU_ICD_HOTPUSH=1`: oczekiwanie (Sync) niesie w tym samym obiegu odczyty gorących okien leniwych pamięci; dane wracają razem z jego odpowiedzią.
+/// Oczekiwanie (Sync) niesie w tym samym obiegu RÓŻNICOWY odczyt gorących okien leniwych pamięci (serwer odsyła tylko zmienione strony); aplikacja czyta je lokalnie,
+/// bez obiegu po błąd strony. Od 0.3.27 domyślnie włączone (`GPU_ICD_HOTPUSH=0` wyłącza). Pomiar CP (pełny ekran): 25,46 / 25,07 / 25,15 FPS wobec 15,50 bez (wcześniej 15,2–15,6).
 fn hotpush() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var_os("GPU_ICD_HOTPUSH").is_some())
+    *V.get_or_init(|| std::env::var("GPU_ICD_HOTPUSH").map(|v| v != "0").unwrap_or(true))
 }
 
 static LAZY_GATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

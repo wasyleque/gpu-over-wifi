@@ -215,3 +215,12 @@ to łańcuch: wysłanie → wykonanie zgłoszenia → praca GPU → powrót), a 
 W dzienniku jądra hub-a co 30–60 min (17:27, 17:54, 18:24, 18:36, 19:20, 20:23, 21:41 czasu hub-a) pojawia się `NVRM: Xid 32` (uszkodzony strumień poleceń GPU) z procesu gpu-renderd, jeszcze
 przed zmianami z tego dnia; po nim `vkCreateDevice` wisi ok. 126 s i zwraca -4, a gra się wywala. Serwer po `VK_ERROR_DEVICE_LOST` kończy się po 3 s (kod 75), a `gpu-renderd` działa teraz jako
 usługa `systemd --user` (`~/.config/systemd/user/gpu-renderd.service`, `Restart=always`), więc wraca sam. Przyczyna samych Xid 32 (prawdopodobnie błędne dane w strumieniu poleceń) nieustalona — do zbadania.
+
+### PRZEŁOM: różnicowy odczyt gorących okien dołączony do oczekiwania (0.3.27, domyślnie) — 15,5 → 25,2 FPS
+
+Diagnoza, która do tego doprowadziła: klatka CP to łańcuch ok. 28 zależnych punktów synchronizacji (oczekiwanie na GPU → odczyt wyniku przez CPU → następne zgłoszenie), a każdy płacił osobny obieg po dane
+odczytu leniwego (ok. 2,3 ms; 28 × 2,3 ms ≈ cały czas klatki). Wykonawca serwera jest zajęty tylko ok. 40% czasu (ok. 24 ms na klatkę), GPU i łącze się nudzą. Wcześniejszy HOTPUSH (pełne `MemRead` okien przy każdym
+oczekiwaniu) przegrywał na przepustowości (14 GB); wersja różnicowa dokłada do `Sync` żądanie `MemReadDeltaRanges` gorących okien (≥ 3 prawdziwe błędy stron), serwer porównuje je ze stanem już wysłanym (skróty stron)
+i odsyła tylko zmienione strony (64% okien jest identycznych), a klient po `lazy_invalidate` wpisuje je i odwzorowuje w widoku aplikacji (`install_fresh`), więc odczyt jest lokalny. Dane zawsze trafiają do kopii (punkt
+odniesienia serwera się przesuwa), a oznaczenie „świeże” tylko gdy odpowiedź kompletna i nikt nie zgłosił nowej pracy. Wyniki: 25,46 / 25,07 / 25,15 FPS (maks 58) wobec 15,50 bez; pobrania leniwe 55 → 29,6 tys.,
+dołączone dane 731 MB na przebieg. Obraz poprawny (zrzuty). Oczekiwania z gorącymi oknami blokują (nie wracają wcześniej), ale zastępują oczekiwanie + osobny odczyt jednym obiegiem.

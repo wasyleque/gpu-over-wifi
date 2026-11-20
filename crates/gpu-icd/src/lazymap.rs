@@ -512,11 +512,20 @@ fn prefetcher() -> &'static Prefetcher {
 
 impl LazyRegion {
     /// Gorące okna (początek bajtowy, długość w bajtach) czytane po oczekiwaniu o kluczu `key` przy ≥ `min` prawdziwych błędach stron (najwyżej 8, najczęstsze pierwsze).
-    pub fn hot_windows(&self, min: u32, key: u64) -> Vec<(usize, usize)> {
+    pub fn hot_windows(&self, min: u32, key: Option<u64>) -> Vec<(usize, usize)> {
         let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let mut v: Vec<(usize, usize, u32)> = st.hot.iter().filter(|(&(_, k), c)| k == key && c.1 >= min).map(|(&(a, _), c)| (a, c.0 * PAGE, c.1)).collect();
+        // Liczniki sumujemy po oczekiwaniach (klucz `None`) albo bierzemy jeden klucz.
+        let mut by: std::collections::HashMap<usize, (usize, u32)> = std::collections::HashMap::new();
+        for (&(a, k), c) in st.hot.iter() {
+            if key.is_none_or(|x| x == k) {
+                let e = by.entry(a).or_insert((c.0, 0));
+                e.0 = e.0.max(c.0);
+                e.1 += c.1;
+            }
+        }
+        let mut v: Vec<(usize, usize, u32)> = by.into_iter().filter(|(_, c)| c.1 >= min).map(|(a, c)| (a, c.0 * PAGE, c.1)).collect();
         v.sort_by(|a, b| b.2.cmp(&a.2));
-        v.into_iter().take(8).map(|(a, l, _)| (a, l)).collect()
+        v.into_iter().take(32).map(|(a, l, _)| (a, l)).collect()
     }
 
     /// Dane `[off, off+len)` właśnie wpisano w widok własny (odpowiedź serwera dołączona do oczekiwania): oznacz je jako świeże i odwzoruj w widoku
