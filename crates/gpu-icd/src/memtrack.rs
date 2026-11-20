@@ -249,7 +249,31 @@ fn split_extents(extents: &[(usize, usize)], chunk: usize) -> Vec<(usize, usize)
 
 type ScanReply = (usize, Option<Vec<(usize, usize)>>);
 type ScanJob = (usize, (usize, usize), std::sync::mpsc::Sender<ScanReply>);
-type Queue = std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ScanJob>>>;
+
+/// Kolejka kawałków skanu: `Condvar` zwalnia mutex na czas oczekiwania (wątek gry pobiera z niej bez blokowania się na bezczynnych wątkach roboczych).
+struct JobQueue {
+    q: std::sync::Mutex<std::collections::VecDeque<ScanJob>>,
+    cv: std::sync::Condvar,
+}
+
+impl JobQueue {
+    fn push_all(&self, jobs: Vec<ScanJob>) {
+        self.q.lock().unwrap_or_else(|e| e.into_inner()).extend(jobs);
+        self.cv.notify_all();
+    }
+    fn try_pop(&self) -> Option<ScanJob> {
+        self.q.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
+    }
+    fn wait_pop(&self) -> ScanJob {
+        let mut g = self.q.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(j) = g.pop_front() {
+                return j;
+            }
+            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
 
 fn run_job(tracker: &Tracker, job: ScanJob) {
     let (idx, (o, l), reply) = job;
@@ -257,20 +281,16 @@ fn run_job(tracker: &Tracker, job: ScanJob) {
 }
 
 /// Wątki robocze skanu (tworzone przy pierwszym użyciu) i wspólna kolejka kawałków; działają na `'static` trackerze areny.
-fn pool(tracker: &'static Tracker, n: usize) -> &'static (std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>>, Queue) {
-    static P: std::sync::OnceLock<(std::sync::Mutex<std::sync::mpsc::Sender<ScanJob>>, Queue)> = std::sync::OnceLock::new();
+fn pool(tracker: &'static Tracker, n: usize) -> &'static JobQueue {
+    static P: std::sync::OnceLock<&'static JobQueue> = std::sync::OnceLock::new();
     P.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<ScanJob>();
-        let rx: Queue = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let q: &'static JobQueue = Box::leak(Box::new(JobQueue { q: Default::default(), cv: Default::default() }));
         for i in 0..n.saturating_sub(1) {
-            let rx = rx.clone();
             let _ = std::thread::Builder::new().name(format!("icd-scan-{i}")).spawn(move || loop {
-                let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                let Ok(job) = job else { return };
-                run_job(tracker, job);
+                run_job(tracker, q.wait_pop());
             });
         }
-        (std::sync::Mutex::new(tx), rx)
+        q
     })
 }
 
@@ -278,21 +298,14 @@ fn par_scan(tracker: &Tracker, extents: &[(usize, usize)], threads: usize) -> Op
     let chunks = split_extents(extents, PAR_CHUNK);
     // SAFETY: tracker należy do areny (`'static`, nigdy nie jest zwalniana); wątki robocze używają go tylko do `take_dirty(&self)`.
     let tracker_static: &'static Tracker = unsafe { &*(tracker as *const Tracker) };
-    let (tx, rx) = pool(tracker_static, threads);
-    let tx = tx.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let queue = pool(tracker_static, threads);
     let (rtx, rrx) = std::sync::mpsc::channel();
     let n = chunks.len();
-    for (i, c) in chunks.into_iter().enumerate() {
-        tx.send((i, c, rtx.clone())).ok()?;
-    }
+    queue.push_all(chunks.into_iter().enumerate().map(|(i, c)| (i, c, rtx.clone())).collect());
     drop(rtx);
     // Wątek wołający też bierze kawałki z kolejki, dopóki jakieś są.
-    loop {
-        let job = rx.lock().unwrap_or_else(|e| e.into_inner()).try_recv();
-        match job {
-            Ok(j) => run_job(tracker, j),
-            Err(_) => break,
-        }
+    while let Some(j) = queue.try_pop() {
+        run_job(tracker, j);
     }
     let mut parts: Vec<Option<Vec<(usize, usize)>>> = vec![None; n];
     for _ in 0..n {
@@ -783,6 +796,33 @@ mod split_tests {
             assert_eq!(total, 41 * PAGE);
             assert!(flat.iter().all(|(o, l)| o % PAGE == 0 && l % PAGE == 0 && *l > 0 && *l <= chunk.div_ceil(PAGE) * PAGE));
             assert!(flat.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0));
+        }
+    }
+
+    #[test]
+    fn queue_never_deadlocks_when_workers_idle_and_caller_helps() {
+        // Odtwarza wzorzec par_scan bez jądra: wątki robocze czekają na Condvar, wołający dokłada zadania i sam je dobiera.
+        let q: &'static JobQueue = Box::leak(Box::new(JobQueue { q: Default::default(), cv: Default::default() }));
+        for _ in 0..3 {
+            std::thread::spawn(move || loop {
+                let (i, _, reply) = q.wait_pop();
+                let _ = reply.send((i, Some(vec![(i, i)])));
+            });
+        }
+        for round in 0..2000 {
+            let (rtx, rrx) = std::sync::mpsc::channel();
+            let n = 1 + round % 40;
+            q.push_all((0..n).map(|i| (i, (0, 0), rtx.clone())).collect());
+            drop(rtx);
+            while let Some((i, _, reply)) = q.try_pop() {
+                let _ = reply.send((i, Some(vec![(i, i)])));
+            }
+            let mut got = 0;
+            for _ in 0..n {
+                rrx.recv_timeout(std::time::Duration::from_secs(5)).expect("zakleszczenie kolejki skanu");
+                got += 1;
+            }
+            assert_eq!(got, n);
         }
     }
 
