@@ -55,6 +55,12 @@ impl Drop for VideoThread {
     }
 }
 
+/// Czy piksele po dekodowaniu trzeba przestawić z RGBA na BGRA. Surowe i LZ4 niosą bajty w kolejności formatu klatki; H.264 jest już po konwersji YUV→BGRA
+/// (serwer koduje wejście zgodnie z formatem: NVENC ABGR dla RGBA, więc kolory są prawdziwe), więc dodatkowa zamiana odwracałaby czerwień z błękitem.
+fn needs_rb_swap(codec: Codec, format: PixelFormat) -> bool {
+    format == PixelFormat::Rgba8 && matches!(codec, Codec::Raw | Codec::Lz4)
+}
+
 fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
     let mut st = VideoStats::default();
     let mut presenter: Option<Presenter> = None;
@@ -109,7 +115,7 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
             Codec::Hevc => continue, // HEVC: laptop (i965) go nie dekoduje
         };
         st.decode_ns += t_dec.elapsed().as_nanos() as u64;
-        let frame_bgra: &[u8] = if h.format == PixelFormat::Rgba8 {
+        let frame_bgra: &[u8] = if needs_rb_swap(h.codec, h.format) {
             bgra.resize(px.len(), 0);
             if !rgba_to_bgra(px, &mut bgra) {
                 continue;
@@ -163,4 +169,19 @@ fn run(mut c: Client, surface: u64, width: u32, height: u32) -> VideoStats {
         eprintln!("gpu-icd wideo: klatek {}, {:.2} MB ({:.0} KB/klatkę), na klatkę: odbiór {:.1} ms, dekodowanie {:.1} ms, wyświetlenie {:.1} ms", st.frames, st.bytes as f64 / 1e6, st.bytes as f64 / st.frames as f64 / 1e3, per(st.recv_ns), per(st.decode_ns), per(st.present_ns));
     }
     st
+}
+
+#[cfg(test)]
+mod swap_tests {
+    use super::*;
+
+    #[test]
+    fn only_raw_and_lz4_rgba_frames_are_swapped_never_decoded_h264() {
+        assert!(needs_rb_swap(Codec::Raw, PixelFormat::Rgba8));
+        assert!(needs_rb_swap(Codec::Lz4, PixelFormat::Rgba8));
+        assert!(!needs_rb_swap(Codec::H264, PixelFormat::Rgba8), "H.264 po dekoderze jest już BGRA");
+        assert!(!needs_rb_swap(Codec::Raw, PixelFormat::Bgra8));
+        assert!(!needs_rb_swap(Codec::Lz4, PixelFormat::Bgra8));
+        assert!(!needs_rb_swap(Codec::H264, PixelFormat::Bgra8));
+    }
 }

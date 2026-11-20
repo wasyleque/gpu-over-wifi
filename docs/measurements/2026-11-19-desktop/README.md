@@ -145,3 +145,16 @@ zawartość identyczną jak poprzednie pobranie tego okna, ale zawężenie uniew
 Profil CPU (patrz wyżej): klatka jest ograniczona opóźnieniem obiegów, nie CPU. Pozostaje strukturalna zmiana: serwer dołącza dane gorących okien do odpowiedzi
 na oczekiwanie (push przy zakończeniu fence), żeby błąd strony nie wymagał osobnego obiegu. Dodatkowo okno (nie pełny ekran) dało 16,4 FPS (pojedynczy przebieg).
 Sporadyczne awarie gry przy starcie (ok. 1 na 4 przebiegi, przyczyna nieustalona; log kończy się na vkd3d-proton SetPageFaultEnablement).
+
+### Górna granica zysku z usunięcia obiegów odczytu leniwego (DIAGNOSTYKA, 2026-11-20)
+
+`GPU_ICD_LAZY_FAKE=1` pomija pobranie (gra widzi stare dane; to nie jest rozwiązanie, tylko pomiar): **31,9 FPS** (min 19,7, maks 46,8) wobec ok. 15 — czyli
+obiegi odczytu leniwego SĄ ścieżką krytyczną klatki (ok. 2× FPS do zyskania), w przeciwieństwie do skanu (−13..16 s skanu: 0 FPS).
+
+### BŁĄD KOLORÓW (2026-11-20, zgłoszony przez użytkownika: czerwone logo na kurtce było niebieskie) — NAPRAWIONY w 0.3.21
+
+Przyczyna: `video.rs` po dekodowaniu H.264 (VA-API zwraca już BGRA) przestawiał jeszcze raz R↔B, gdy format nagłówka klatki to Rgba8 — a serwer koduje
+wejście NVENC zgodnie z formatem (ABGR dla RGBA), więc kolory po dekoderze są prawdziwe. Efekt: pełna zamiana czerwieni z błękitem przy H.264 (żółta
+roślinność wychodziła cyjanowo-biała), przy raw/LZ4 kolory były dobre (potwierdzone przez użytkownika w drugim przebiegu). Błąd wprowadzony w 2527a43 (dedykowane
+połączenie wideo); test `swap_tests` pilnuje, że zamianę dostają tylko klatki raw/LZ4 w RGBA. Po poprawce zrzut ekranu z H.264 ma poprawne kolory (potwierdzone przez użytkownika).
+Wniosek: pomiary FPS z H.264 nie były dotknięte (zamiana nie zmienia kosztu), ale JAKOŚĆ obrazu była zła w CP — brakowało testu koloru end-to-end (do dodania).

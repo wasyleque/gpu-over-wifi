@@ -25,6 +25,22 @@ c = json.loads(p.read_text()); g = c['$gid']
 g['launcherArgs'] = '--launcher-skip --intro-skip -benchmark'
 p.write_text(json.dumps(c, indent=2))
 PY"
+# ustawienia obrazu: gra resetuje je po awarii (okno, 1024x768), a testy mają iść zawsze w pełnym ekranie (BENCH_FULLSCREEN=0 wyłącza)
+if [ "${BENCH_FULLSCREEN:-1}" = 1 ]; then
+  r "python3 - <<'PY'
+import json, pathlib
+p = pathlib.Path('$res').parents[2] / 'AppData/Local/CD Projekt Red/Cyberpunk 2077/UserSettings.json'
+d = json.loads(p.read_text())
+def walk(x):
+    if isinstance(x, dict):
+        if x.get('name') == 'WindowMode': x['value'] = 'Fullscreen'; x['index'] = 0
+        if x.get('name') == 'Resolution': x['value'] = '1920x1080'
+        for v in x.values(): walk(v)
+    elif isinstance(x, list):
+        for v in x: walk(v)
+walk(d); p.write_text(json.dumps(d, indent=4))
+PY"
+fi
 [ $# -gt 0 ] && r "cd ~/gpu-hub-client && python3 envset.py game=$gid $*" | tail -1
 before=$(r "ls '$res' 2>/dev/null | sort | tail -1" || true)
 r 'cd ~/gpu-hub-client && mv -f icd-cp2077.log icd-cp2077.last.log 2>/dev/null; true'
@@ -37,6 +53,11 @@ until r 'pgrep -f "[C]yberpunk2077.exe" >/dev/null'; do
   [ $(( $(date +%s) - t0 )) -gt 240 ] && { echo "gra nie wystartowała w 240 s"; r 'tail -5 /tmp/heroic-launch.log'; exit 2; }; sleep 5
 done
 echo "gra wystartowała po $(( $(date +%s) - t0 )) s"
+if [ -n "${BENCH_SHOT:-}" ]; then
+  # zrzut ekranu (grim) BENCH_SHOT sekund po starcie gry: do porównania kolorów między kodekami; plik: /tmp/claude-1000/shot-<nazwa>.png
+  sleep "$BENCH_SHOT"
+  r 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1; export HYPRLAND_INSTANCE_SIGNATURE=$(ls /run/user/1000/hypr | head -1); grim /tmp/bench-shot.png' && scp -q "$host:/tmp/bench-shot.png" "/tmp/claude-1000/shot-$name.png" && echo "zrzut: /tmp/claude-1000/shot-$name.png"
+fi
 if [ "${BENCH_PERF:-0}" = 1 ]; then
   # profil CPU całej gry (wszystkie wątki) w środku benchmarka: perf record 40 s po BENCH_PERF_DELAY s
   sleep "${BENCH_PERF_DELAY:-90}"
