@@ -1219,3 +1219,63 @@ mod hotcold_tests {
         assert!(r.iter().any(|&(s, e)| s <= o2 + 12345 && o2 + 12345 < e), "zapis do ponownie użytego zakresu musi być widoczny");
     }
 }
+
+#[cfg(test)]
+mod scan_cost_bench {
+    use super::*;
+
+    /// Pomiar modelu kosztu skanu (uruchamiany ręcznie: `cargo test --release -p gpu-icd scan_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn scan_cost_model() {
+        let len = 576usize << 20;
+        let a = Arena::with_len(1 << 30, Some(HcConfig { cool_after: u64::MAX / 2, period: u64::MAX / 2 })).expect("arena");
+        let off = a.alloc(len).expect("alloc");
+        // zapełniamy strony (jak gra), potem zerujemy stan zapisu
+        for p in 0..len / PAGE {
+            // SAFETY: strony przydziału.
+            unsafe { std::ptr::write_volatile(a.ptr(off + p * PAGE), 1) };
+        }
+        let time = |label: &str, f: &dyn Fn() -> usize| {
+            f();
+            let t = std::time::Instant::now();
+            let n = 200;
+            let mut pages = 0;
+            for _ in 0..n {
+                pages = f();
+            }
+            eprintln!("{label}: {:.1} µs/skan, {pages} stron skanowanych", t.elapsed().as_nanos() as f64 / n as f64 / 1000.0);
+        };
+        let full = |a: &Arena| a.tracker.take_dirty(off, len).map(|v| v.len()).unwrap_or(0);
+        time("1) cała arena 576 MiB, zapełniona, jeden przedział", &|| {
+            full(&a);
+            len / PAGE
+        });
+        time("2) jeden przedział 64 MiB", &|| {
+            a.tracker.take_dirty(off, 64 << 20);
+            (64 << 20) / PAGE
+        });
+        time("3) 64 przedziały po 1 MiB co 9 MiB (rozproszone, razem 64 MiB)", &|| {
+            for i in 0..64 {
+                a.tracker.take_dirty(off + i * (9 << 20), 1 << 20);
+            }
+            (64 << 20) / PAGE
+        });
+        time("4) 1 przedział 1 MiB", &|| {
+            a.tracker.take_dirty(off, 1 << 20);
+            256
+        });
+        // zimne bloki: co drugi blok zimny (288 bloków) -> pułapka
+        if let Some(hc) = &a.hc {
+            let mut sink = Vec::new();
+            for b in (off / BLOCK..(off + len) / BLOCK).step_by(2) {
+                a.cool_block(hc, b, &mut sink);
+            }
+            time("5) scan_range całej areny przy co drugim bloku zimnym (288 zimnych)", &|| {
+                let mut s = Vec::new();
+                a.scan_range(hc, off, len, &mut s);
+                len / PAGE / 2
+            });
+        }
+    }
+}
