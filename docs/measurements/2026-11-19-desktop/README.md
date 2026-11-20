@@ -232,3 +232,10 @@ dołączone dane 731 MB na przebieg. Obraz poprawny (zrzuty). Oczekiwania z gor�
 - Nowa ścieżka krytyczna: blokada instancji (czekanie 384–408 s, trzymanie 131–138 s w przebiegu; `WaitSemaphores` trzyma ją 0,33 ms × 344 tys.). Pod blokadą w oczekiwaniach: skan pamięci 66–82 s, flush 12–16 s,
   unieważnienie leniwych pamięci 7,5 s, wpisanie i odwzorowanie gorących okien 13 s. Skan hot/cold (25,37) i na 4 wątkach (25,75) wobec bazy 25,85 — nadal neutralne, więc sam skan nie ogranicza FPS
   (11 wątków gry czeka na blokadzie, ale to obciążenie przesuwa się między wątkami). Zostają do zbadania: oczekiwania, które blokują grę (gorące okna wyłączają powrót wcześniejszy), i konkurencja o blokadę.
+
+### Strojenie w trakcie sesji (0.3.29) — bez wiedzy o grze
+
+Ręczne profile na grę nie skalują się, więc ICD stroi się sam: trzy opcje zachowujące poprawność (odczyt różnicowy gorących okien, kanał odczytów, pobranie leniwe bez blokady) są przełączane w locie, a ICD mierzy
+FPS z własnych `vkQueuePresentKHR` w oknach 3 s i na przemian porównuje wariant bieżący z przeciwnym (po 25 s rozgrzewki, 2 pary okien na przełącznik, margines 5%, powtórka co 5 min). Jawna zmienna
+`GPU_ICD_HOTPUSH`/`GPU_ICD_READCHAN`/`GPU_ICD_LAZY_UNLOCK` przypina przełącznik, `GPU_ICD_TUNER=0` wyłącza strojenie. Cyberpunk: tuner sam zmierzył odczyt różnicowy 31,3 FPS (włączony) wobec 16,1 (wyłączony)
+i 36,3 wobec 17,8, i zostawił go włączonego; pozostałe dwie opcje uznał za obojętne/pomocnicze. Koszt strojenia: ok. 25,3 FPS w całym przebiegu wobec ok. 25,8 bez tunera (okna z gorszym wariantem).

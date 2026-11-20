@@ -50,6 +50,9 @@ pub fn attach(addr: &str, token: &[u8], session: u64) {
 /// Działający kanał (albo `None`: niepodłączony lub zepsuty).
 pub fn get() -> Option<Arc<ReadChan>> {
     let g = CHAN.lock().unwrap_or_else(|e| e.into_inner());
+    if !crate::tuner::readchan() {
+        return None;
+    }
     g.as_ref().filter(|c| !c.broken.load(Ordering::Relaxed)).cloned()
 }
 

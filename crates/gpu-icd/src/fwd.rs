@@ -2141,6 +2141,7 @@ fn periodic_stats(stats: &Stats) {
             let qn = FETCH_Q_N.load(Relaxed).max(1);
             eprintln!("[gpu-icd] kolejka nadawcza przed odczytem leniwym: średnio {} KB w {:.1} partiach ({} odczytów)", FETCH_Q_BYTES.load(Relaxed) / qn / 1024, FETCH_Q_ITEMS.load(Relaxed) as f64 / qn as f64, qn);
             eprintln!("[gpu-icd] kanał odczytów: {} odczytów, średnio {} µs, ucieczek do strumienia sterującego {}", crate::readchan::READS.load(Relaxed), crate::readchan::READ_NS.load(Relaxed) / 1000 / crate::readchan::READS.load(Relaxed).max(1), crate::readchan::FALLBACKS.load(Relaxed));
+            eprintln!("[gpu-icd] strojenie: {}", crate::tuner::report());
             eprintln!("[gpu-icd] pominięte unieważnienia (bramka transferów): {}", LAZY_GATED.load(Relaxed));
             eprintln!("[gpu-icd] pobrania z wyprzedzeniem: {} okien, czas {} ms", crate::lazymap::PREFETCHED.load(Relaxed), crate::lazymap::PREFETCH_NS.load(Relaxed) / 1_000_000);
             eprintln!("[gpu-icd] pobrania leniwe: czekanie na blokadę instancji {} ms, praca pod blokadą (skan + obieg) {} ms, w tym flush {} ms i samo wywołanie MemRead {} ms", crate::lazymap::FETCH_LOCK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_WORK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_FLUSH_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_CALL_NS.load(Relaxed) / 1_000_000);
@@ -3459,8 +3460,7 @@ fn FETCH_CALL_NS_ADD(ns: u64) {
 /// Pobranie leniwe nie trzyma blokady instancji podczas obiegu po sieci (od 0.3.23 domyślnie; `GPU_ICD_LAZY_UNLOCK=0` przywraca stare zachowanie).
 /// Pomiar CP (pełny ekran): 15,24 / 15,55 / 15,66 FPS wobec 14,48 / 15,08 bez (naprzemiennie), czekanie na blokadę przy pobraniach 25 s → 12 s.
 fn lazy_unlock() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("GPU_ICD_LAZY_UNLOCK").map(|v| v != "0").unwrap_or(true))
+    crate::tuner::lazy_unlock()
 }
 
 static FETCH_Q_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3495,8 +3495,7 @@ static HOT_PUSHED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// Oczekiwanie (Sync) niesie w tym samym obiegu RÓŻNICOWY odczyt gorących okien leniwych pamięci (serwer odsyła tylko zmienione strony); aplikacja czyta je lokalnie,
 /// bez obiegu po błąd strony. Od 0.3.27 domyślnie włączone (`GPU_ICD_HOTPUSH=0` wyłącza). Pomiar CP (pełny ekran): 25,46 / 25,07 / 25,15 FPS wobec 15,50 bez (wcześniej 15,2–15,6).
 fn hotpush() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("GPU_ICD_HOTPUSH").map(|v| v != "0").unwrap_or(true))
+    crate::tuner::hotpush()
 }
 
 static LAZY_GATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
