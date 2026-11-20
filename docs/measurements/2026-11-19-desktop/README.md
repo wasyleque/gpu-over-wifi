@@ -73,3 +73,11 @@ Limit klatek `GPU_ICD_PACE_FPS=30` w Tomb Raiderze: Overall 28,74, p95 oddania 3
 ## Wpływ debugów na benchmark (Cyberpunk, DESKTOP, ICD 3aa716d2)
 Cztery przebiegi tej samej konfiguracji: 13,53 / 13,00 / 13,85 FPS ze `GPU_ICD_STATS=periodic`, `GPU_ICD_LOG` i `GPU_ICD_PTRACE`; **13,76 FPS bez nich** (zostało tylko `GPU_ICD_DESC_PREFETCH`). Rozrzut ±0,4 FPS: wpływ debugów sterowanych zmiennymi nie jest mierzalny. Nie zmierzono jeszcze kosztu liczników wbudowanych na stałe (zegary w ścieżkach polecenia, blokad, skanu): kandydat na osobny pomiar przez flagę kompilacji.
 G1 (spekulacyjne deskryptory obrazów) w Cyberpunku: 92 874 zapytań w cache, ale 31 016 z 31 653 chybień typu 2/3 to „ten sam kształt": gra pyta o deskryptor zaraz po utworzeniu widoku, odpowiedź nie zdąży wrócić.
+
+## Cyberpunk 2.5 GbE, biblioteka 1ac1e730 (L1 + SEM_CACHE, G1 wyłączone) – 2026-11-20
+Wynik: **16,22 FPS** (min 10,94, maks 22,68, 1116 klatek, 68,8 s); baza L1 15,72. Native 1080 Ti: ~86.
+Liczniki z całej sesji (menu + ładowanie + benchmark): pobrania leniwe 142 104 razy, **łącznie 225 s (śr 1,6 ms, 63 KB na pobranie)**, 8,96 GB;
+skan pamięci 96 s; oczekiwanie na odpowiedzi serwera 48 s; wysyłka różnic 11,7 s; powody skanu [flush 26 193, leniwy 142 104, sync 101 809].
+Wniosek: pobranie leniwe (1,6 ms, ~6× RTT) jest największym kubełkiem, przed skanem. 1,6 ms ≫ RTT 0,25 ms, więc pobranie
+czeka głównie w kolejce serwera za nieprzetworzonymi paczkami (do potwierdzenia pomiarem po stronie serwera), nie na łączu.
+Konsultacja (DeepSeek v4-pro): kolejność B (skan tylko gorących zakresów) → A (push/wątek odczytu) → C (tokeny deskryptorów); czwarta dźwignia: dwie klatki w locie.
