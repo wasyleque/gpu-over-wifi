@@ -184,3 +184,15 @@ sesjach): fds 43 → 64 → 85 → 105 → 125 (po ok. 20 na sesję, głównie `
 Przyczyny: (1) `destroy_devices` zwalniał pamięć i urządzenie, ale nie obiekty potomne (pipeline'y, obrazy, bufory, semafory itd.), więc sterownik NVIDIA trzymał kontekst;
 teraz niszczymy je w kolejności zależności przed `vkDestroyDevice` — fds stabilne (30, `/dev/nvidia0` 12), `CreateDevice` 0,35 s; (2) areny malloc wątków połączeń trzymały zwolnioną pamięć:
 `malloc_trim(0)` po sesji — wzrost RSS z ok. 200 MB na sesję do ok. 20 MB. Wcześniejsze „awarie przy starcie” (1 na 4 przebiegi) były skutkiem narastającego czasu `vkCreateDevice` po wielu przebiegach pod rząd.
+
+### Priorytet wątków gry i kolejka przed odczytem (2026-11-20, serwer już zdrowy)
+
+- `GPU_ICD_NICE_SPINNERS=10` (obniżenie priorytetu 11 wątków `redDispatcher`, które kręcą się w pętli oczekiwania): 15,58 / 15,24 FPS wobec 15,61 / 15,11 bez — **brak efektu**;
+  nasze wątki pomocnicze nie czekają na procesor. Opcja zostaje wyłączona.
+- Kolejka nadawcza przed odczytem leniwym (nowy licznik): średnio **139 KB w 1,6 partiach** (55 tys. odczytów), czyli ok. 0,45 ms czasu na łączu 2,5 GbE zanim żądanie wyjdzie.
+  Razem z kolejką serwera (0,29 ms) to ok. 0,75–1 ms z 2,3 ms na pobranie, zależne od danych, które w strumieniu poprzedzają odczyt, ale go nie dotyczą.
+- Projekt do zrobienia (duży, ryzykowny; konsultacja DeepSeek v4-pro 2026-11-20): osobne połączenie odczytów (jak istniejące połączenie wideo) z zależnością „po bilecie ostatniego
+  oczekiwania na GPU”, a nie „po całym poprzedzającym strumieniu”. Ostrzeżenia z konsultacji: licznik musi rosnąć po ZAKOŃCZENIU żądania (także blokującego oczekiwania), wyścig z późniejszymi
+  poleceniami piszącymi do tej samej pamięci (odczyt krótki, ale trzeba pokazać, że semantyka nie jest słabsza niż dziś, gdy MemRead też nie czeka na GPU), brak dostępu wątku odczytu do
+  stanu sesji (backend należy do wątku wykonawczego: potrzebny wspólny dostęp do odwzorowań pamięci). Test z konsultacji: zapis 0xAA + oczekiwanie, odczyt z zależnością, natychmiast zapis 0xBB —
+  odczyt nie może zwrócić 0xBB ani mieszanki; test zakleszczeń (wiele odczytów + intensywny strumień główny).

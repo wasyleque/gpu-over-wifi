@@ -810,6 +810,10 @@ impl InstState {
             let n = (len - done).min(MEM_CHUNK);
             self.stats.roundtrips += 1;
             self.stats.memr_bytes += n as u64;
+            let (qb, qn) = self.client.queued();
+            FETCH_Q_BYTES.fetch_add(qb as u64, std::sync::atomic::Ordering::Relaxed);
+            FETCH_Q_ITEMS.fetch_add(qn as u64, std::sync::atomic::Ordering::Relaxed);
+            FETCH_Q_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let t = self.client.send_t(&Request::MemRead { memory, offset: offset + done as u64, len: n as u32 }).ok()?;
             tickets.push((t, offset + done as u64, n));
             done += n;
@@ -2113,6 +2117,8 @@ fn periodic_stats(stats: &Stats) {
             eprintln!("[gpu-icd] pobrania leniwe: {} razy, łączny czas {} ms (śr {} µs na pobranie), bajtów {} MB", n, ns / 1_000_000, ns / 1000 / n, crate::lazymap::FETCHED_BYTES.load(Relaxed) >> 20);
             eprintln!("[gpu-icd] błędy stron: po obsłużeniu czekał następny {} razy z {}", crate::lazymap::FAULT_BACKLOG.load(Relaxed), crate::lazymap::FAULTS.load(Relaxed));
             eprintln!("[gpu-icd] gorące okna dołączone do oczekiwań: {} okien, {} MB", HOT_PUSHED.load(Relaxed), HOT_PUSHED_BYTES.load(Relaxed) >> 20);
+            let qn = FETCH_Q_N.load(Relaxed).max(1);
+            eprintln!("[gpu-icd] kolejka nadawcza przed odczytem leniwym: średnio {} KB w {:.1} partiach ({} odczytów)", FETCH_Q_BYTES.load(Relaxed) / qn / 1024, FETCH_Q_ITEMS.load(Relaxed) as f64 / qn as f64, qn);
             eprintln!("[gpu-icd] pominięte unieważnienia (bramka transferów): {}", LAZY_GATED.load(Relaxed));
             eprintln!("[gpu-icd] pobrania z wyprzedzeniem: {} okien, czas {} ms", crate::lazymap::PREFETCHED.load(Relaxed), crate::lazymap::PREFETCH_NS.load(Relaxed) / 1_000_000);
             eprintln!("[gpu-icd] pobrania leniwe: czekanie na blokadę instancji {} ms, praca pod blokadą (skan + obieg) {} ms, w tym flush {} ms i samo wywołanie MemRead {} ms", crate::lazymap::FETCH_LOCK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_WORK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_FLUSH_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_CALL_NS.load(Relaxed) / 1_000_000);
@@ -3380,6 +3386,10 @@ fn lazy_unlock() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("GPU_ICD_LAZY_UNLOCK").map(|v| v != "0").unwrap_or(true))
 }
+
+static FETCH_Q_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FETCH_Q_ITEMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FETCH_Q_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HOT_PUSHED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

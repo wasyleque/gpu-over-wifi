@@ -642,6 +642,12 @@ impl Link {
         format!("odpowiedzi: wysłano zapytań {}, odebrano {}{}; kolejka nadawcza {} B w {} partiach{}", self.sent, t.served, if t.broken { " (POŁĄCZENIE ZERWANE)" } else { "" }, q.bytes, q.queue.len(), if q.broken { " (nadawca ZERWANY)" } else { "" })
     }
 
+    /// (bajty, liczba partii) w kolejce nadawczej: ile danych stoi przed żądaniem, które właśnie wysyłamy.
+    pub fn queued(&self) -> (usize, usize) {
+        let q = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
+        (q.bytes as usize, q.queue.len())
+    }
+
     pub fn shared(&self) -> Arc<Shared> {
         self.shared.clone()
     }
