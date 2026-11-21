@@ -21,6 +21,12 @@ const VK_ERROR_INITIALIZATION_FAILED: i32 = -3;
 const VK_ERROR_MEMORY_MAP_FAILED: i32 = -5;
 const VK_ERROR_DEVICE_LOST: i32 = -4;
 /// Partia wychodzi, gdy przekroczy ten rozmiar (albo na punkcie synchronizacji).
+/// Opcje domyślnie WŁĄCZONE (`=0` wyłącza). Pomiar 2026-11-21 na Cyberpunku: bez `GPU_ICD_SEM_CACHE` albo bez `GPU_ICD_LAZY_SCAN_ONE` 23,0 FPS wobec 32,5 z nimi (-30%),
+/// a były opcjami wyłączonymi domyślnie i ustawiał je tylko plik konfiguracji tej jednej gry; gra bez tych zmiennych (np. Rise of the Tomb Raider) traciła jedną trzecią.
+fn on_by_default(name: &str) -> bool {
+    std::env::var(name).map(|v| v != "0").unwrap_or(true)
+}
+
 const BATCH_FLUSH_DEFAULT: usize = 64 * 1024;
 
 /// Próg wysłania zaległej partii poleceń (`GPU_ICD_BATCH_FLUSH_KB`, domyślnie 64): mniejszy próg pozwala serwerowi zacząć odtwarzanie wcześniej, gdy klient
@@ -217,8 +223,8 @@ pub fn flags() -> &'static Flags {
     static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
     F.get_or_init(|| Flags {
         desc_prefetch: std::env::var_os("GPU_ICD_DESC_PREFETCH").is_some(),
-        sem_cache: std::env::var_os("GPU_ICD_SEM_CACHE").is_some(),
-        lazy_scan_one: std::env::var_os("GPU_ICD_LAZY_SCAN_ONE").is_some(),
+        sem_cache: on_by_default("GPU_ICD_SEM_CACHE"),
+        lazy_scan_one: on_by_default("GPU_ICD_LAZY_SCAN_ONE"),
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
         eager_scan: std::env::var_os("GPU_ICD_EAGER_SCAN").is_some(),
         no_xfer_track: std::env::var_os("GPU_ICD_NO_XFER_TRACK").is_some(),

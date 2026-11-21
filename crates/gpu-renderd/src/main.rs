@@ -14,7 +14,7 @@ fn usage() -> ! {
 fn main() {
     let mut listen = "127.0.0.1:7979".to_string();
     let mut token_file: Option<String> = None;
-    let mut max_conns = 16usize;
+    let mut max_conns = 64usize;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
