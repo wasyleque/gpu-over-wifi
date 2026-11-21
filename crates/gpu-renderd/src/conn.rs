@@ -61,7 +61,8 @@ fn video_loop<W: Write>(rx: std::sync::mpsc::Receiver<Vec<u8>>, writer: &mut W) 
 /// Pętla połączenia odczytów: na każde `MemReadAfter` czeka, aż wykonawca sesji skończy ramkę `after`, czyta wspólny widok pamięci i odpowiada (w kolejności żądań).
 /// Wątek wykonawczy sesji nie jest tu wstrzymywany ani pytany: odczyty nie czekają na polecenia późniejsze niż `after`.
 fn reads_loop<S: FrameSource, W: Write>(source: &mut S, writer: &mut W, view: &crate::readview::ReadView) -> Result<(), ServeError> {
-    const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    // 3 s (było 30 s): żądanie czekające dłużej niż to nie dotyczy tej sesji albo strumień sterujący stoi; klient wraca wtedy do zwykłego odczytu.
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(3);
     loop {
         let Some(Incoming { frame, req, at }) = source.next()? else { return Ok(()) };
         let req = req.map(Ok).unwrap_or_else(|| Request::decode(&frame.payload));

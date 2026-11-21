@@ -180,6 +180,7 @@ unsafe fn create_inner(st: &mut InstState, dev: u64, info: *const u8) -> Result<
     } else {
         match st.client.call(&gpu_proto::msg::Request::SessionId) {
             Ok(gpu_proto::msg::Response::Handle(session)) => {
+                st.session = session;
                 crate::readchan::attach(&st.addr, &st.token, session);
                 VideoThread::start(&st.addr, &st.token, session, surface, w, h).map_err(|e| eprintln!("gpu-icd: wideo niedostępne, tryb synchroniczny: {e}")).ok()
             }

@@ -10,6 +10,8 @@ use gpu_proto::msg::{Request, Response};
 use gpu_renderd::client::Client;
 
 pub struct ReadChan {
+    /// Sesja serwera, do której kanał jest podłączony: odczyt pamięci innej sesji (inna instancja Vulkana w tym samym procesie) musi iść jej własnym strumieniem.
+    session: u64,
     client: Mutex<Client>,
     broken: AtomicBool,
 }
@@ -34,9 +36,9 @@ pub fn attach(addr: &str, token: &[u8], session: u64) {
             Ok(Response::U32(0)) => {}
             other => return Err(format!("AttachReads: {other:?}")),
         }
-        // Serwer czeka na zależność najwyżej 30 s; klient trochę dłużej, żeby dostać odpowiedź o przekroczeniu czasu zamiast własnego błędu.
-        c.set_read_timeout(Some(Duration::from_secs(40))).map_err(|e| format!("{e:?}"))?;
-        Ok(ReadChan { client: Mutex::new(c), broken: AtomicBool::new(false) })
+        // Serwer czeka na zależność najwyżej 3 s (było 30 s: odczyt innej sesji wisiał pół minuty); klient trochę dłużej, żeby dostać odpowiedź o przekroczeniu czasu zamiast własnego błędu.
+        c.set_read_timeout(Some(Duration::from_secs(6))).map_err(|e| format!("{e:?}"))?;
+        Ok(ReadChan { session, client: Mutex::new(c), broken: AtomicBool::new(false) })
     })();
     match made {
         Ok(ch) => {
@@ -47,13 +49,13 @@ pub fn attach(addr: &str, token: &[u8], session: u64) {
     }
 }
 
-/// Działający kanał (albo `None`: niepodłączony lub zepsuty).
-pub fn get() -> Option<Arc<ReadChan>> {
+/// Działający kanał dla sesji `session` (albo `None`: niepodłączony, zepsuty albo podłączony do innej sesji).
+pub fn get_for(session: u64) -> Option<Arc<ReadChan>> {
     let g = CHAN.lock().unwrap_or_else(|e| e.into_inner());
     if !crate::tuner::readchan() {
         return None;
     }
-    g.as_ref().filter(|c| !c.broken.load(Ordering::Relaxed)).cloned()
+    g.as_ref().filter(|c| session != 0 && c.session == session && !c.broken.load(Ordering::Relaxed)).cloned()
 }
 
 pub static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

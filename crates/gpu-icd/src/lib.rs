@@ -128,6 +128,8 @@ struct InstState {
     wait_ticket: u64,
     /// Był `vkQueueSubmit` od ostatniego skanu odwzorowanej pamięci: skan (zapisy na serwer) następuje tuż przed wysłaniem partii, patrz `settle_memory`.
     scan_pending: bool,
+    /// Identyfikator sesji serwera tej instancji (ustawiany przy tworzeniu swapchaina; 0 = nieznany); kanał odczytów obsługuje tylko pamięci własnej sesji.
+    session: u64,
     /// Chwilowo: skan zapisów aplikacji wykonał wątek oczekujący poza blokadą (patrz `prescan`).
     prescan_fast: bool,
     /// Chwila ostatniego wypchnięcia zapisów pamięci przy `vkEndCommandBuffer` (`GPU_ICD_EAGER_PUSH_US`).
@@ -415,6 +417,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             xfer_unknown: false,
             wait_ticket: 0,
             scan_pending: false,
+            session: 0,
             prescan_fast: false,
             last_push: std::time::Instant::now(),
             submit_gen: 0,

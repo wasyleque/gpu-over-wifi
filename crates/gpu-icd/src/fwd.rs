@@ -3486,7 +3486,7 @@ fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
     let t_work = std::time::Instant::now();
     crate::lazymap::FETCH_LOCK_NS.fetch_add((t_work - t_lock).as_nanos() as u64, Relaxed);
     if lazy_unlock() {
-        if let Some(ch) = crate::readchan::get() {
+        if let Some(ch) = crate::readchan::get_for(st.session) {
             // Kanał odczytów: osobne połączenie, bez kolejki za zapisami strumienia sterującego; po błędzie wracamy do zwykłego odczytu.
             let (dep, ticket) = st.begin_chan_read(r.memory);
             drop(st);
