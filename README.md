@@ -1,8 +1,12 @@
+<!-- i18n-switch -->
+**English** · [Polski](README.pl.md) · [Español](README.es.md)
+<!-- /i18n-switch -->
+
 # gpu-over-wifi
 
 Share one powerful home GPU between your devices: run big AI models, play games on a weak laptop as if it had the strong graphics card, and let the server decide who gets the GPU.
 
-> **Status: early research project.** Things work in the lab, not yet in everyday use. Linux only for now (Windows client is planned).
+> **Status: early research project.** Things work in the lab, not yet in everyday use. Linux only for now (Windows client is planned). Results per game: [Measurements](#measurements) (at the end).
 
 ## Cyberpunk 2077 on a remote GPU: from 2 FPS to **25.5 FPS** (and still climbing)
 
@@ -63,6 +67,8 @@ available material only: the Khronos Vulkan registry and specification, the Vulk
 documentation of the compression libraries we use. Every technique in this repository was designed, implemented and measured by us. Where public claims about what is possible could not be
 checked, we measured ourselves, and several ideas that sounded promising did not work (they are recorded with their numbers in [`docs/measurements`](docs/measurements/2026-11-05-rottr/README.md) and `AGENTS.md`).
 
+<a id="test-hardware"></a>
+
 ## Test hardware
 
 | Role | Machine | CPU | RAM | GPU | Storage | OS |
@@ -74,65 +80,6 @@ checked, we measured ourselves, and several ideas that sounded promising did not
 
 Link client-A: direct 1 Gb/s Ethernet cable, ~0.2 ms round trip. Client 2 (the Ryzen laptop, all game numbers below): direct 1 Gb/s cable to server A through its built-in Realtek RTL8111/8168 NIC (0.15 ms round trip, `rx-usecs 0`) or a USB 3 Gigabit adapter (RTL8153, ~0.37 ms, less stable); Wi-Fi is Realtek RTL8723BE and not used for rendering. Client-B: VPN (not used for the numbers below).
 RAM *type* follows from the platform (Ryzen 5000 on AM4 supports DDR4 only); module speed and timings were not read because that needs root (`dmidecode`) and are marked as TBD.
-
-## Measurements
-
-All numbers are from single lab runs, not statistics: treat them as orders of magnitude. Reproduce with `GPU_ICD_STATS=1` (client) and the tools in `tools/`.
-
-### Remote Vulkan (client laptop -> server A, `vkcube`, 650x718, release build)
-
-How each design step changed the same scene:
-
-| Step | Frames/s | Notes |
-|---|---|---|
-| 1. Synchronous read-back of every frame over the network | ~27 | 1.87 MB/frame, 7 round trips/frame, read-back 28.8 ms |
-| 2. Asynchronous frames on a second connection, raw | 44 | app no longer waits for the picture |
-| 3. + LZ4 | 46 | 62 KB/frame (30x smaller on this flat scene) |
-| 4. + non-vsync present (`mailbox`) | ~314 | local present 20.2 -> 1.2 ms per frame (FIFO was waiting for vsync) |
-
-Frame codec comparison (per frame, `mailbox`):
-
-| Codec | Size | Receive | Decode | Present |
-|---|---|---|---|---|
-| LZ4 (lossless, default) | 62 KB | 0.1 ms | 1.0 ms | 1.2 ms |
-| H.264 (NVENC -> VA-API) | 32 KB | 0.2 ms | 8.8 ms | 1.1 ms |
-
-On a cable the lossless LZ4 path is faster; H.264 is meant for slower links. `vkcube` is a flat, simple scene, so it flatters LZ4 and says little about real games.
-
-Building blocks:
-
-| Measurement | Result |
-|---|---|
-| Submit + wait + read back 4 KiB on the remote GPU | 1.16 ms (median) |
-| NVENC H.264 encode incl. host->GPU copy, 1920x1080 / 640x360 | 1.62 ms / 0.27 ms (median) |
-| VA-API H.264 decode + read-back + NV12->BGRA on the HD 520, 1920x1080 / 640x360 | 36.6 ms / 4.3 ms (median) |
-| Host -> GPU copy of one 1080p frame (CUDA) | 0.41 ms (20 GB/s) |
-| Sessions seeing the NVIDIA card after the loader-unload fix (40 killed + 20 normal clients) | 60 / 60 (before: 10 / 50) |
-
-### Real applications (Ryzen 5 4500U laptop -> server A, 1 Gb/s cable, H.264, lab runs)
-
-| Application | API path | Result | What limits it |
-|---|---|---|---|
-| FurMark 2.11 (Vulkan, 1280x720) | native Vulkan | ~98 FPS, frame latency ~29 ms | first run was 11 FPS: server compared the whole mapped memory after every GPU wait (fixed: ranges + streaming loads) |
-| Hamster Hunter (Unity, IL2CPP) | native Vulkan, `-force-vulkan` | 21-34 FPS, frame latency ~20 ms | memory read-back from slow (write-combined) memory: 6.9 -> 1.2 ms per request after the fix |
-| American Truck Simulator (native Linux, `-rdevice vk`) | native Vulkan | **68-72 FPS** (was 3-45) | 1.8 M descriptor-set allocations per run were synchronous round trips (125 us each, ~18 ms of a 22 ms frame): now answered locally from pool bookkeeping with a safety margin and a periodic synchronous audit; a server handle-registry limit (2^20) that killed the game after ~1 M sets is fixed |
-| Khronos Vulkan-Samples (headless, 300 frames each) | native Vulkan | **14 samples pass**, including **ray tracing** (`ray_tracing_basic`, `ray_tracing_extended`, `ray_tracing_position_fetch`, `ray_queries`, opt-in `GPU_ICD_RAYTRACING=1`), descriptor buffer, mesh shading, push descriptors | frames dumped and checked; [`docs/measurements/2026-11-06-vulkan-samples`](docs/measurements/2026-11-06-vulkan-samples/README.md) |
-| Black Book (Heroic, Proton, DXVK) | DX11 via DXVK | **mean 52.7 FPS, 60-63 for most of a 12 000-frame session** (5-10 FPS before the GPU-copy read-back) | non-cached mapped memory is now read through a GPU copy into RAM instead of slow BAR reads; [`docs/measurements/2026-11-05-blackbook`](docs/measurements/2026-11-05-blackbook/README.md) |
-| Rise of the Tomb Raider (Epic, Proton, DX11/DXVK, built-in benchmark, high settings) | DX11 via DXVK | **built-in benchmark, Full HD, high: Overall 25-26 FPS** (Mountain Peak ~38-40, Syria ~18, Geothermal Valley ~19; it was 9.6 FPS at the start of this round and 1-2 FPS at the first attempt); identical builds differ by about ±4 %, results are in the measurements folder | several Vulkan instances per process are now routed correctly, whole device-local memories are read through a GPU copy; zstd with the previously sent content as a dictionary (wire bytes -53 %), hardware CRC32C, descriptor-buffer memories not refreshed, and long `vkWaitSemaphores` returned early with the server executing them in stream order (audited, 0 misses); [`docs/measurements/2026-11-05-rottr`](docs/measurements/2026-11-05-rottr/README.md) |
-| GravityMark 1.89 (Vulkan, 1280x720) | native Vulkan | **30-33 FPS** (did not start before; 7-8 FPS at first start) | a fixed ~31 ms per frame on the client side, independent of scene weight and frames in flight; details in [`docs/measurements/2026-11-05-gravitymark`](docs/measurements/2026-11-05-gravitymark/README.md) |
-| Cyberpunk 2077 (built-in benchmark, 1920x1080 fullscreen, Ryzen 5 1600X desktop, 2.5 GbE) | DirectX 12 -> vkd3d-proton -> `VK_EXT_descriptor_buffer` | **25.1-25.8 FPS average, max 58** (14.7-16.2 earlier the same day; native on the same PC ~86) | the frame is a chain of ~28 dependent sync points; each one paid a separate round trip for CPU read-back of GPU results. Hot read-back windows (17 fixed 64 KB windows, ~55 fetches per frame) are now read differentially in the same round trip as the wait (server returns only changed pages), plus a dedicated read channel, lock-free lazy fetch, server-side fixes (leaked driver contexts made `vkCreateDevice` take 8-126 s after ~28 sessions); details in [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
-| Cyberpunk 2077 | DirectX 12 -> vkd3d-proton -> `VK_EXT_descriptor_buffer` | **7.6 FPS median (p10 7.2, p90 10.6, up to 38 in quiet scenes), frame latency ~18 ms; tester's verdict: playable** (was 4-5 FPS a day earlier, 2-4 before that) | 76 round trips per frame (43 are semaphore waits), instance-lock contention, 5 MB of memory writes per frame; details in [`docs/measurements/2026-11-05-cyberpunk`](docs/measurements/2026-11-05-cyberpunk/README.md) |
-
-### AI hub (server A, DeepSeek V4.1 Flash via InferSSD, one NVMe, context 16384, thinking off)
-
-| Configuration | Generation | Prompt processing |
-|---|---|---|
-| Plain GGUF files (baseline) | 3.37 tok/s | 5.7 tok/s |
-| Expert pack (re-laid-out for the SSD) | 4.76 tok/s (+41%) | 8.1 tok/s |
-| Same, through the hub | 4.66 tok/s | 8.0 tok/s |
-| Long prompt (4105 tokens) with 2 GB VRAM headroom | 3.02 tok/s | 55.7 tok/s |
-
-About half of the remaining time per token is waiting for the single NVMe drive; details and the dead ends are in [`docs/OPTIMIZATION-inferssd.md`](docs/OPTIMIZATION-inferssd.md).
 
 ## Try it
 
@@ -162,3 +109,108 @@ The remote GPU daemon is **not hardened for untrusted networks**. A client with 
 ## License
 
 From version 0.3.0: [Functional Source License 1.1 (FSL-1.1-ALv2)](LICENSE). You may use, copy, modify and redistribute the code for any purpose except a **Competing Use** (offering it to others as a commercial product or service that substitutes for it); each version automatically becomes Apache-2.0 two years after its release. Commercial licensing for competing use: contact the author via GitHub. Versions up to 0.2.2 were released under Apache-2.0, see [`docs/LICENSE-HISTORY.md`](docs/LICENSE-HISTORY.md).
+
+<a id="measurements"></a>
+
+## Measurements
+
+All numbers are from single lab runs, not statistics: treat them as orders of magnitude. Results are grouped **by application**; inside each group the **newest result comes first** and the oldest last. The machine each result was measured on is a column, not a heading. Test machines are listed under [Test hardware](#test-hardware). Reproduce with `GPU_ICD_STATS=1` (client) and the tools in `tools/` (`tools/cp-bench.sh`, `tools/ab-run.sh`).
+
+### Cyberpunk 2077 (DirectX 12 -> vkd3d-proton -> `VK_EXT_descriptor_buffer`)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-21 (evening) | Ryzen 5 1600X desktop, 2.5 Gb/s, built-in benchmark, 1920x1080 fullscreen | **25.0-25.8 FPS average, max 57** (min ~14); on the same PC with its own local card ~86 FPS | the frame is a chain of ~28 dependent sync points, each paid a round trip for CPU read-back of GPU results. Hot read-back windows (17 fixed 64 KB windows, ~55 fetches per frame) are read differentially in the same round trip as the wait (server returns only changed pages), plus a dedicated read channel, lock-free lazy fetch, self-tuning, server fixes (leaked driver contexts made `vkCreateDevice` take 8-126 s after ~28 sessions). Tried and **rejected after measurement**: scan outside the global lock, descriptor prefetch, thread priorities, compression variants. Details: [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
+| 2026-11-21 (morning) | same desktop | 14.7-16.2 FPS average | before the differential read-back |
+| 2026-11-05 | Ryzen 5 4500U laptop, 1 Gb/s, 1080p, 14-minute session | **7.6 FPS median** (p10 7.2, p90 10.6, up to 38 in quiet scenes), frame latency ~18 ms; tester's verdict: playable | 76 round trips per frame (43 are semaphore waits), instance-lock contention, 5 MB of memory writes per frame; [`docs/measurements/2026-11-05-cyberpunk`](docs/measurements/2026-11-05-cyberpunk/README.md) |
+| 2026-11-04 | same laptop | 4-5 FPS (2-4 before that) | first runs |
+
+### Rise of the Tomb Raider (Epic, Proton, DX11/DXVK, built-in benchmark, Full HD, high)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-21 | Ryzen 5 1600X desktop, 2.5 Gb/s | **Overall 28.3-28.5 FPS** (Mountain Peak 29.9, Syria 28.6, Geothermal Valley 26.6); the same with the new options off: 28.5 | DX11/DXVK has no fixed read-back windows, so the differential read-back does not apply; [`docs/measurements/2026-11-21-rottr-desktop`](docs/measurements/2026-11-21-rottr-desktop/README.md) |
+| 2026-11-05 | Ryzen 5 4500U laptop, 1 Gb/s | **Overall 25-26 FPS** (Mountain Peak ~38-40, Syria ~18, Geothermal Valley ~19); 9.6 FPS at the start of that round, 1-2 FPS at the first attempt | several Vulkan instances per process routed correctly, whole device-local memories read through a GPU copy; zstd with the previously sent content as a dictionary (wire bytes -53 %), hardware CRC32C, descriptor-buffer memories not refreshed, long `vkWaitSemaphores` returned early with the server executing them in stream order (audited, 0 misses); identical builds differ by about +-4 %; [`docs/measurements/2026-11-05-rottr`](docs/measurements/2026-11-05-rottr/README.md) |
+
+### American Truck Simulator (native Linux, `-rdevice vk`)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-04 | Ryzen 5 4500U laptop, 1 Gb/s, H.264 | **68-72 FPS** in light scenes (was 3-45); busy cockpit scenes with mirrors ~6 FPS | 1.8 M descriptor-set allocations per run were synchronous round trips (125 us each, ~18 ms of a 22 ms frame): now answered locally from pool bookkeeping with a safety margin and a periodic synchronous audit; a server handle-registry limit (2^20) that killed the game after ~1 M sets is fixed; [`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md) |
+
+### Black Book (Heroic, Proton, DXVK)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-05 | Ryzen 5 4500U laptop, 1 Gb/s | **mean 52.7 FPS, 60-63 for most of a 12 000-frame session** (5-10 FPS before) | non-cached mapped memory is read through a GPU copy into RAM instead of slow BAR reads; [`docs/measurements/2026-11-05-blackbook`](docs/measurements/2026-11-05-blackbook/README.md) |
+
+### GravityMark 1.89 (Vulkan, 1280x720, 20 000 asteroids)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-05 | Ryzen 5 4500U laptop, 1 Gb/s | **30-36 FPS** (did not start before; 7-8 FPS at first start) | a fixed ~31 ms per frame on the client side, independent of scene weight and frames in flight; [`docs/measurements/2026-11-05-gravitymark`](docs/measurements/2026-11-05-gravitymark/README.md) |
+
+### FurMark 2.11 (Vulkan, 1280x720)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-03 | Ryzen 5 4500U laptop, 1 Gb/s, H.264 | **~98 FPS**, frame latency ~29 ms (11 -> 21 -> 32 -> ~99 FPS during that day) | the first run was 11 FPS: the server compared the whole mapped memory after every GPU wait (fixed: ranges + streaming loads) |
+
+### Hamster Hunter (Unity, IL2CPP, `-force-vulkan`)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-03 | Ryzen 5 4500U laptop, 1 Gb/s, H.264 | **21-34 FPS** (7 before), frame latency ~20 ms | memory read-back from slow (write-combined) memory: 6.9 -> 1.2 ms per request after the fix |
+
+### vkQuake (native Vulkan, shareware episode)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-06 | Ryzen 5 4500U laptop, 1 Gb/s | 6 237-frame timedemo at **54 FPS** (34-77) | [`docs/measurements/2026-11-06-vkquake`](docs/measurements/2026-11-06-vkquake/README.md) |
+
+### Khronos Vulkan-Samples (headless, 300 frames each)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-06 | Ryzen 5 4500U laptop | **14 samples pass**, including **ray tracing** (`ray_tracing_basic`, `ray_tracing_extended`, `ray_tracing_position_fetch`, `ray_queries`, opt-in `GPU_ICD_RAYTRACING=1`), descriptor buffer, mesh shading, push descriptors | frames dumped and checked; [`docs/measurements/2026-11-06-vulkan-samples`](docs/measurements/2026-11-06-vulkan-samples/README.md) |
+
+### vkcube (synthetic, 650x718, release build, client laptop -> server A)
+
+How each design step changed the same scene:
+
+| Step | Frames/s | Notes |
+|---|---|---|
+| 1. Synchronous read-back of every frame over the network | ~27 | 1.87 MB/frame, 7 round trips/frame, read-back 28.8 ms |
+| 2. Asynchronous frames on a second connection, raw | 44 | app no longer waits for the picture |
+| 3. + LZ4 | 46 | 62 KB/frame (30x smaller on this flat scene) |
+| 4. + non-vsync present (`mailbox`) | ~314 | local present 20.2 -> 1.2 ms per frame (FIFO was waiting for vsync) |
+
+Frame codec comparison (per frame, `mailbox`):
+
+| Codec | Size | Receive | Decode | Present |
+|---|---|---|---|---|
+| LZ4 (lossless, default) | 62 KB | 0.1 ms | 1.0 ms | 1.2 ms |
+| H.264 (NVENC -> VA-API) | 32 KB | 0.2 ms | 8.8 ms | 1.1 ms |
+
+On a cable the lossless LZ4 path is faster; H.264 is meant for slower links. `vkcube` is a flat, simple scene, so it flatters LZ4 and says little about real games.
+
+### Building blocks
+
+| Measurement | Result |
+|---|---|
+| Submit + wait + read back 4 KiB on the remote GPU | 1.16 ms (median) |
+| NVENC H.264 encode incl. host->GPU copy, 1920x1080 / 640x360 | 1.62 ms / 0.27 ms (median) |
+| VA-API H.264 decode + read-back + NV12->BGRA on the HD 520, 1920x1080 / 640x360 | 36.6 ms / 4.3 ms (median) |
+| Host -> GPU copy of one 1080p frame (CUDA) | 0.41 ms (20 GB/s) |
+| Sessions seeing the NVIDIA card after the loader-unload fix (40 killed + 20 normal clients) | 60 / 60 (before: 10 / 50) |
+
+### AI hub: DeepSeek V4.1 Flash via InferSSD (server A, one NVMe, context 16384, thinking off)
+
+| Configuration | Generation | Prompt processing |
+|---|---|---|
+| Plain GGUF files (baseline) | 3.37 tok/s | 5.7 tok/s |
+| Expert pack (re-laid-out for the SSD) | 4.76 tok/s (+41%) | 8.1 tok/s |
+| Same, through the hub | 4.66 tok/s | 8.0 tok/s |
+| Long prompt (4105 tokens) with 2 GB VRAM headroom | 3.02 tok/s | 55.7 tok/s |
+
+About half of the remaining time per token is waiting for the single NVMe drive; details and the dead ends are in [`docs/OPTIMIZATION-inferssd.md`](docs/OPTIMIZATION-inferssd.md).

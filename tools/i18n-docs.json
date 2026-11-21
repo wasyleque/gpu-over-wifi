@@ -1,0 +1,8 @@
+{
+  "langs": ["en", "pl", "es"],
+  "docs": [
+    {"path": "README.md", "lang": "en"},
+    {"path": "docs/CALL-FOR-TESTERS.md", "lang": "en"},
+    {"path": "docs/TESTING-OTHER-MACHINE.md", "lang": "pl"}
+  ]
+}

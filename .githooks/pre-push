@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Blokuje wypchnięcie, gdy tłumaczenia dokumentów (en/pl/es) są nieaktualne: uruchom tools/translate-docs.py i zatwierdź wynik.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+python3 tools/translate-docs.py --check || { echo "pre-push: zaktualizuj tłumaczenia (tools/translate-docs.py) i zatwierdź." >&2; exit 1; }

@@ -1,3 +1,7 @@
+<!-- i18n-switch -->
+[English](TESTING-OTHER-MACHINE.en.md) · **Polski** · [Español](TESTING-OTHER-MACHINE.es.md)
+<!-- /i18n-switch -->
+
 # Test na innym zestawie (Linux; Windows jeszcze nie)
 
 Stan na 2026-11-02. **Linux jako klient działa** (zmierzone na laptopie z Intel HD 520 + zdalna RTX 3090 Ti). **Windows nie jest jeszcze obsługiwany**: wymaga osobnego ICD dla Windows (etap M8: inna nazwa biblioteki i manifest w rejestrze, WSI Win32, DXGI). Serwer (`gpu-renderd`) działa na Linuksie z kartą NVIDIA, AMD lub Intel ze sterownikiem Vulkan.

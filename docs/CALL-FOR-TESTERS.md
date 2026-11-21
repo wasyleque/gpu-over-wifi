@@ -1,3 +1,7 @@
+<!-- i18n-switch -->
+**English** · [Polski](CALL-FOR-TESTERS.pl.md) · [Español](CALL-FOR-TESTERS.es.md)
+<!-- /i18n-switch -->
+
 # Help us test: remote GPU for games on weak machines
 
 We are looking for people with **different laptops, desktops and networks** who can run a game through the remote Vulkan driver and send back
