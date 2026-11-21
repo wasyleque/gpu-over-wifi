@@ -257,3 +257,15 @@ Diagnostyka górnej granicy `GPU_ICD_DIAG_NOSCAN=1` (pominięcie skanu zapisów 
 czyli **skan zapisów aplikacji pod globalną blokadą zajmuje ok. 0,9 ms × 80 tys. = 72 s czasu blokady** i to on powoduje czekanie 11 wątków roboczych gry na `EndCommandBuffer`/`ResetCommandPool` (łącznie ok. 384 s). FPS bez skanu niezmierzony (gra pada bez zapisów aplikacji).
 Wcześniejsze pomiary hot/cold i skanu na 4 wątkach (skracają skan tylko o ok. 19%) były neutralne, bo nie usuwają go spod blokady.
 Kandydat (do zbudowania i zmierzenia): usługa skanowania poza blokadą — jeden wątek skanuje arenę w pętli i numeruje zakończone skany, a oczekiwanie czeka POZA blokadą na skan rozpoczęty po jego zgłoszeniu i pod blokadą tylko zużywa zebrane zakresy (poprawność: zapisy sprzed zgłoszenia pracy są w skanie rozpoczętym później).
+
+
+## Skan zapisów poza blokadą instancji (prescan) — bez zysku (2026-11-21)
+
+Wątek oczekujący skanuje arenę PRZED wzięciem blokady (`crates/gpu-icd/src/prescan.rs`), pod blokadą tylko zużywa gotowe zakresy; poprawność chroni numer zgłoszeń (`SUBMIT_SEQ`) i wspólny mutex zakresów (zakresy zabrane jądru nie giną). Pomiar A/B (tools/ab-run.sh, pełny ekran, ten sam przebieg po kolei):
+
+| wariant | średnia FPS | min | czas skanów pod blokadą (obieg synchroniczny) |
+|---|---|---|---|
+| prescan włączony | 25,00 | 13,4 | 43,8 s (z 82,8 s) |
+| prescan wyłączony | 25,70 | 14,4 | 82,8 s |
+
+Wniosek: skan pod globalną blokadą NIE jest ścieżką krytyczną (czas pod blokadą spadł o połowę, FPS bez zmian). Odrzucone po pomiarze; kod zostaje jako opcja `GPU_ICD_PRESCAN=1`. Pierwszy przebieg z diagnostycznym kluczem NOSCAN w konfiguracji przekroczył limit (gra nie kończy benchmarku bez skanu) — klucze diagnostyczne trzeba usuwać z konfiguracji gry.

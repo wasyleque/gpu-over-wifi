@@ -686,6 +686,7 @@ impl InstState {
     /// wysyła zaległe polecenia przed każdym zapisem pamięci.
     pub(crate) fn settle_memory(&mut self) {
         self.scan_pending = false;
+        crate::prescan::SCAN_PENDING.store(false, std::sync::atomic::Ordering::Relaxed);
         let t = std::time::Instant::now();
         let held = std::mem::take(&mut self.batch);
         self.write_mapped();
@@ -697,6 +698,14 @@ impl InstState {
     /// Jak `settle_memory`, ale tylko dla JEDNEJ pamięci i bez zerowania `scan_pending`: odczyt leniwy musi wysłać zapisy aplikacji do okna, które zaraz
     /// nadpisze danymi serwera, a zapisy do innych pamięci nie są zagrożone (pełny skan areny kosztował ok. 680 µs przy każdym z 83 tys. błędów strony).
     pub(crate) fn settle_memory_one(&mut self, id: u64) {
+        if crate::prescan::has_backlog() {
+            // Zakresy zabrane jądru poza blokadą nie są widoczne dla skanu pojedynczej pamięci: wysyłamy je wspólną drogą.
+            let held = std::mem::take(&mut self.batch);
+            self.write_mapped();
+            let mut tail = std::mem::replace(&mut self.batch, held);
+            self.batch.append(&mut tail);
+            return;
+        }
         let t = std::time::Instant::now();
         let held = std::mem::take(&mut self.batch);
         self.write_mapped_ids(vec![id], None);
@@ -711,7 +720,24 @@ impl InstState {
         self.stats.mapped_count_max = self.stats.mapped_count_max.max(ids.len() as u64);
         // Zapisy aplikacji do wszystkich pamięci w arenie dostajemy jednym skanem; pamięci bez zapisów w ogóle nie są dotykane.
         let t_bulk = std::time::Instant::now();
-        let bulk: Option<Vec<(usize, usize)>> = if ids.iter().any(|i| self.mems.get(i).is_some_and(|s| s.data.arena_offset().is_some())) { crate::memtrack::arena().and_then(|a| a.take_dirty_all()) } else { None };
+        let in_arena = ids.iter().any(|i| self.mems.get(i).is_some_and(|s| s.data.arena_offset().is_some()));
+        // Zakresy zebrane wcześniej poza blokadą (patrz `prescan`) zawsze wchodzą do wysyłki; gdy są kompletne (ścieżka oczekiwania), pełny skan odpada.
+        let (mut backlog, complete) = crate::prescan::take(std::mem::take(&mut self.prescan_fast));
+        let bulk: Option<Vec<(usize, usize)>> = if !in_arena {
+            None
+        } else if complete {
+            Some(backlog)
+        } else {
+            let scanned = crate::memtrack::arena().and_then(|a| a.take_dirty_all());
+            match scanned {
+                Some(mut r) => {
+                    r.append(&mut backlog);
+                    crate::prescan::merge(&mut r);
+                    Some(r)
+                }
+                None => None,
+            }
+        };
         if bulk.is_some() {
             let ns = t_bulk.elapsed().as_nanos() as u64;
             self.stats.t_scan_bulk_ns += ns;
@@ -1944,6 +1970,9 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             return r;
         }
     }
+    if matches!(cmd.name, "vkWaitSemaphores" | "vkWaitSemaphoresKHR" | "vkWaitForFences") {
+        crate::prescan::before_wait();
+    }
     crate::watchdog::set(op, crate::watchdog::WAIT_LOCK, 0);
     let _wd = WdGuard;
     let t_lock = std::time::Instant::now();
@@ -2199,6 +2228,13 @@ fn periodic_stats(stats: &Stats) {
             eprintln!("[gpu-icd] rozbicie skanu: take_dirty_all {:.0} ms (w tym ioctl PAGEMAP_SCAN {:.0} ms w {} wywołaniach, {:.0} µs/wywołanie), przetwarzanie pamięci {:.0} ms w {} wejściach ({:.0} µs/wejście)",
                 stats.t_scan_bulk_ns as f64 / 1e6, io_ns as f64 / 1e6, io_n, io_ns as f64 / 1e3 / io_n.max(1) as f64,
                 stats.t_scan_mem_ns as f64 / 1e6, stats.scan_mem_n, stats.t_scan_mem_ns as f64 / 1e3 / stats.scan_mem_n.max(1) as f64);
+        }
+        {
+            use std::sync::atomic::Ordering::Relaxed as R;
+            let (h, m, c) = (crate::prescan::HITS.load(R), crate::prescan::MISSES.load(R), crate::prescan::COALESCED.load(R));
+            if h + m + c > 0 {
+                eprintln!("[gpu-icd] skan poza blokadą: {h} oczekiwań bez skanu pod blokadą, {m} z pełnym skanem (zgłoszenie w trakcie), {c} połączonych; czas skanów poza blokadą {} ms", crate::prescan::SCAN_NS.load(R) / 1_000_000);
+            }
         }
         if let Some(r) = crate::memtrack::scan_report() {
             eprintln!("[gpu-icd] {r}");
@@ -2810,6 +2846,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
             st.write_mapped();
         } else {
             st.scan_pending = true;
+            crate::prescan::SCAN_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         st.gpu_dirty = true;
         let (mut dsts, mut unknown) = (Vec::new(), flags().no_xfer_track);
@@ -2825,6 +2862,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
             }
         }
         st.submit_gen += 1;
+        crate::prescan::SUBMIT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     let mut e = Encoder::new();
     if let Err(err) = encode_command(op, args, &mut e, &IcdCtx) {
@@ -3011,7 +3049,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     static DIAG_NOSCAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if st.scan_pending && !*DIAG_NOSCAN.get_or_init(|| std::env::var_os("GPU_ICD_DIAG_NOSCAN").is_some()) {
         let t_s = std::time::Instant::now();
+        st.prescan_fast = true;
         st.settle_memory();
+        st.prescan_fast = false;
         SETTLE_NS[4].fetch_add(t_s.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         SETTLE_BY[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
