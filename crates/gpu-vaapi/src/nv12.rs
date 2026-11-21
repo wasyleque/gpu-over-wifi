@@ -1,5 +1,8 @@
 //! Konwersja NV12 (BT.601, zakres ograniczony) do BGRA na CPU.
 
+/// Tylko do pomiarów i testów: wyłącza ścieżkę SIMD.
+pub static SIMD_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// `data` zawiera płaszczyznę Y (`y_pitch`, od `y_off`) i przeplecione UV (`uv_pitch`, od `uv_off`). `origin` to lewy górny róg
 /// przycięcia, `size` to wymiary wyjścia. Błąd, gdy płaszczyzny nie mieszczą się w `data`.
 pub fn nv12_to_bgra(data: &[u8], y_pitch: usize, y_off: usize, uv_pitch: usize, uv_off: usize, origin: (usize, usize), size: (usize, usize)) -> Result<Vec<u8>, String> {
@@ -70,7 +73,15 @@ fn convert_band(data: &[u8], y_pitch: usize, y_off: usize, uv_pitch: usize, uv_o
         let uv_pair_off = if start == 1 { 2 } else { 0 };
         let uv_pairs = &uvrow[uv_base + uv_pair_off..];
 
-        for (k, (yp, px)) in y_pairs.chunks_exact(2).zip(px_pairs.chunks_exact_mut(2)).enumerate() {
+        // Większość wiersza liczy SSE4.1 (osiem pikseli na iterację); resztę (i procesory bez SSE4.1) wersja skalarna poniżej.
+        #[allow(unused_mut)]
+        let mut done_pairs = 0usize;
+        #[cfg(target_arch = "x86_64")]
+        if !SIMD_OFF.load(std::sync::atomic::Ordering::Relaxed) && std::arch::is_x86_feature_detected!("sse4.1") {
+            // SAFETY: funkcja czyta tylko `done_pairs..` w granicach `y_pairs` (2 bajty na parę) i `uv_pairs` (2 bajty na parę) i zapisuje w `px_pairs`; długości sprawdzone w środku.
+            done_pairs = unsafe { simd::pairs_sse41(y_pairs, uv_pairs, px_pairs) };
+        }
+        for (k, (yp, px)) in y_pairs.chunks_exact(2).zip(px_pairs.chunks_exact_mut(2)).enumerate().skip(done_pairs) {
             let u = uv_pairs[2 * k] as i32 - 128;
             let v = uv_pairs[2 * k + 1] as i32 - 128;
             let du = 516 * u;
@@ -111,6 +122,62 @@ fn convert_band(data: &[u8], y_pitch: usize, y_off: usize, uv_pitch: usize, uv_o
             px[1] = gg.clamp(0, 255) as u8;
             px[2] = rr.clamp(0, 255) as u8;
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    use std::arch::x86_64::*;
+
+    /// Konwertuje pary pikseli (każda para dzieli jedną próbkę UV) pełnymi czwórkami par (8 pikseli); zwraca liczbę przekonwertowanych par.
+    /// Wynik jest bajt w bajt taki jak skalarny wzór BT.601 (te same współczynniki, przesunięcie arytmetyczne, saturacja do 0..255).
+    #[target_feature(enable = "sse4.1")]
+    pub unsafe fn pairs_sse41(y_pairs: &[u8], uv_pairs: &[u8], px: &mut [[u8; 4]]) -> usize {
+        let pair_count = y_pairs.len() / 2;
+        let mut k = 0usize;
+        let c16 = _mm_set1_epi32(16);
+        let c128 = _mm_set1_epi32(128);
+        let c298 = _mm_set1_epi32(298);
+        let c516 = _mm_set1_epi32(516);
+        let c409 = _mm_set1_epi32(409);
+        let c100 = _mm_set1_epi32(100);
+        let c208 = _mm_set1_epi32(208);
+        let alpha = _mm_set1_epi8(-1);
+        // U0 U0 U1 U1 U2 U2 U3 U3 | V0 V0 V1 V1 V2 V2 V3 V3
+        let mask = _mm_setr_epi8(0, 0, 2, 2, 4, 4, 6, 6, 1, 1, 3, 3, 5, 5, 7, 7);
+        while k + 4 <= pair_count && 2 * (k + 4) <= uv_pairs.len() {
+            let y8 = _mm_loadl_epi64(y_pairs.as_ptr().add(2 * k) as *const __m128i);
+            let uv8 = _mm_loadl_epi64(uv_pairs.as_ptr().add(2 * k) as *const __m128i);
+            let uvs = _mm_shuffle_epi8(uv8, mask);
+            let y_lo = _mm_mullo_epi32(_mm_sub_epi32(_mm_cvtepu8_epi32(y8), c16), c298);
+            let y_hi = _mm_mullo_epi32(_mm_sub_epi32(_mm_cvtepu8_epi32(_mm_srli_si128::<4>(y8)), c16), c298);
+            let u_lo = _mm_sub_epi32(_mm_cvtepu8_epi32(uvs), c128);
+            let u_hi = _mm_sub_epi32(_mm_cvtepu8_epi32(_mm_srli_si128::<4>(uvs)), c128);
+            let v_lo = _mm_sub_epi32(_mm_cvtepu8_epi32(_mm_srli_si128::<8>(uvs)), c128);
+            let v_hi = _mm_sub_epi32(_mm_cvtepu8_epi32(_mm_srli_si128::<12>(uvs)), c128);
+            let comp = |c: __m128i, u: __m128i, v: __m128i| -> (__m128i, __m128i, __m128i) {
+                let dv = _mm_mullo_epi32(v, c409);
+                let du = _mm_mullo_epi32(u, c516);
+                let gu = _mm_mullo_epi32(u, c100);
+                let gv = _mm_mullo_epi32(v, c208);
+                let r = _mm_srai_epi32::<8>(_mm_add_epi32(_mm_add_epi32(c, dv), c128));
+                let g = _mm_srai_epi32::<8>(_mm_add_epi32(_mm_sub_epi32(_mm_sub_epi32(c, gu), gv), c128));
+                let b = _mm_srai_epi32::<8>(_mm_add_epi32(_mm_add_epi32(c, du), c128));
+                (r, g, b)
+            };
+            let (r0, g0, b0) = comp(y_lo, u_lo, v_lo);
+            let (r1, g1, b1) = comp(y_hi, u_hi, v_hi);
+            let r8 = _mm_packus_epi16(_mm_packs_epi32(r0, r1), _mm_setzero_si128());
+            let g8 = _mm_packus_epi16(_mm_packs_epi32(g0, g1), _mm_setzero_si128());
+            let b8 = _mm_packus_epi16(_mm_packs_epi32(b0, b1), _mm_setzero_si128());
+            let bg = _mm_unpacklo_epi8(b8, g8);
+            let ra = _mm_unpacklo_epi8(r8, alpha);
+            let out = px.as_mut_ptr().add(2 * k) as *mut __m128i;
+            _mm_storeu_si128(out, _mm_unpacklo_epi16(bg, ra));
+            _mm_storeu_si128(out.add(1), _mm_unpackhi_epi16(bg, ra));
+            k += 4;
+        }
+        k
     }
 }
 
@@ -178,5 +245,23 @@ mod tests {
         assert!(nv12_to_bgra(&d, 16, 0, 16, 256, (4, 2), (8, 20)).is_err());
         assert!(nv12_to_bgra(&d, 16, 0, 16, 256, (12, 0), (8, 4)).is_err());
         assert!(nv12_to_bgra(&d, usize::MAX, 0, 16, 256, (0, 0), (8, 4)).is_err());
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_1080p_simd_vs_scalar() {
+        let (w, h) = (1920usize, 1080usize);
+        let data: Vec<u8> = (0..w * h * 3 / 2).map(|i| (i * 31 % 251) as u8).collect();
+        let time = |off: bool| {
+            SIMD_OFF.store(off, std::sync::atomic::Ordering::Relaxed);
+            let t = std::time::Instant::now();
+            for _ in 0..40 {
+                std::hint::black_box(nv12_to_bgra(&data, w, 0, w, w * h, (0, 0), (w, h)).unwrap());
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / 40.0
+        };
+        let (scalar, simd) = (time(true), time(false));
+        SIMD_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("1080p: skalarnie {scalar:.2} ms, SSE4.1 {simd:.2} ms ({:.1}x)", scalar / simd);
     }
 }
