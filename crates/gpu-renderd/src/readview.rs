@@ -30,9 +30,14 @@ pub struct ReadView {
     invalidate: AtomicUsize,
 }
 
-/// `after` jest już wykonane, gdy `processed` nie jest przed nim (porównanie z zawijaniem 16 bitów; zakładamy, że różnica jest mniejsza niż 32768 ramek).
+/// Ile ramek wstecz uznajemy za "już wykonane" (reszta okna 16 bitów to "jeszcze nie": ramka, na którą czekamy, jest co najwyżej `65536 - PAST_WINDOW` = 20536 ramek
+/// przed wykonawcą, a to z zapasem więcej niż kolejka w locie). Poprzednie symetryczne okno ±32768 uznawało zapis sprzed 33-65 tys. ramek za "z przyszłości" i serwer
+/// czekał na niego do limitu (Rise of the Tomb Raider wysyła ok. 150 tys. ramek pamięci na przebieg).
+const PAST_WINDOW: u16 = 45000;
+
+/// `after` jest już wykonane, gdy `processed` nie jest przed nim (porównanie z zawijaniem 16 bitów, okno asymetryczne: patrz `PAST_WINDOW`).
 pub fn reached(processed: u16, after: u16) -> bool {
-    (processed.wrapping_sub(after) as i16) >= 0
+    processed.wrapping_sub(after) <= PAST_WINDOW
 }
 
 impl ReadView {
@@ -168,6 +173,8 @@ mod tests {
         assert!(!reached(9, 10));
         assert!(reached(3, 65530), "po zawinięciu 3 jest za 65530");
         assert!(!reached(65530, 3), "65530 jest przed 3 po zawinięciu");
+        assert!(reached(100, 100u16.wrapping_sub(40000)), "zapis sprzed 40 tys. ramek jest już wykonany (dawne okno ±32768 czekało na niego)");
+        assert!(!reached(100, 100 + 5000), "zapis 5 tys. ramek w przód to jeszcze nie");
     }
 
     #[test]
