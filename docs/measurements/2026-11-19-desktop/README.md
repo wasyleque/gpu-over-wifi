@@ -269,3 +269,13 @@ Wątek oczekujący skanuje arenę PRZED wzięciem blokady (`crates/gpu-icd/src/p
 | prescan wyłączony | 25,70 | 14,4 | 82,8 s |
 
 Wniosek: skan pod globalną blokadą NIE jest ścieżką krytyczną (czas pod blokadą spadł o połowę, FPS bez zmian). Odrzucone po pomiarze; kod zostaje jako opcja `GPU_ICD_PRESCAN=1`. Pierwszy przebieg z diagnostycznym kluczem NOSCAN w konfiguracji przekroczył limit (gra nie kończy benchmarku bez skanu) — klucze diagnostyczne trzeba usuwać z konfiguracji gry.
+
+## Prefetch deskryptorów obrazów na bazie 25 FPS — bez efektu (2026-11-21)
+
+`GPU_ICD_DESC_PREFETCH=1` (spekulacyjne pytania o deskryptory przy vkCreateImageView) A/B/A: 25,75 / 25,42 (baza) / 25,43 FPS. Różnica w szumie, odrzucone. 37 tys. obiegów GetDescriptorEXT po ok. 4 ms (głównie typ 2) nie leży na ścieżce krytycznej klatki albo prefetch ich nie trafia.
+
+## Wątki `redDispatcher` i priorytety na bazie 25 FPS (2026-11-21)
+
+Profil: `top -H` w trakcie benchmarku — CPU klienta zajęty w 82,5% (user), 6% bezczynności, load 12,75 na 12 wątkach; 11 wątków `redDispatcher` po 70–83%, `perf record` na jednym: ok. 75% próbek w jednej ciasnej pętli (11 adresów w 42 bajtach modułu gry) — aktywne czekanie. A/B po restarcie serwera: baza 25,81 FPS; `GPU_ICD_NICE_SPINNERS=19` 25,14; SCHED_IDLE (`=20`) 24,84. Obniżanie priorytetu spinnerów NIE pomaga (lekko szkodzi), więc CPU klienta nie jest wąskim gardłem przez ich pętle; odrzucone. Zostaje opcją diagnostyczną (wartość 20 = SCHED_IDLE).
+
+Uwaga operacyjna: po wielu ubitych sesjach gra przestawała się uruchamiać (zawieszona na ekranie startowym, trzy próby z rzędu) — pomógł restart `gpu-renderd` (pamięć GPU 12 GB → 0). `tools/ab-run.sh` dostał pełne czyszczenie pozostałości (gogdl, umu_run, REDprelauncher).

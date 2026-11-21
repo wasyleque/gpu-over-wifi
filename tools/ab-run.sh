@@ -8,7 +8,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 for spec in "$@"; do
   name=${spec%%:*}; kv=${spec#*:}; args=${kv//,/ }
   for try in 1 2; do
-    ssh -o BatchMode=yes desktop 'pkill -f "[C]yberpunk2077.exe"; pkill -x heroic; sleep 3' >/dev/null 2>&1
+    ssh -o BatchMode=yes desktop 'pkill -f "[g]ogdl|[u]mu_run|[R]EDprelauncher|[C]yberpunk2077"; pkill -x heroic; sleep 5' >/dev/null 2>&1
     log=/tmp/ab-$name-$try.log
     BENCH_TIMEOUT=420 "$here/cp-bench.sh" "ab-$name" $args >"$log" 2>&1
     if grep -q "FPS" "$log" && ! grep -q "Traceback\|przekroczono" "$log"; then
@@ -17,5 +17,5 @@ for spec in "$@"; do
     echo "== $name próba $try nieudana: $(tail -2 "$log" | tr '\n' ' ' | cut -c1-200)" >> "$out"
   done
 done
-ssh -o BatchMode=yes desktop 'pkill -f "[C]yberpunk2077.exe"; pkill -x heroic' >/dev/null 2>&1
+ssh -o BatchMode=yes desktop 'pkill -f "[g]ogdl|[u]mu_run|[R]EDprelauncher|[C]yberpunk2077"; pkill -x heroic' >/dev/null 2>&1
 echo KONIEC >> "$out"

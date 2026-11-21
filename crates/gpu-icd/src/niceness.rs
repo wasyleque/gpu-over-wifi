@@ -4,6 +4,7 @@
 
 extern "C" {
     fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+    fn sched_setscheduler(pid: i32, policy: i32, param: *const i32) -> i32;
 }
 
 const PRIO_PROCESS: i32 = 0;
@@ -22,7 +23,15 @@ pub fn start(prefix: &'static str, nice: i32) {
                     let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) else { continue };
                     if comm.starts_with(prefix) {
                         // SAFETY: wywołanie systemowe na identyfikatorze wątku własnego procesu.
-                        unsafe { setpriority(PRIO_PROCESS, tid, nice) };
+                        unsafe {
+                            if nice >= 20 {
+                                // 20 = polityka SCHED_IDLE: wątek dostaje procesor tylko, gdy nic innego nie jest gotowe (słabsze niż nice 19).
+                                let param = 0i32;
+                                sched_setscheduler(tid as i32, 5, &param);
+                            } else {
+                                setpriority(PRIO_PROCESS, tid, nice);
+                            }
+                        }
                         done.insert(tid);
                     }
                 }
@@ -36,7 +45,7 @@ pub fn start(prefix: &'static str, nice: i32) {
 pub fn start_from_env() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if let Some(n) = std::env::var("GPU_ICD_NICE_SPINNERS").ok().and_then(|v| v.parse::<i32>().ok()).filter(|n| (1..=19).contains(n)) {
+        if let Some(n) = std::env::var("GPU_ICD_NICE_SPINNERS").ok().and_then(|v| v.parse::<i32>().ok()).filter(|n| (1..=20).contains(n)) {
             start("redDispatcher", n);
         }
     });
