@@ -2056,7 +2056,14 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let wait_idx = if flags().slice_wait && matches!(cmd.name, "vkWaitSemaphores" | "vkWaitSemaphoresKHR" | "vkWaitForFences") { params.iter().position(|p| p.name == "timeout") } else { None };
     let wait_total = wait_idx.map(|i| slots[i]);
     let wait_start = std::time::Instant::now();
-    let mut slice_ns: u64 = 1_000_000;
+    // Odcinek oczekiwania: start i sufit w µs (`GPU_ICD_WAIT_SLICE_US`, `GPU_ICD_WAIT_SLICE_MAX_US`; domyślnie 1000 i 4000). Krótszy odcinek skraca czas, w którym
+    // wątek wykonujący serwera stoi na oczekiwaniu i nie obsługuje kolejnych żądań (zapytania czekają za nim), kosztem większej liczby obiegów.
+    static SLICES: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    let (slice_start, slice_max) = *SLICES.get_or_init(|| {
+        let g = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| (50..=100_000).contains(v)).unwrap_or(d) * 1000;
+        (g("GPU_ICD_WAIT_SLICE_US", 1000), g("GPU_ICD_WAIT_SLICE_MAX_US", 4000))
+    });
+    let mut slice_ns: u64 = slice_start;
     let r = loop {
         if let (Some(i), Some(total)) = (wait_idx, wait_total) {
             let elapsed = wait_start.elapsed().as_nanos() as u64;
@@ -2116,7 +2123,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         std::thread::sleep(std::time::Duration::from_micros(50));
         st = lock_state(inst);
         hold = HoldTimer(std::time::Instant::now(), op);
-        slice_ns = (slice_ns * 2).min(4_000_000);
+        slice_ns = (slice_ns * 2).min(slice_max);
     };
     let _ = &hold;
     trace(cmd.name, r, t0.elapsed().as_micros());
