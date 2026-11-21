@@ -29,9 +29,60 @@ thread_local! {
     static NAME: String = std::fs::read_to_string("/proc/thread-self/comm").map(|s| s.trim().to_string()).unwrap_or_default();
 }
 
+/// Tryb skoków (`GPU_ICD_SPIKES=<ms>`): stały bufor ostatnich zdarzeń; gdy odstęp między kolejnymi `vkQueuePresentKHR` przekroczy próg, do logu trafia lista
+/// zdarzeń z tego odstępu (które wywołania, które wątki, ile trwały i ile z tego to czekanie na blokadę instancji). Do 14 zrzutów na sesję.
+fn spike_ms() -> Option<u64> {
+    static V: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_SPIKES").ok().and_then(|v| v.parse().ok()).filter(|m| *m >= 10))
+}
+
+type Ev = (Instant, u64, String, &'static str, u64);
+static RING: Mutex<std::collections::VecDeque<Ev>> = Mutex::new(std::collections::VecDeque::new());
+static LAST_PRESENT: Mutex<Option<Instant>> = Mutex::new(None);
+static DUMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const RING_MAX: usize = 6000;
+
+/// Zapis zdarzenia do bufora skoków (czas trwania w µs, nazwa polecenia lub rodzaju zdarzenia).
+pub fn span(name: &'static str, start: Instant, end: Instant) {
+    if spike_ms().is_none() {
+        return;
+    }
+    let lw = LOCKW.with(|c| c.replace(0));
+    let thread = NAME.with(|n| n.clone());
+    let mut r = RING.lock().unwrap_or_else(|e| e.into_inner());
+    if r.len() >= RING_MAX {
+        r.pop_front();
+    }
+    r.push_back((start, end.duration_since(start).as_micros() as u64, thread, name, lw));
+}
+
+/// Wołane przy każdym `vkQueuePresentKHR`: przy odstępie ponad progiem zrzuca zdarzenia z tego odstępu.
+pub fn on_present() {
+    let Some(thr) = spike_ms() else { return };
+    let now = Instant::now();
+    let prev = LAST_PRESENT.lock().unwrap_or_else(|e| e.into_inner()).replace(now);
+    let Some(prev) = prev else { return };
+    let gap = now.duration_since(prev);
+    if gap.as_millis() as u64 <= thr || DUMPS.load(std::sync::atomic::Ordering::Relaxed) >= 14 {
+        return;
+    }
+    DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let r = RING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ev: Vec<&Ev> = r.iter().filter(|e| e.0 + Duration::from_micros(e.1) >= prev && e.0 <= now).collect();
+    ev.sort_by(|a, b| b.1.cmp(&a.1));
+    eprintln!("[spike] odstęp między klatkami {} ms; {} zdarzeń w odstępie, najdłuższe:", gap.as_millis(), ev.len());
+    for e in ev.iter().take(14) {
+        let off = e.0.checked_duration_since(prev).map(|d| d.as_micros() as i64).unwrap_or(-(prev.duration_since(e.0).as_micros() as i64));
+        eprintln!("[spike]   +{:>7} µs  {:>7} µs  {:<16} {}  lock={}", off, e.1, e.2, e.3, e.4);
+    }
+}
+
 /// Czy nagrywamy teraz (wołane przed każdym poleceniem).
 pub fn recording() -> bool {
     init();
+    if spike_ms().is_some() {
+        return true;
+    }
     match PHASE.load(Relaxed) {
         0 | 3 => false,
         1 => {
@@ -59,6 +110,7 @@ pub fn recording() -> bool {
 /// Zapisuje przedział polecenia (jeśli to oczekiwanie, zgłoszenie, prezentacja albo trwało >= 150 µs).
 pub fn record(name: &'static str, start: Instant, end: Instant) {
     let dur = end.duration_since(start);
+    span(name, start, end);
     let interesting = dur >= Duration::from_micros(150) || name.starts_with("vkQueue") || name.starts_with("vkWait") || name.starts_with("vkAcquire") || name.contains("Semaphore");
     if !interesting || PHASE.load(Relaxed) != 2 {
         return;

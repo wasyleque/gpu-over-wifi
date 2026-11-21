@@ -3459,6 +3459,13 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
 /// Pobranie zakresu leniwej pamięci z serwera dla wątku obsługi błędów stron (`lazymap`). Blokada instancji z limitem czasu: gdy wątek
 /// aplikacji sam ją trzyma (przekazał nam wskaźnik do odwzorowanej pamięci), oddajemy stronę bez pobrania zamiast zakleszczyć grę.
 fn lazy_fetch(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
+    let t_span = std::time::Instant::now();
+    let ok = lazy_fetch_inner(r, off, len);
+    crate::timeline::span("lazy_fetch", t_span, std::time::Instant::now());
+    ok
+}
+
+fn lazy_fetch_inner(r: &crate::lazymap::LazyRegion, off: usize, len: usize) -> bool {
     // DIAGNOSTYKA, nie rozwiązanie: `GPU_ICD_LAZY_FAKE=1` pomija pobranie (aplikacja widzi stare dane), żeby zmierzyć górną granicę zysku z usunięcia obiegów odczytu.
     static FAKE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *FAKE.get_or_init(|| std::env::var_os("GPU_ICD_LAZY_FAKE").is_some()) {

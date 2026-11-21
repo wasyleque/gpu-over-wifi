@@ -68,6 +68,7 @@ fn pace_factor() -> Option<f64> {
 /// Wołać przy wejściu w `vkQueuePresentKHR`, ZANIM weźmiemy blokadę instancji (usypia wątek oddający klatkę).
 pub fn pace() {
     crate::tuner::on_present();
+    crate::timeline::on_present();
     if let Some(t) = cap_interval() {
         let wake = {
             let mut n = CAP_NEXT.lock().unwrap_or_else(|e| e.into_inner());

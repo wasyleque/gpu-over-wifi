@@ -286,6 +286,11 @@ pub unsafe extern "C" fn acquire_next_image2(_dev: u64, info: *const u8, out: *m
 pub unsafe extern "C" fn queue_present(queue: u64, info: *const u8) -> i32 {
     crate::route::frame_tick();
     crate::latency::pace();
+    // Hamulec liczby klatek w locie czeka (do 100 ms) PRZED blokadą instancji: wcześniej czekał w jej środku i zamrażał wszystkie wątki gry
+    // (zrzuty skoków: `hamulec_klatek` 100 ms oraz `vkResetCommandPool`/`vkEndCommandBuffer` z `lock` = 100 ms w tym samym odstępie między klatkami).
+    let t_th = std::time::Instant::now();
+    crate::latency::wait_for_room(max_inflight_frames(), std::time::Duration::from_millis(100));
+    crate::timeline::span("hamulec_klatek", t_th, std::time::Instant::now());
     let (Some(inst), false) = (crate::fwd::instance_of("VkQueue", queue).or_else(state), info.is_null()) else { return VK_ERROR_INITIALIZATION_FAILED };
     crate::watchdog::set_named("vkQueuePresentKHR", crate::watchdog::WAIT_LOCK);
     let _wd = crate::fwd::WdGuard;
@@ -340,7 +345,6 @@ unsafe fn present_one(st: &mut InstState, queue: u64, sc: u64, idx: usize, nwait
         let req = gpu_proto::msg::Request::PresentFrame { memory: readback, len: (w * h * 4), seq, width: w as u16, height: h as u16, format, codec };
         st.stats.frames += 1;
         st.stats.t_wait_ns += t0.elapsed().as_nanos() as u64;
-        crate::latency::wait_for_room(max_inflight_frames(), std::time::Duration::from_millis(100));
         crate::latency::sent(seq);
         return if st.client.send(&req).is_ok() { 0 } else { VK_ERROR_INITIALIZATION_FAILED };
     }

@@ -418,7 +418,11 @@ impl Adapt {
 /// Wołane przy każdym zapisie pamięci (tanio: jedno porównanie czasu pod mutexem); po przejściu na LZ4 nic nie robi.
 fn adapt_codec() {
     use std::sync::atomic::Ordering::Relaxed;
-    if env_codec().is_some() || LZ4_MODE.load(Relaxed) || !link_fast() {
+    // DOMYŚLNIE WYŁĄCZONE (`GPU_ICD_MEM_ADAPT=1` włącza): pomiar 2026-11-21 na Rise of the Tomb Raider pokazał, że jednokierunkowe przejście na LZ4 po 30 s
+    // małego ruchu (menu i ładowanie) kończy się utknięciem w LZ4 przy późniejszym ciężkim ruchu (230 MB/s, łącze prawie nasycone, Overall 35,9 zamiast 40,2).
+    // Cyberpunk traci bez niego ok. 3%.
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("GPU_ICD_MEM_ADAPT").map(|v| v == "1").unwrap_or(false)) || env_codec().is_some() || LZ4_MODE.load(Relaxed) || !link_fast() {
         return;
     }
     static ST: Mutex<Option<(std::time::Instant, Adapt)>> = Mutex::new(None);
@@ -631,7 +635,14 @@ struct OutState {
 }
 
 /// Górny limit zakolejkowanych bajtów (potem producent czeka: ochrona pamięci i przeciwdziałanie bufferbloat).
-const MAX_QUEUED_BYTES: usize = 64 << 20;
+const MAX_QUEUED_BYTES_DEFAULT: usize = 64 << 20;
+
+/// Pojemność kolejki wysyłki (`GPU_ICD_SENDQ_MB`, domyślnie 64): zapytanie z odpowiedzią czeka za wszystkim, co już w niej leży (jedno połączenie, kolejność FIFO),
+/// więc przy 100-230 MB/s pełna kolejka to 0,3-0,6 s opóźnienia zapytań (zrzuty skoków Tomb Raidera: `vkGetImageMemoryRequirements2` 32-95 ms w fazie ładowania).
+fn max_queued_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_SENDQ_MB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|m| (1..=1024).contains(m)).map_or(MAX_QUEUED_BYTES_DEFAULT, |m| m << 20))
+}
 
 /// Połączenie sterujące: zapisy przez wątek nadawczy, odpowiedzi przez `Shared` (bez blokady instancji).
 ///
@@ -911,7 +922,7 @@ const READ_DEP_MAX_AGE: u64 = 40000;
         }
         let mut g = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
         // Producent czeka tylko przy przepełnieniu (i pusta kolejka zawsze przyjmuje jedną, nawet większą partię).
-        while g.bytes + len > MAX_QUEUED_BYTES && !g.queue.is_empty() && !g.broken {
+        while g.bytes + len > max_queued_bytes() && !g.queue.is_empty() && !g.broken {
             g = self.out.space.wait(g).unwrap_or_else(|e| e.into_inner());
         }
         if g.broken {
