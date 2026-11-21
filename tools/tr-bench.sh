@@ -17,7 +17,7 @@ hypr='export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 XDG_SESSIO
 
 echo "== [$name] przygotowanie"
 r 'pgrep -f "[R]OTTR.exe" >/dev/null' && { echo "gra już działa: poczekaj na koniec."; exit 1; } || true
-r 'pgrep -x heroic >/dev/null && { pkill -x heroic; sleep 4; }; pgrep -x heroic >/dev/null && echo "Heroic nie chce się zamknąć" && exit 1; exit 0'
+r 'pgrep -x heroic >/dev/null && { pkill -INT -x heroic; for i in 1 2 3 4 5 6 7 8; do pgrep -x heroic >/dev/null || break; sleep 1; done; pkill -x heroic; sleep 2; }; pgrep -x heroic >/dev/null && echo "Heroic nie chce się zamknąć" && exit 1; exit 0'
 [ $# -gt 0 ] && r "cd ~/gpu-hub-client && python3 envset.py game=$gid $*" | tail -1 | cut -c1-120 || true
 r 'cd ~/gpu-hub-client && mv -f icd-rottr.log icd-rottr.last.log 2>/dev/null; true'
 t0=$(r 'date +%s')
@@ -44,7 +44,7 @@ until [ "$(r "d=\"$docs\"; find \"\$d\" -maxdepth 1 -name '*_DESKTOP_20*.txt' ! 
   sleep 10
 done
 sleep 3
-[ "${BENCH_KEEP_HEROIC:-0}" = 1 ] || r 'pkill -f "[R]OTTR.exe"; sleep 2; pkill -x heroic; true'
+[ "${BENCH_KEEP_HEROIC:-0}" = 1 ] || r 'pkill -f "[R]OTTR.exe"; sleep 2; pkill -INT -x heroic; for i in 1 2 3 4 5 6 7 8; do pgrep -x heroic >/dev/null || break; sleep 1; done; pkill -x heroic; true'
 
 echo "== wynik"
 out=$(r "python3 - <<PY

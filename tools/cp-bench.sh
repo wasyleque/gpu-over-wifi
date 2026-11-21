@@ -16,7 +16,7 @@ res='/home/wasyll/Games/Heroic/Prefixes/Cyberpunk 2077/drive_c/users/steamuser/D
 
 echo "== [$name] przygotowanie"
 r 'pgrep -f "[C]yberpunk2077" >/dev/null' && { echo "gra już działa: poczekaj na koniec."; exit 1; } || true
-r 'pgrep -x heroic >/dev/null && { pkill -x heroic; sleep 4; }; pgrep -x heroic >/dev/null && echo "Heroic nie chce się zamknąć" && exit 1; exit 0'
+r 'pgrep -x heroic >/dev/null && { pkill -INT -x heroic; for i in 1 2 3 4 5 6 7 8; do pgrep -x heroic >/dev/null || break; sleep 1; done; pkill -x heroic; sleep 2; }; pgrep -x heroic >/dev/null && echo "Heroic nie chce się zamknąć" && exit 1; exit 0'
 # argumenty gry + zmienne (Heroic zamknięty, więc konfiguracja nie zostanie nadpisana)
 r "python3 - <<'PY'
 import json, pathlib
@@ -66,7 +66,7 @@ fi
 while r 'pgrep -f "[C]yberpunk2077.exe" >/dev/null'; do
   [ $(( $(date +%s) - t0 )) -gt "$timeout" ] && { echo "przekroczono czas $timeout s"; r 'pkill -f '[C]yberpunk2077.exe''; break; }; sleep 10
 done
-[ "${BENCH_KEEP_HEROIC:-0}" = 1 ] || r 'pkill -x heroic; true'
+[ "${BENCH_KEEP_HEROIC:-0}" = 1 ] || r 'pkill -INT -x heroic; for i in 1 2 3 4 5 6 7 8; do pgrep -x heroic >/dev/null || break; sleep 1; done; pkill -x heroic; true'
 
 echo "== wynik"
 dir=$(r "ls '$res' | sort | tail -1")

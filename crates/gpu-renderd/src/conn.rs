@@ -165,6 +165,12 @@ thread_local! {
     static TEST_FLUSH_ALL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
+/// `GPU_RENDERD_NO_GROUP=1` wyłącza grupowanie kolejnych odczytów różnicowych (jedna kopia GPU i jeden płotek na grupę); do pomiaru jego kosztu i zysku.
+fn no_group() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_RENDERD_NO_GROUP").map(|v| v == "1").unwrap_or(false))
+}
+
 static CH_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CH_QUEUE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CH_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -430,7 +436,7 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
             // Kolejne żądania odczytu różnic pamięci, które już przyszły (klient odświeża po jednym oczekiwaniu kilka pamięci), idą do backendu jako
             // grupa: jedna kopia GPU i jeden płotek zamiast jednego na pamięć. Odpowiedzi nadal wychodzą po jednej, w kolejności żądań.
             if let Some(item) = delta_item(&req) {
-                if group_left == 0 && session.is_authenticated() {
+                if group_left == 0 && session.is_authenticated() && !no_group() {
                     let mut items = vec![item];
                     while let Ok(Some(it)) = source.try_next() {
                         let next = match &it.req {
