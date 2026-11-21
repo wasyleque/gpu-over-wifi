@@ -2021,6 +2021,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             let remaining = if total == u64::MAX { u64::MAX } else { total.saturating_sub(elapsed) };
             slots[i] = if total == 0 { 0 } else { remaining.min(slice_ns) };
         }
+        let t_ph0 = std::time::Instant::now();
         let r = match exec_begin(&mut st, op, &mut slots, false) {
             Step::Done(v) => v,
             Step::Pending(p) if flags().locked_wait => {
@@ -2032,8 +2033,10 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
                 // Wykonanie u serwera i tak jest sekwencyjne, a odpowiedzi odbieramy w kolejności biletów (patrz `link`).
                 drop(hold);
                 drop(st);
+                let t_ph1 = std::time::Instant::now();
                 crate::watchdog::phase(crate::watchdog::WAIT_REPLY, p.base);
                 let resp = p.receive();
+                let t_ph2 = std::time::Instant::now();
                 crate::watchdog::phase(crate::watchdog::WAIT_LOCK_FINISH, p.base);
                 let t_lock = std::time::Instant::now();
                 st = lock_state(inst);
@@ -2041,7 +2044,20 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
                 LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 hold = HoldTimer(std::time::Instant::now(), op);
-                exec_finish(&mut st, p, resp)
+                let t_ph3 = std::time::Instant::now();
+                let rr = exec_finish(&mut st, p, resp);
+                if cmd.name.starts_with("vkWaitSemaphores") {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    PH_BEGIN_NS.fetch_add((t_ph1 - t_ph0).as_nanos() as u64, Relaxed);
+                    PH_RECV_NS.fetch_add((t_ph2 - t_ph1).as_nanos() as u64, Relaxed);
+                    PH_FINLOCK_NS.fetch_add((t_ph3 - t_ph2).as_nanos() as u64, Relaxed);
+                    PH_FINISH_NS.fetch_add(t_ph3.elapsed().as_nanos() as u64, Relaxed);
+                    PH_ITERS.fetch_add(1, Relaxed);
+                    if rr as u32 as i32 == 2 {
+                        PH_TIMEOUTS.fetch_add(1, Relaxed);
+                    }
+                }
+                rr
             }
         };
         // Odcinek upłynął bez spełnienia warunku (VK_TIMEOUT = 2), a limit aplikacji jeszcze nie: odpuszczamy blokadę na chwilę i pytamy ponownie.
@@ -2144,6 +2160,10 @@ fn periodic_stats(stats: &Stats) {
             {
                 let n = crate::link::RECV_N.load(Relaxed).max(1);
                 eprintln!("[gpu-icd] odbiór odpowiedzi: {} odbiorów, średnio czekanie na swoją kolej {} µs, samo odczytanie ramki {} µs", n, crate::link::TURN_WAIT_NS.load(Relaxed) / 1000 / n, crate::link::READ_ONE_NS.load(Relaxed) / 1000 / n);
+            }
+            {
+                let n = PH_ITERS.load(Relaxed).max(1);
+                eprintln!("[gpu-icd] blokujące oczekiwanie (jedna iteracja, {} razy, w tym {} z kodem VK_TIMEOUT): exec_begin pod blokadą {} µs, odbiór odpowiedzi {} µs, czekanie na blokadę przy wykończeniu {} µs, wykończenie {} µs", n, PH_TIMEOUTS.load(Relaxed), PH_BEGIN_NS.load(Relaxed) / 1000 / n, PH_RECV_NS.load(Relaxed) / 1000 / n, PH_FINLOCK_NS.load(Relaxed) / 1000 / n, PH_FINISH_NS.load(Relaxed) / 1000 / n);
             }
             eprintln!("[gpu-icd] strojenie: {}", crate::tuner::report());
             eprintln!("[gpu-icd] blokujące oczekiwania wg wątku: {}", wait_by_thread_report());
@@ -2987,7 +3007,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     if deferred_fail != 0 {
         return Step::Done(fail(deferred_fail));
     }
-    if st.scan_pending {
+    // DIAGNOSTYKA, nie rozwiązanie: `GPU_ICD_DIAG_NOSCAN=1` pomija skan zapisów aplikacji przy oczekiwaniach (dane aplikacji mogą nie dotrzeć), żeby zmierzyć górną granicę zysku z usunięcia skanu spod blokady.
+    static DIAG_NOSCAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if st.scan_pending && !*DIAG_NOSCAN.get_or_init(|| std::env::var_os("GPU_ICD_DIAG_NOSCAN").is_some()) {
         let t_s = std::time::Instant::now();
         st.settle_memory();
         SETTLE_NS[4].fetch_add(t_s.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -3502,6 +3524,13 @@ fn lock_with_timeout(inst: &InstanceObj) -> Option<std::sync::MutexGuard<'_, Ins
 }
 
 static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PH_BEGIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PH_RECV_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PH_FINLOCK_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PH_FINISH_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PH_ITERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PH_TIMEOUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 static WAIT_BY_THREAD: std::sync::Mutex<std::collections::BTreeMap<u32, (u64, u64)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 fn wait_by_thread_report() -> String {

@@ -246,3 +246,14 @@ Blokujące `vkWaitSemaphores` (76,8 tys., średnio 6,6 ms) wykonują WĄTKI POMO
 to one budzą grę po zakończeniu pracy GPU, więc ich opóźnienie to opóźnienie sygnału ogrodzenia widzianego przez grę. Serwer wykonuje zapytania szybko (średnio 57 µs), więc 6,6 ms to nie GPU ani wykonawca.
 Odbiór odpowiedzi (490 tys. odbiorów): średnio **1,08 ms czekania na własną kolej** (odpowiedzi czytane ściśle w kolejności biletów, przez wątki, które muszą być obudzone) i 0,32 ms samego odczytu ramki — kolejka biletów ma 3× większy koszt niż sieć.
 Prior art (docs/PRIOR-ART-2026-11-21.md): najlepszy kandydat to lokalne repliki stanu fence/semafor/query wypychane razem z sygnałem (Venus „feedback slots”, Wang et al. „shadow resources”).
+
+### Rozbicie blokującego oczekiwania i granice (2026-11-21, Cyberpunk, ok. 25,5 FPS)
+
+Jedna iteracja blokującego `vkWaitSemaphores` (80 tys. razy, 0 timeoutów; wątki vkd3d_fence/queue/swapchain): `exec_begin` pod blokadą **1,06 ms**, odbiór odpowiedzi **5,3 ms**, czekanie na blokadę przy wykończeniu 0,6 ms, wykończenie 0,29 ms.
+Przy tym wykonanie wszystkich zapytań na serwerze to średnio 57 µs, a czas „kolejka+zapis do gniazda” żądań z odpowiedzią to 3,4 ms, „od zapisu do odpowiedzi” 2,8 ms: żądanie długo stoi w kolejce nadawczej klienta.
+Zmierzone i bez wpływu na FPS (25,0–25,7): `GPU_ICD_FRAMERS=6`, `GPU_ICD_ZSTD_LEVEL=-5`, `GPU_ICD_MEM_LZ4=1` (kolejka+zapis spada 3,36 → 1,78 ms z LZ4, ale ścieżka krytyczna jest gdzie indziej);
+dedykowany wątek odbioru odpowiedzi zamiast czytania w kolejności biletów (przepisanie `link.rs`: 25,4 FPS, „czekanie na swoją kolej” 1086 µs to po prostu czas przyjścia odpowiedzi, nie kolejka między wątkami) — cofnięte; obniżenie priorytetu wątków `redDispatcher`.
+Diagnostyka górnej granicy `GPU_ICD_DIAG_NOSCAN=1` (pominięcie skanu zapisów aplikacji przy oczekiwaniach; dane aplikacji nie docierają, gra nie kończy benchmarka): `exec_begin` spada z 1,06 ms do 0,16 ms, a czekanie na blokadę instancji ze 384 s do 118 s,
+czyli **skan zapisów aplikacji pod globalną blokadą zajmuje ok. 0,9 ms × 80 tys. = 72 s czasu blokady** i to on powoduje czekanie 11 wątków roboczych gry na `EndCommandBuffer`/`ResetCommandPool` (łącznie ok. 384 s). FPS bez skanu niezmierzony (gra pada bez zapisów aplikacji).
+Wcześniejsze pomiary hot/cold i skanu na 4 wątkach (skracają skan tylko o ok. 19%) były neutralne, bo nie usuwają go spod blokady.
+Kandydat (do zbudowania i zmierzenia): usługa skanowania poza blokadą — jeden wątek skanuje arenę w pętli i numeruje zakończone skany, a oczekiwanie czeka POZA blokadą na skan rozpoczęty po jego zgłoszeniu i pod blokadą tylko zużywa zebrane zakresy (poprawność: zapisy sprzed zgłoszenia pracy są w skanie rozpoczętym później).
