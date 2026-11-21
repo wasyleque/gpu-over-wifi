@@ -41,6 +41,9 @@ impl Hasher for IdHasher {
 #[derive(Default)]
 pub struct Registry {
     map: HashMap<u64, Entry, BuildHasherDefault<IdHasher>>,
+    /// Indeks rodzaj -> identyfikatory: `entries_of_kind` przeglądało cały rejestr (setki tysięcy wpisów) przy każdym odczycie pamięci
+    /// (profil perf serwera: ok. 9% próbek wątków obsługi, zbudowanie `Vec` z `entries_of_kind("VkDevice")` w `copy_many`/`mem_is_host_cached`).
+    by_kind: HashMap<&'static str, std::collections::HashSet<u64, BuildHasherDefault<IdHasher>>>,
 }
 
 impl Registry {
@@ -53,6 +56,7 @@ impl Registry {
         if id == 0 || self.map.contains_key(&id) || self.map.len() >= MAX_HANDLES {
             return Err(CodecError::Handle(id));
         }
+        self.by_kind.entry(entry.kind).or_default().insert(id);
         self.map.insert(id, entry);
         Ok(())
     }
@@ -62,12 +66,16 @@ impl Registry {
     }
 
     pub fn unregister(&mut self, id: u64) -> Option<Entry> {
-        self.map.remove(&id)
+        let e = self.map.remove(&id)?;
+        if let Some(set) = self.by_kind.get_mut(e.kind) {
+            set.remove(&id);
+        }
+        Some(e)
     }
 
     /// Wszystkie wpisy danego rodzaju (identyfikator, wpis).
     pub fn entries_of_kind(&self, kind: &str) -> Vec<(u64, Entry)> {
-        self.map.iter().filter(|(_, e)| e.kind == kind).map(|(i, e)| (*i, *e)).collect()
+        self.by_kind.get(kind).map(|set| set.iter().filter_map(|i| self.map.get(i).map(|e| (*i, *e))).collect()).unwrap_or_default()
     }
 
     pub fn len(&self) -> usize {
@@ -140,5 +148,22 @@ mod tests {
     #[test]
     fn server_to_client_translation_is_refused() {
         assert!(Registry::new().handle_to_wire("VkBuffer", 7).is_err());
+    }
+
+    #[test]
+    fn entries_of_kind_follows_register_and_unregister() {
+        let mut r = Registry::new();
+        r.register(1, e("VkDevice", 10)).unwrap();
+        r.register(2, e("VkBuffer", 20)).unwrap();
+        r.register(3, e("VkDevice", 30)).unwrap();
+        let mut d: Vec<u64> = r.entries_of_kind("VkDevice").into_iter().map(|(i, _)| i).collect();
+        d.sort();
+        assert_eq!(d, vec![1, 3]);
+        assert!(r.unregister(1).is_some());
+        assert_eq!(r.entries_of_kind("VkDevice").len(), 1);
+        assert_eq!(r.entries_of_kind("VkBuffer").len(), 1);
+        assert!(r.entries_of_kind("VkImage").is_empty());
+        assert!(r.register(3, e("VkBuffer", 1)).is_err(), "odrzucone nie trafia do indeksu");
+        assert_eq!(r.entries_of_kind("VkBuffer").len(), 1);
     }
 }
