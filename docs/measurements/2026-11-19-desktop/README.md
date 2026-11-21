@@ -427,3 +427,29 @@ Zrzuty (użytkownik): ustawienia gry [`rottr-display-settings.jpg`](rottr-displa
 | 6 | adaptacyjny (zostaje zstd) | OFF | 56,7 | 33,0 | 30,9 | **40,2** | 100-130 MB/s | po poprawce hamulca: opóźnienie ok. 50 ms, hamowanie 190-300 razy na okno, menu żywe |
 
 Wnioski: (1) **Kodek:** Tomb Raider (upload 440-500 MB/s surowo) potrzebuje zstd z prefiksem; Cyberpunk (ok. 25-55 MB/s) zyskuje ok. 3% na LZ4. Mechanizm adaptacyjny w `link.rs`: start od zstd, jednokierunkowe przejście na LZ4 po 6 kolejnych oknach 5 s z ruchem 5-60 MB/s na łączu >= 2 Gb/s (testy jednostkowe progu i zerowania); Cyberpunk przeszedł na LZ4 (32,2 FPS), Tomb Raider zostaje przy zstd (log bez przejścia). (2) **Hamulec klatek w locie** (`latency::wait_for_room`, max 3 niewyświetlone): wyłączał się na stałe po 5 kolejnych przekroczeniach czasu, co zdarza się przy starcie gry, zanim ruszy wideo (przebieg 5: od pierwszego okna opóźnienie 700-960 ms, `hamowanie 0 razy`; przebieg 4 z tym samym kodem: 50 ms, hamowanie 170-300 razy). Poprawka: wyświetlenie klatki włącza hamowanie z powrotem (`s.throttle_off = false` w `latency::shown`, test jednostkowy). (3) **vsync:** z wyłączonym vsync i działającym hamulcem wynik nie zmienia się (40,2 vs 40,5), bo scena 1 i tak nie przekracza 60 FPS; wyłączony vsync daje przy tym prawdziwą moc karty w porównaniu natywnym (limit 60 Hz uciął wcześniejszy natywny wynik 59,99).
+
+## Rise of the Tomb Raider: natywna GTX 1080 Ti vs zdalna RTX 3090 Ti, vsync wyłączony, czasy klatek (2026-11-21, 0.3.62)
+
+Ten sam komputer (Ryzen 5 1600X), DX11, 1920x1080 pełny ekran, VSync OFF, wbudowany benchmark; natywnie = konfiguracja Heroic bez zmiennych sterownika (`UMU_NO_RUNTIME` tylko), jeden przebieg (pierwszy, cache shaderów lokalnej karty mógł być zimny); zdalnie = przebieg 6 (zstd, hamulec klatek działa).
+
+| Scena | Natywnie 1080 Ti (min / maks) | Zdalnie 3090 Ti (min / maks) | zdalnie / natywnie |
+|---|---|---|---|
+| Mountain Peak | **165,2** FPS (46,9 / 242,2), 4841 klatek | 56,7 (14,3 / 109,5), 1678 | 34% |
+| Syria | **82,0** (35,7 / 115,7), 2009 klatek | 33,0 (6,4 / 51,7), 816 | 40% |
+| Geothermal Valley | **76,9** (41,4 / 122,3), 2266 klatek | 30,9 (6,4 / 62,9), 917 | 40% |
+| **Overall (średnia scen)** | **108,0** | **40,2** | **37%** |
+
+Benchmark jest ograniczony czasem (ok. 30 s na scenę, 4841 vs 1678 klatek w tym samym czasie), więc stosunek klatek = stosunek FPS. Lokalna karta jest SŁABSZA od serwerowej (1080 Ti vs 3090 Ti), ale scena 1 daje natywnie 165 FPS, czyli przy 1080p jest raczej ograniczona procesorem; zdalnie GPU serwera jest mało obciążone, więc różnica nie wynika z mocy karty.
+
+**Równomierność klatek (pliki `*_frametimes_*.txt`, odstępy w ms):**
+
+| Scena | Źródło | p50 | p95 | p99 | maks | średnia najgorszego 1% |
+|---|---|---|---|---|---|---|
+| Mountain Peak | zdalnie | 17,2 | 26,0 | 33,2 | 70,1 | 41,8 |
+| Mountain Peak | natywnie | 5,8 | 7,6 | 10,5 | 25,1 | 12,9 |
+| Syria | zdalnie | 28,5 | 45,7 | 67,3 | 157,3 | 100,1 |
+| Syria | natywnie | 11,6 | 17,7 | 21,9 | 28,0 | 24,6 |
+| Geothermal | zdalnie | 27,0 | **74,7** | **107,0** | 156,9 | 123,5 |
+| Geothermal | natywnie | 12,6 | 17,6 | 19,6 | 24,2 | 20,6 |
+
+Nierówny ruch kamery jest więc realny i największy w scenie 3: zdalnie p95 to 2,8x mediany (natywnie 1,4x), 68 klatek > 60 ms z 917 (7%, razem 5,8 s z 29,7 s), skoki nieregularne (odstępy 1-26 klatek, brak okresowości). Kształt przebiegu w czasie jest taki sam jak natywnie, tylko ok. 2,4x wolniejszy (średnia klatka co 2 s: natywnie 16,7 -> 10,4 ms, zdalnie 41,1 -> 24,6 ms), czyli narzut zdalny rośnie proporcjonalnie do pracy gry na klatkę (liczby poleceń i punktów synchronizacji), a nie jest stałym kosztem na klatkę. Wniosek na plan: przy ok. 2,4x natywnego czasu klatki dalsze zyski daje redukcja kosztu per polecenie/synchronizację po stronie klienta, a rozrzut klatek w scenie 3 (p99 107 ms) wymaga osobnego zbadania skoków (kandydaci: przejścia pamięci leniwej, zapisy dużych porcji w jednej klatce).

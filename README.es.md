@@ -4,15 +4,15 @@
 
 # gpu-over-wifi
 
-Comparte una GPU doméstica potente entre tus dispositivos: ejecuta grandes modelos de IA, juega en un portátil débil como si tuviera la tarjeta gráfica potente y deja que el servidor decida quién usa la GPU.
+Comparte una GPU doméstica potente entre tus dispositivos: ejecuta modelos de IA grandes, juega en un portátil débil como si tuviera la tarjeta gráfica potente y deja que el servidor decida quién usa la GPU.
 
 > **Estado: proyecto de investigación temprano.** Las cosas funcionan en el laboratorio, todavía no en el uso diario. Solo Linux por ahora (el cliente Windows está planificado). Resultados por juego: [Mediciones](#measurements) (al final).
 
 ## Cyberpunk 2077 en una GPU remota: de 2 FPS a **32 FPS** (y sigue subiendo)
 
-![Cyberpunk 2077 (DirectX 12 mediante Proton) ejecutándose en pantalla completa a 1080p en un escritorio Ryzen 5 1600X, renderizado en una RTX 3090 Ti remota: benchmark integrado de aproximadamente 32 FPS de media, 52 de máximo](docs/images/cyberpunk-2077-benchmark-remote-rtx3090ti.jpg)
+![Cyberpunk 2077 (DirectX 12 mediante Proton) ejecutándose en pantalla completa a 1080p en un escritorio Ryzen 5 1600X, renderizado en una RTX 3090 Ti remota: benchmark integrado de unos 32 FPS de media, 52 de máximo](docs/images/cyberpunk-2077-benchmark-remote-rtx3090ti.jpg)
 
-**Cyberpunk 2077**, un juego de DirectX 12 que se ejecuta mediante Proton y vkd3d-proton en un escritorio con una CPU débil (Ryzen 5 1600X), dibujado por una RTX 3090 Ti en otra máquina a través de un cable de 2,5 Gb/s, benchmark integrado, **1920x1080 en pantalla completa, los mismos ajustes en cada ejecución** (la captura es un fotograma de una de esas ejecuciones; como referencia, el mismo PC con su propia GTX 1080 Ti (11 GB), más débil, obtiene ~86 FPS en el ajuste predefinido Bajo con FSR, mínimo 65 (nuestras ejecuciones remotas usan un ajuste predefinido Personalizado con sombras y LOD medios, por lo que la comparación es aproximada), así que la configuración con la RTX 3090 Ti remota todavía está lejos de lo que la máquina hace localmente. Con esos ajustes, el juego probablemente está limitado por la CPU débil, de modo que una tarjeta más rápida no aumentaría mucho la cifra local):
+**Cyberpunk 2077**, un juego de DirectX 12 ejecutándose mediante Proton y vkd3d-proton en un escritorio con una CPU débil (Ryzen 5 1600X), dibujado por una RTX 3090 Ti en otra máquina a través de un cable de 2,5 Gb/s, benchmark integrado, **1920x1080 en pantalla completa, mismos ajustes en cada ejecución** (la captura es un fotograma de una de esas ejecuciones; como referencia, el mismo PC con su propia GTX 1080 Ti (11 GB), más débil, obtiene ~86 FPS en el ajuste predefinido Bajo con FSR, mínimo 65 (nuestras ejecuciones remotas usan un ajuste predefinido Personalizado con sombras y LOD medios, así que la comparación es aproximada), por lo que la configuración con la RTX 3090 Ti remota todavía está lejos de lo que la máquina hace en local. Con esos ajustes, el juego probablemente está limitado por la CPU débil, así que una tarjeta más rápida no aumentaría mucho el número local):
 
 | Fecha | FPS medio | Pico | Qué cambió |
 |---|---|---|---|
@@ -21,10 +21,10 @@ Comparte una GPU doméstica potente entre tus dispositivos: ejecuta grandes mode
 | 2026-11-21 mañana | 15,5 | | |
 | 2026-11-21 tarde | 25,5 (25,0-25,8 en ejecuciones repetidas) | 57 | la lectura de resultados de la GPU ahora viaja de forma diferencial en el mismo viaje de ida y vuelta que la espera, canal de lectura, lecturas sin bloqueo, autoajuste |
 | 2026-11-21 noche | 28,1 (27,7-28,1) | 56 | servidor perfilado con `perf`: se eliminaron dos puntos calientes en el hilo crítico |
-| 2026-11-21 madrugada | 29,4 | 55 | códec de escritura en memoria elegido según la velocidad del enlace (LZ4 en >= 2 Gb/s), FPS mínimo sube de 14 a 17 |
+| 2026-11-21 madrugada | 29,4 | 55 | códec de escritura de memoria elegido según la velocidad del enlace (LZ4 en >= 2 Gb/s), FPS mínimo sube de 14 a 17 |
 | **2026-11-21 muy de madrugada** | **32,0** | **52** | las respuestas del servidor salen inmediatamente en lugar de esperar a que se vacíe la cola; FPS mínimo 19 |
 
-El juego realmente se ejecuta en el cliente; solo la tarjeta gráfica es remota. Sin generación de fotogramas, sin trucos de resolución, sin perfiles por juego: el mismo código de controlador sirve para todos los juegos. Cada cifra es una ejecución medida del repositorio ([`docs/measurements`](docs/measurements/2026-11-19-desktop/README.md), ejecuciones en [`cp-bench-runs.tsv`](docs/measurements/cp-bench-runs.tsv), reproducir con `tools/cp-bench.sh`), incluidas las ideas que **no** ayudaron (registradas con sus cifras). Todavía no es fluido (el mínimo es ~14 FPS y el fotograma es una cadena de ~28 viajes de ida y vuelta dependientes), y el trabajo continúa.
+El juego realmente se ejecuta en el cliente; solo la tarjeta gráfica es remota. Sin generación de fotogramas, sin trucos de resolución, sin perfiles por juego: el mismo código de controlador sirve para todos los juegos. Cada número es una ejecución medida del repositorio ([`docs/measurements`](docs/measurements/2026-11-19-desktop/README.md), ejecuciones en [`cp-bench-runs.tsv`](docs/measurements/cp-bench-runs.tsv), reproducir con `tools/cp-bench.sh`), incluidas las ideas que **no** ayudaron (registradas con sus números). Todavía no es fluido (el mínimo es ~14 FPS y el fotograma es una cadena de ~28 viajes de ida y vuelta dependientes), y el trabajo continúa.
 
 
 ![FurMark (Vulkan) ejecutándose en un portátil con Ryzen 5 4500U, renderizado en una RTX 3090 Ti remota: 98 FPS de media, 1280x720](docs/images/furmark-remote-rtx3090ti.png)
@@ -33,11 +33,11 @@ El juego realmente se ejecuta en el cliente; solo la tarjeta gráfica es remota.
 
 ![American Truck Simulator (Vulkan nativo) ejecutándose en un portátil Ryzen, renderizado en una RTX 3090 Ti remota](docs/images/ats-remote-rtx3090ti.png)
 
-*American Truck Simulator (juego Vulkan nativo de Linux) en la cabina en el portátil Ryzen 5 4500U, dibujado por la RTX 3090 Ti en otra máquina a través de un cable de 1 Gb/s: **68-72 FPS** en escenas ligeras (era de 3-45 FPS un día antes). En una escena de cabina concurrida con espejos baja a unos 6 FPS porque el juego reescribe ~17 MB de memoria mapeada por fotograma. La superposición de velocidad de fotogramas no estaba habilitada en esta captura; las cifras provienen de las estadísticas propias del controlador ([`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md)).*
+*American Truck Simulator (juego Vulkan nativo de Linux) en la cabina en el portátil Ryzen 5 4500U, dibujado por la RTX 3090 Ti en otra máquina a través de un cable de 1 Gb/s: **68-72 FPS** en escenas ligeras (era de 3-45 FPS un día antes). En una escena de cabina concurrida con espejos baja a unos 6 FPS porque el juego reescribe ~17 MB de memoria mapeada por fotograma. La superposición de velocidad de fotogramas no estaba habilitada en esta captura; los números provienen de las estadísticas propias del controlador ([`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md)).*
 
 ![vkQuake ejecutándose en un portátil Ryzen mediante el controlador remoto](docs/images/vkquake-remote-rtx3090ti.png)
 
-*¿Puede ejecutar Doom? No Doom, pero sí **Quake**: vkQuake (Vulkan nativo, episodio shareware) en el portátil Ryzen con el controlador remoto, una demo cronometrada de 6 237 fotogramas a **54 FPS** (34-77) con la RTX 3090 Ti en otra máquina ([`docs/measurements/2026-11-06-vkquake`](docs/measurements/2026-11-06-vkquake/README.md)).*
+*¿Puede ejecutar Doom? No Doom, pero sí **Quake**: vkQuake (Vulkan nativo, episodio shareware) en el portátil Ryzen con el controlador remoto, una demostración cronometrada de 6 237 fotogramas a **54 FPS** (34-77) con la RTX 3090 Ti en otra máquina ([`docs/measurements/2026-11-06-vkquake`](docs/measurements/2026-11-06-vkquake/README.md)).*
 
 ![Black Book ejecutándose en un portátil Ryzen, renderizado en una RTX 3090 Ti remota: 59,7 FPS](docs/images/blackbook-remote-rtx3090ti.png)
 
@@ -50,21 +50,21 @@ El juego realmente se ejecuta en el cliente; solo la tarjeta gráfica es remota.
 
 ## Qué hay aquí
 
-- **Concentrador de GPU** (`hub-server`, `hub-client`, `hub-proto`): un servidor pequeño que vigila la GPU, actúa como proxy de peticiones de IA (API compatible con OpenAI delante de Ollama) y decide quién usa la GPU y cuándo, para que un modelo grande y un juego no peleen por la VRAM. También puede ejecutar modelos grandes como DeepSeek mediante InferSSD (Apache-2.0) en una sola tarjeta de consumo, transmitiendo los pesos desde una unidad NVMe.
-- **Vulkan remoto** (`gpu-icd`, `gpu-renderd`, `gpu-vkgen`, `gpu-vkcodec`, `gpu-wire`, `gpu-proto`): un controlador Vulkan escrito desde cero para el *cliente* que reenvía comandos gráficos por la red a un demonio en el *servidor*, que los ejecuta en la GPU real y devuelve la imagen. Para la aplicación, la tarjeta del servidor parece una GPU instalada localmente.
-- **Vídeo** (`gpu-nvenc`, `gpu-vaapi`, `gpu-h264`): los fotogramas se devuelven sin pérdida (LZ4) o como H.264 (codificado por hardware en NVIDIA, decodificado por hardware mediante VA-API en el portátil).
+- **Concentrador de GPU** (`hub-server`, `hub-client`, `hub-proto`) – un servidor pequeño que vigila la GPU, actúa como proxy de peticiones de IA (API compatible con OpenAI delante de Ollama) y decide quién usa la GPU y cuándo, para que un modelo grande y un juego no peleen por la VRAM. También puede ejecutar modelos grandes como DeepSeek mediante InferSSD (Apache-2.0) en una sola tarjeta de consumo, transmitiendo los pesos desde una unidad NVMe.
+- **Vulkan remoto** (`gpu-icd`, `gpu-renderd`, `gpu-vkgen`, `gpu-vkcodec`, `gpu-wire`, `gpu-proto`) – un controlador Vulkan escrito desde cero para el *cliente* que reenvía comandos gráficos por la red a un demonio en el *servidor*, que los ejecuta en la GPU real y devuelve la imagen. Para la aplicación, la tarjeta del servidor parece una GPU instalada localmente.
+- **Vídeo** (`gpu-nvenc`, `gpu-vaapi`, `gpu-h264`) – los fotogramas se devuelven sin pérdida (LZ4) o como H.264 (codificado por hardware en NVIDIA, decodificado por hardware mediante VA-API en el portátil).
 
 ## Estado actual
 
 | Funciona | Todavía no |
 |---|---|
-| La RTX remota aparece en `vulkaninfo`; `vkcube` renderiza en ella y se muestra localmente; **juegos reales se ejecutan**: American Truck Simulator 68-72 FPS (escenas ligeras), **Cyberpunk 2077 a 1080p: ~32 FPS de media** (desde 2-5), Hamster Hunter 21-34 FPS, FurMark ~93 FPS | Juegos pesados fluidos: Cyberpunk 2077 (DirectX 12 vía Proton) promedia ~32 FPS pero baja a ~19, y las escenas concurridas (cabina de ATS) bajan a ~6 FPS; ambos están limitados por los viajes de ida y vuelta de la red, plan en [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md) |
-| Transporte de fotogramas LZ4 y H.264, seleccionable (`GPU_ICD_CODEC`) | Controlador cliente para Windows, HEVC |
+| La RTX remota aparece en `vulkaninfo`; `vkcube` renderiza en ella y se muestra en local; **juegos reales se ejecutan**: American Truck Simulator 68-72 FPS (escenas ligeras), **Cyberpunk 2077 a 1080p: ~32 FPS de media** (desde 2-5), Hamster Hunter 21-34 FPS, FurMark ~93 FPS | Juegos pesados fluidos: Cyberpunk 2077 (DirectX 12 vía Proton) promedia ~32 FPS pero baja a ~19, y las escenas concurridas (cabina de ATS) bajan a ~6 FPS; ambos están limitados por los viajes de ida y vuelta de la red, plan en [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md) |
+| Transporte de fotogramas LZ4 y H.264, seleccionable (`GPU_ICD_CODEC`) | Controlador cliente Windows, HEVC |
 | Proxy de IA con planificación consciente de la VRAM, DeepSeek mediante InferSSD | Reservas de sesión de juego en el planificador |
 
 ## Desarrollo independiente
 
-Los productos comerciales en este ámbito son cerrados, así que no había nada de lo que copiar: no tuvimos acceso ni usamos código fuente, binarios, especificaciones de protocolo ni documentación interna de ningún producto de este tipo. Partimos de la descripción pública y general del problema (una GPU remota es un problema de latencia y ancho de banda) y únicamente de material disponible abiertamente: el registro y la especificación de Vulkan de Khronos, la documentación de la interfaz del cargador de Vulkan y de ICD, controladores de código abierto y la documentación del núcleo de Linux, y la documentación de las bibliotecas de compresión que usamos. Cada técnica de este repositorio fue diseñada, implementada y medida por nosotros. Donde las afirmaciones públicas sobre lo que es posible no podían comprobarse, medimos nosotros mismos, y varias ideas que sonaban prometedoras no funcionaron (están registradas con sus cifras en [`docs/measurements`](docs/measurements/2026-11-05-rottr/README.md) y `AGENTS.md`).
+Los productos comerciales en este ámbito son cerrados, así que no había nada de lo que copiar: no tuvimos acceso ni usamos código fuente, binarios, especificaciones de protocolo ni documentación interna de ningún producto de este tipo. Partimos de la descripción pública y general del problema (una GPU remota es un problema de latencia y ancho de banda) y únicamente de material disponible abiertamente: el registro y la especificación Vulkan de Khronos, la documentación de la interfaz del cargador Vulkan y de ICD, controladores de código abierto y la documentación del núcleo de Linux, y la documentación de las bibliotecas de compresión que usamos. Cada técnica de este repositorio fue diseñada, implementada y medida por nosotros. Donde las afirmaciones públicas sobre lo que es posible no podían comprobarse, medimos nosotros mismos, y varias ideas que sonaban prometedoras no funcionaron (están registradas con sus números en [`docs/measurements`](docs/measurements/2026-11-05-rottr/README.md) y `AGENTS.md`).
 
 <a id="test-hardware"></a>
 
@@ -77,7 +77,7 @@ Los productos comerciales en este ámbito son cerrados, así que no había nada 
 | Servidor A ("gpu-hub") | escritorio | AMD Ryzen 9 5900XT, 16 núcleos | 64 GB DDR4 (plataforma AM4) | NVIDIA RTX 3090 Ti, 24 GB, controlador 580.178 | Kingston NVMe 2 TB (PCIe 4) | Ubuntu 26.04 |
 | Servidor B | escritorio | AMD Ryzen 9 5950X, 16 núcleos | 64 GB DDR4 (plataforma AM4) | NVIDIA RTX 3090, 24 GB, controlador 580.105 | ADATA SX8200 NVMe 2 TB + SSD 1 TB | Ubuntu 24.04 |
 
-Enlace cliente-A: cable Ethernet directo de 1 Gb/s, ~0,2 ms de viaje de ida y vuelta. Cliente 2 (el portátil Ryzen, todas las cifras de juegos a continuación): cable directo de 1 Gb/s al servidor A a través de su NIC Realtek RTL8111/8168 integrada (0,15 ms de viaje de ida y vuelta, `rx-usecs 0`) o un adaptador USB 3 Gigabit (RTL8153, ~0,37 ms, menos estable); el Wi-Fi es Realtek RTL8723BE y no se usa para renderizar. Cliente-B: VPN (no se usa para las cifras a continuación).
+Enlace cliente-A: cable Ethernet directo de 1 Gb/s, ~0,2 ms de viaje de ida y vuelta. Cliente 2 (el portátil Ryzen, todos los números de juegos a continuación): cable directo de 1 Gb/s al servidor A a través de su NIC Realtek RTL8111/8168 integrada (0,15 ms de viaje de ida y vuelta, `rx-usecs 0`) o un adaptador USB 3 Gigabit (RTL8153, ~0,37 ms, menos estable); el Wi-Fi es Realtek RTL8723BE y no se usa para renderizar. Cliente-B: VPN (no se usa para los números a continuación).
 El *tipo* de RAM se deduce de la plataforma (Ryzen 5000 en AM4 solo admite DDR4); la velocidad y las latencias de los módulos no se leyeron porque requiere root (`dmidecode`) y se marcan como pendientes.
 
 ## Pruébalo
@@ -86,59 +86,60 @@ Consulta [`docs/TESTING-OTHER-MACHINE.md`](docs/TESTING-OTHER-MACHINE.md) para c
 
 ## Ayúdanos a probar
 
-Queremos informes de **otros portátiles, escritorios, GPU y redes**: todo lo medido hasta ahora se hizo en un cliente y un servidor. Si tienes una máquina Linux con una GPU NVIDIA potente y otra máquina Linux en un cable de 1 Gb/s, puedes probar un juego en unos 30 minutos y enviar cifras (o simplemente "falló de inmediato", que también es útil). Qué necesitas, cómo ejecutarlo, qué contiene el informe y dónde enviarlo: [`docs/CALL-FOR-TESTERS.md`](docs/CALL-FOR-TESTERS.md);
+Queremos informes de **otros portátiles, escritorios, GPU y redes**: todo lo medido hasta ahora se hizo en un cliente y un servidor. Si tienes una máquina Linux con una GPU NVIDIA potente y otra máquina Linux en un cable de 1 Gb/s, puedes probar un juego en unos 30 minutos y enviar números (o simplemente "se bloqueó al instante", que también es útil). Qué necesitas, cómo ejecutarlo, qué contiene el informe y dónde enviarlo: [`docs/CALL-FOR-TESTERS.md`](docs/CALL-FOR-TESTERS.md);
 el informe lo recopila [`tools/collect-report.sh`](tools/collect-report.sh) (hardware, enlace, estadísticas del controlador; sin tokens) y se envía a una incidencia nueva usando la plantilla *Test report*.
 
 ## Apoya el proyecto
 
-Si esto te resulta útil y quieres impulsarlo (una máquina de pruebas más rápida, más hardware para probar), puedes donar mediante PayPal a **wasyl@o2.pl**:
+Si esto te resulta útil y quieres ayudarlo a avanzar (una máquina de prueba más rápida, más hardware para probar), puedes donar mediante PayPal a **wasyl@o2.pl**:
 [**Donar con PayPal**](https://www.paypal.com/donate?business=wasyl%40o2.pl&no_recurring=0&item_name=gpu-over-wifi&currency_code=PLN).
 Las donaciones no cambian los términos de la licencia (ver más abajo) y no son necesarias para usar o probar el proyecto.
 
 ## Seguridad
 
-El demonio de GPU remota **no está reforzado para redes no confiables**. Un cliente con el token puede ejecutar comandos Vulkan arbitrarios en la GPU del servidor, y un flujo de comandos malformado puede hacer fallar el controlador del proveedor. Úsalo solo en un enlace de confianza (p. ej., un cable directo o una VPN), vincúlalo únicamente a esa interfaz y mantén el archivo de token en privado (`chmod 600`).
+El demonio de GPU remota **no está reforzado para redes no confiables**. Un cliente con el token puede ejecutar comandos Vulkan arbitrarios en la GPU del servidor, y un flujo de comandos malformado puede bloquear el controlador del fabricante. Úsalo solo en un enlace de confianza (p. ej., un cable directo o una VPN), vincúlalo únicamente a esa interfaz y mantén el archivo de token en privado (`chmod 600`).
 
 ## Material de terceros
 
-`third_party/vk.xml` y las cabeceras de Vulkan provienen de Khronos (Apache-2.0); `third_party/nvenc/nvEncodeAPI.h` proviene de `nv-codec-headers` (aviso de estilo MIT conservado en el archivo, ver su README). Los tipos de VA-API se generan a partir de las cabeceras del sistema `libva` (MIT).
+`third_party/vk.xml` y las cabeceras Vulkan provienen de Khronos (Apache-2.0); `third_party/nvenc/nvEncodeAPI.h` proviene de `nv-codec-headers` (aviso de estilo MIT conservado en el archivo, ver su README). Los tipos VA-API se generan a partir de las cabeceras del sistema `libva` (MIT).
 
 ## Licencia
 
-Desde la versión 0.3.0: [Functional Source License 1.1 (FSL-1.1-ALv2)](LICENSE). Puedes usar, copiar, modificar y redistribuir el código para cualquier propósito excepto un **uso competidor** (ofrecerlo a terceros como producto o servicio comercial que lo sustituya); cada versión pasa automáticamente a Apache-2.0 dos años después de su publicación. Licencia comercial para uso competidor: contacta con el autor mediante GitHub. Las versiones hasta la 0.2.2 se publicaron bajo Apache-2.0, ver [`docs/LICENSE-HISTORY.md`](docs/LICENSE-HISTORY.md).
+Desde la versión 0.3.0: [Functional Source License 1.1 (FSL-1.1-ALv2)](LICENSE). Puedes usar, copiar, modificar y redistribuir el código para cualquier propósito excepto un **Uso Competitivo** (ofrecerlo a otros como producto o servicio comercial que lo sustituya); cada versión pasa automáticamente a Apache-2.0 dos años después de su publicación. Licencia comercial para uso competitivo: contacta con el autor mediante GitHub. Las versiones hasta la 0.2.2 se publicaron bajo Apache-2.0, ver [`docs/LICENSE-HISTORY.md`](docs/LICENSE-HISTORY.md).
 
 <a id="measurements"></a>
 
 ## Mediciones
 
-Todas las cifras provienen de ejecuciones de laboratorio individuales, no de estadísticas: trátalas como órdenes de magnitud. Los resultados están agrupados **por aplicación**; dentro de cada grupo, el **resultado más reciente va primero** y el más antiguo al final. La máquina en la que se midió cada resultado es una columna, no un encabezado. Las máquinas de prueba se enumeran en [Hardware de prueba](#test-hardware). Reproduce con `GPU_ICD_STATS=1` (cliente) y las herramientas en `tools/` (`tools/cp-bench.sh`, `tools/ab-run.sh`).
+Todos los números son de ejecuciones individuales de laboratorio, no estadísticas: trátalos como órdenes de magnitud. Los resultados están agrupados **por aplicación**; dentro de cada grupo, el **resultado más nuevo va primero** y el más antiguo al final. La máquina en la que se midió cada resultado es una columna, no un encabezado. Las máquinas de prueba se enumeran en [Hardware de prueba](#test-hardware). Reproduce con `GPU_ICD_STATS=1` (cliente) y las herramientas en `tools/` (`tools/cp-bench.sh`, `tools/ab-run.sh`).
 
 ### Cyberpunk 2077 (DirectX 12 -> vkd3d-proton -> `VK_EXT_descriptor_buffer`)
 
 | Fecha | Cliente | Resultado | Qué cambió / qué lo limita |
 |---|---|---|---|
-| 2026-11-21 (muy de madrugada) | mismo escritorio | **32,0 FPS de media**, máx. 52 (mín. ~19,3) | el servidor retenía sus respuestas hasta que se drenaba toda la cola de peticiones listas, de modo que una consulta corta esperaba detrás de esperas bloqueantes; ahora cada respuesta sale inmediatamente (hallado midiendo el tiempo de cada fase de una llamada, no adivinando) |
-| 2026-11-21 (madrugada) | mismo escritorio | **29,4 FPS de media**, máx. 55 (mín. ~17,2) | en enlaces de 2 Gb/s o más rápidos, el códec de escritura en memoria ahora es LZ4 (desempaquetado por el hilo lector del servidor en lugar de su hilo de ejecución); los enlaces más lentos mantienen zstd, elegido según la velocidad de la interfaz |
+| 2026-11-21 (muy de madrugada) | mismo escritorio | **32,0 FPS de media**, máx. 52 (mín. ~19,3) | el servidor retenía sus respuestas hasta que se drenaba toda la cola de peticiones listas, de modo que una consulta corta esperaba detrás de esperas bloqueantes; ahora cada respuesta sale inmediatamente (encontrado midiendo el tiempo de cada fase de una llamada, no adivinando) |
+| 2026-11-21 (madrugada) | mismo escritorio | **29,4 FPS de media**, máx. 55 (mín. ~17,2) | en enlaces de 2 Gb/s o más rápidos, el códec de escritura de memoria ahora es LZ4 (desempaquetado por el hilo lector del servidor en lugar de su hilo de ejecución); los enlaces más lentos mantienen zstd, elegido según la velocidad de la interfaz |
 | 2026-11-21 (noche) | mismo escritorio, tras dos correcciones de perfilado en el servidor | **27,7-28,1 FPS de media**, máx. 56 (mín. ~15,7) | el perfilado del servidor con `perf` encontró dos puntos calientes absurdos en el hilo crítico: un escaneo completo del registro de manejadores en cada lectura de memoria (9 % de CPU) y una tormenta de llamadas al sistema para contar CPUs (5,6 %); 26,5 tras la primera corrección, 28 tras la segunda |
-| 2026-11-21 (tarde) | escritorio Ryzen 5 1600X, 2,5 Gb/s, benchmark integrado, 1920x1080 en pantalla completa | **25,0-25,8 FPS de media, máx. 57** (mín. ~14); en el mismo PC con su propia GTX 1080 Ti más débil ~86 FPS (predefinido Bajo, FSR) | el fotograma es una cadena de ~28 puntos de sincronización dependientes, cada uno pagaba un viaje de ida y vuelta por la lectura de resultados de la GPU desde la CPU. Las ventanas de lectura calientes (17 ventanas fijas de 64 KB, ~55 lecturas por fotograma) se leen de forma diferencial en el mismo viaje de ida y vuelta que la espera (el servidor devuelve solo las páginas modificadas), más un canal de lectura dedicado, lectura diferida sin bloqueo, autoajuste, correcciones del servidor (contextos de controlador con fugas hacían que `vkCreateDevice` tardara 8-126 s tras ~28 sesiones). Probado y **rechazado tras medir**: escaneo fuera del bloqueo global, precarga de descriptores, prioridades de hilos, variantes de compresión. Detalles: [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
+| 2026-11-21 (tarde) | escritorio Ryzen 5 1600X, 2,5 Gb/s, benchmark integrado, 1920x1080 en pantalla completa | **25,0-25,8 FPS de media, máx. 57** (mín. ~14); en el mismo PC con su propia GTX 1080 Ti más débil ~86 FPS (predefinido Bajo, FSR) | el fotograma es una cadena de ~28 puntos de sincronización dependientes, cada uno pagaba un viaje de ida y vuelta por la lectura de resultados de la GPU desde la CPU. Las ventanas de lectura calientes (17 ventanas fijas de 64 KB, ~55 lecturas por fotograma) se leen de forma diferencial en el mismo viaje de ida y vuelta que la espera (el servidor devuelve solo las páginas modificadas), más un canal de lectura dedicado, lectura diferida sin bloqueo, autoajuste, correcciones del servidor (contextos de controlador filtrados hacían que `vkCreateDevice` tardara 8-126 s después de ~28 sesiones). Probado y **rechazado tras medir**: escaneo fuera del bloqueo global, precarga de descriptores, prioridades de hilos, variantes de compresión. Detalles: [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
 | 2026-11-21 (mañana) | mismo escritorio | 14,7-16,2 FPS de media | antes de la lectura diferencial |
-| 2026-11-05 | portátil Ryzen 5 4500U, 1 Gb/s, 1080p, sesión de 14 minutos | **7,6 FPS de mediana** (p10 7,2, p90 10,6, hasta 38 en escenas tranquilas), latencia de fotograma ~18 ms; veredicto del probador: jugable | 76 viajes de ida y vuelta por fotograma (43 son esperas de semáforo), contención del bloqueo de instancia, 5 MB de escrituras en memoria por fotograma; [`docs/measurements/2026-11-05-cyberpunk`](docs/measurements/2026-11-05-cyberpunk/README.md) |
-| 2026-11-04 | mismo portátil | 4-5 FPS (2-4 antes de eso) | primeras ejecuciones |
+| 2026-11-05 | portátil Ryzen 5 4500U, 1 Gb/s, 1080p, sesión de 14 minutos | **7,6 FPS de mediana** (p10 7,2, p90 10,6, hasta 38 en escenas tranquilas), latencia de fotograma ~18 ms; veredicto del probador: jugable | 76 viajes de ida y vuelta por fotograma (43 son esperas de semáforo), contención del bloqueo de instancia, 5 MB de escrituras de memoria por fotograma; [`docs/measurements/2026-11-05-cyberpunk`](docs/measurements/2026-11-05-cyberpunk/README.md) |
+| 2026-11-04 | mismo portátil | 4-5 FPS (2-4 antes) | primeras ejecuciones |
 
 ### Rise of the Tomb Raider (Epic, Proton, DX11/DXVK, benchmark integrado, Full HD, alto)
 
 | Fecha | Cliente | Resultado | Qué cambió / qué lo limita |
 |---|---|---|---|
-| 2026-11-21 (última hora de la tarde) | escritorio Ryzen 5 1600X, 2,5 Gb/s, vsync desactivado | **Total 40,2 FPS** (Mountain Peak 56,7, Syria 33,0, Geothermal Valley 30,9; 28,3 por la mañana) | este juego sube 440-500 MB/s de escrituras en memoria, así que necesita el códec de compresión zstd con prefijo (LZ4 dejaba el enlace al 70-80 % de ocupación: 36,5 FPS); el códec ahora se elige de forma adaptativa por sesión (empieza con zstd, cambia a LZ4 solo cuando el tráfico se mantiene bajo); el freno de fotogramas en vuelo ya no se desactiva definitivamente al arrancar (latencia del menú 700 ms -> 50 ms); capturas en [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
-| 2026-11-21 (tarde) | escritorio Ryzen 5 1600X, 2,5 Gb/s | **Total 36,5 FPS** (28,3 por la mañana; escena 1 56,3, Prophet's Tomb 28,3, Geothermal Valley 25,0; una ejecución manual, sin repeticiones) | el canal de lectura estaba vinculado a una sesión de Vulkan, de modo que la memoria de las otras instancias del juego esperaba 30 s por un fotograma que nunca llegaba; canal por sesión más una corrección de desbordamiento de número de fotograma de 16 bits; detalles en [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
-| 2026-11-21 | escritorio Ryzen 5 1600X, 2,5 Gb/s | **Total 28,3-28,5 FPS** (Mountain Peak 29,9, Syria 28,6, Geothermal Valley 26,6); lo mismo con las opciones nuevas desactivadas: 28,5 | DX11/DXVK no tiene ventanas de lectura fijas, así que la lectura diferencial no se aplica; [`docs/measurements/2026-11-21-rottr-desktop`](docs/measurements/2026-11-21-rottr-desktop/README.md) |
-| 2026-11-05 | portátil Ryzen 5 4500U, 1 Gb/s | **Total 25-26 FPS** (Mountain Peak ~38-40, Syria ~18, Geothermal Valley ~19); 9,6 FPS al inicio de esa ronda, 1-2 FPS en el primer intento | varias instancias de Vulkan por proceso enrutadas correctamente, memorias locales de dispositivo completas leídas mediante una copia de GPU; zstd con el contenido enviado previamente como diccionario (bytes en el cable -53 %), CRC32C por hardware, memorias de búfer de descriptores no refrescadas, `vkWaitSemaphores` largos devueltos temprano con el servidor ejecutándolos en orden de flujo (auditado, 0 fallos); compilaciones idénticas difieren en aproximadamente +-4 %; [`docs/measurements/2026-11-05-rottr`](docs/measurements/2026-11-05-rottr/README.md) |
+| 2026-11-21 (referencia) | mismo escritorio, GTX 1080 Ti nativa (11 GB, más débil que la RTX 3090 Ti del servidor), vsync desactivado | Global **108,0 FPS** (Mountain Peak 165,2, Syria 82,0, Geothermal Valley 76,9); la ejecución remota de abajo alcanza el 37 % de eso; p99 de tiempo de fotograma 20 ms nativo frente a 33-107 ms remoto | una ejecución nativa, probablemente limitada por CPU a 1080p; el tiempo de fotograma remoto es ~2,4x el nativo y sigue la misma forma a lo largo de la escena |
+| 2026-11-21 (tarde-noche) | escritorio Ryzen 5 1600X, 2,5 Gb/s, vsync desactivado | **Global 40,2 FPS** (Mountain Peak 56,7, Syria 33,0, Geothermal Valley 30,9; 28,3 por la mañana) | este juego sube 440-500 MB/s de escrituras de memoria, así que necesita el códec zstd con prefijo que comprime (LZ4 dejaba el enlace al 70-80 % de ocupación: 36,5 FPS); el códec ahora se elige de forma adaptativa por sesión (empieza con zstd, cambia a LZ4 solo cuando el tráfico se mantiene bajo); el freno de fotogramas en vuelo ya no se desactiva definitivamente al arrancar (latencia de menú 700 ms -> 50 ms); capturas en [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
+| 2026-11-21 (tarde) | escritorio Ryzen 5 1600X, 2,5 Gb/s | **Global 36,5 FPS** (28,3 por la mañana; escena 1 56,3, Prophet's Tomb 28,3, Geothermal Valley 25,0; una ejecución manual, sin repeticiones) | el canal de lectura estaba vinculado a una sesión Vulkan, de modo que la memoria de las otras instancias del juego esperaba 30 s por un fotograma que nunca llegaba; canal por sesión más una corrección de desbordamiento del número de fotograma de 16 bits; detalles en [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
+| 2026-11-21 | escritorio Ryzen 5 1600X, 2,5 Gb/s | **Global 28,3-28,5 FPS** (Mountain Peak 29,9, Syria 28,6, Geothermal Valley 26,6); lo mismo con las opciones nuevas desactivadas: 28,5 | DX11/DXVK no tiene ventanas de lectura fijas, así que la lectura diferencial no se aplica; [`docs/measurements/2026-11-21-rottr-desktop`](docs/measurements/2026-11-21-rottr-desktop/README.md) |
+| 2026-11-05 | portátil Ryzen 5 4500U, 1 Gb/s | **Global 25-26 FPS** (Mountain Peak ~38-40, Syria ~18, Geothermal Valley ~19); 9,6 FPS al inicio de esa ronda, 1-2 FPS en el primer intento | varias instancias Vulkan por proceso enrutadas correctamente, memorias de dispositivo locales completas leídas mediante una copia de GPU; zstd con el contenido enviado previamente como diccionario (bytes en el cable -53 %), CRC32C por hardware, memorias de búfer de descriptores no refrescadas, `vkWaitSemaphores` largos devueltos antes de tiempo con el servidor ejecutándolos en orden de flujo (auditado, 0 fallos); compilaciones idénticas difieren en aproximadamente +-4 %; [`docs/measurements/2026-11-05-rottr`](docs/measurements/2026-11-05-rottr/README.md) |
 
 ### American Truck Simulator (Linux nativo, `-rdevice vk`)
 
 | Fecha | Cliente | Resultado | Qué cambió / qué lo limita |
 |---|---|---|---|
-| 2026-11-04 | portátil Ryzen 5 4500U, 1 Gb/s, H.264 | **68-72 FPS** en escenas ligeras (antes 3-45); escenas de cabina concurridas con espejos ~6 FPS | 1,8 M de asignaciones de conjuntos de descriptores por ejecución eran viajes de ida y vuelta síncronos (125 us cada uno, ~18 ms de un fotograma de 22 ms): ahora se responden localmente desde la contabilidad de pools con un margen de seguridad y una auditoría síncrona periódica; se corrigió un límite del registro de manejadores del servidor (2^20) que mataba el juego tras ~1 M de conjuntos; [`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md) |
+| 2026-11-04 | portátil Ryzen 5 4500U, 1 Gb/s, H.264 | **68-72 FPS** en escenas ligeras (era 3-45); escenas de cabina concurridas con espejos ~6 FPS | 1,8 M de asignaciones de conjuntos de descriptores por ejecución eran viajes de ida y vuelta síncronos (125 us cada uno, ~18 ms de un fotograma de 22 ms): ahora se responden localmente desde la contabilidad de pools con un margen de seguridad y una auditoría síncrona periódica; se corrigió un límite del registro de manejadores del servidor (2^20) que mataba el juego después de ~1 M de conjuntos; [`docs/measurements/2026-11-04-ats`](docs/measurements/2026-11-04-ats/README.md) |
 
 ### Black Book (Heroic, Proton, DXVK)
 
@@ -150,7 +151,7 @@ Todas las cifras provienen de ejecuciones de laboratorio individuales, no de est
 
 | Fecha | Cliente | Resultado | Qué cambió / qué lo limita |
 |---|---|---|---|
-| 2026-11-05 | portátil Ryzen 5 4500U, 1 Gb/s | **30-36 FPS** (antes no arrancaba; 7-8 FPS en el primer arranque) | un coste fijo de ~31 ms por fotograma en el lado del cliente, independiente del peso de la escena y de los fotogramas en vuelo; [`docs/measurements/2026-11-05-gravitymark`](docs/measurements/2026-11-05-gravitymark/README.md) |
+| 2026-11-05 | portátil Ryzen 5 4500U, 1 Gb/s | **30-36 FPS** (antes no arrancaba; 7-8 FPS en el primer arranque) | un ~31 ms fijo por fotograma en el lado del cliente, independiente del peso de la escena y de los fotogramas en vuelo; [`docs/measurements/2026-11-05-gravitymark`](docs/measurements/2026-11-05-gravitymark/README.md) |
 
 ### FurMark 2.11 (Vulkan, 1280x720)
 
@@ -168,13 +169,13 @@ Todas las cifras provienen de ejecuciones de laboratorio individuales, no de est
 
 | Fecha | Cliente | Resultado | Qué cambió / qué lo limita |
 |---|---|---|---|
-| 2026-11-06 | portátil Ryzen 5 4500U, 1 Gb/s | demo cronometrada de 6 237 fotogramas a **54 FPS** (34-77) | [`docs/measurements/2026-11-06-vkquake`](docs/measurements/2026-11-06-vkquake/README.md) |
+| 2026-11-06 | portátil Ryzen 5 4500U, 1 Gb/s | demostración cronometrada de 6 237 fotogramas a **54 FPS** (34-77) | [`docs/measurements/2026-11-06-vkquake`](docs/measurements/2026-11-06-vkquake/README.md) |
 
-### Khronos Vulkan-Samples (sin cabeza, 300 fotogramas cada uno)
+### Khronos Vulkan-Samples (sin cabeza, 300 fotogramas cada una)
 
 | Fecha | Cliente | Resultado | Qué cambió / qué lo limita |
 |---|---|---|---|
-| 2026-11-06 | portátil Ryzen 5 4500U | **14 muestras superadas**, incluido **ray tracing** (`ray_tracing_basic`, `ray_tracing_extended`, `ray_tracing_position_fetch`, `ray_queries`, `GPU_ICD_RAYTRACING=1` opcional), búfer de descriptores, mesh shading, push descriptors | fotogramas volcados y comprobados; [`docs/measurements/2026-11-06-vulkan-samples`](docs/measurements/2026-11-06-vulkan-samples/README.md) |
+| 2026-11-06 | portátil Ryzen 5 4500U | **14 muestras pasan**, incluyendo **trazado de rayos** (`ray_tracing_basic`, `ray_tracing_extended`, `ray_tracing_position_fetch`, `ray_queries`, opt-in `GPU_ICD_RAYTRACING=1`), búfer de descriptores, sombreado de malla, descriptores push | fotogramas volcados y comprobados; [`docs/measurements/2026-11-06-vulkan-samples`](docs/measurements/2026-11-06-vulkan-samples/README.md) |
 
 ### vkcube (sintético, 650x718, compilación release, portátil cliente -> servidor A)
 
@@ -183,11 +184,11 @@ Cómo cambió cada paso de diseño la misma escena:
 | Paso | Fotogramas/s | Notas |
 |---|---|---|
 | 1. Lectura síncrona de cada fotograma por la red | ~27 | 1,87 MB/fotograma, 7 viajes de ida y vuelta/fotograma, lectura 28,8 ms |
-| 2. Fotogramas asíncronos en una segunda conexión, sin comprimir | 44 | la aplicación ya no espera la imagen |
-| 3. + LZ4 | 46 | 62 KB/fotograma (30 veces más pequeño en esta escena plana) |
-| 4. + presentación sin vsync (`mailbox`) | ~314 | presentación local 20,2 -> 1,2 ms por fotograma (FIFO esperaba al vsync) |
+| 2. Fotogramas asíncronos en una segunda conexión, en bruto | 44 | la aplicación ya no espera la imagen |
+| 3. + LZ4 | 46 | 62 KB/fotograma (30x más pequeño en esta escena plana) |
+| 4. + present sin vsync (`mailbox`) | ~314 | present local 20,2 -> 1,2 ms por fotograma (FIFO esperaba al vsync) |
 
-Comparación de códecs de fotograma (por fotograma, `mailbox`):
+Comparativa de códecs de fotograma (por fotograma, `mailbox`):
 
 | Códec | Tamaño | Recepción | Decodificación | Presentación |
 |---|---|---|---|---|
@@ -200,9 +201,9 @@ En un cable, la ruta LZ4 sin pérdida es más rápida; H.264 está pensado para 
 
 | Medición | Resultado |
 |---|---|
-| Envío + espera + lectura de 4 KiB en la GPU remota | 1,16 ms (mediana) |
+| Enviar + esperar + leer de vuelta 4 KiB en la GPU remota | 1,16 ms (mediana) |
 | Codificación H.264 NVENC incl. copia host->GPU, 1920x1080 / 640x360 | 1,62 ms / 0,27 ms (mediana) |
-| Decodificación H.264 VA-API + lectura + NV12->BGRA en la HD 520, 1920x1080 / 640x360 | 36,6 ms / 4,3 ms (mediana) |
+| Decodificación H.264 VA-API + lectura de vuelta + NV12->BGRA en la HD 520, 1920x1080 / 640x360 | 36,6 ms / 4,3 ms (mediana) |
 | Copia host -> GPU de un fotograma 1080p (CUDA) | 0,41 ms (20 GB/s) |
 | Sesiones que ven la tarjeta NVIDIA tras la corrección de descarga del cargador (40 clientes matados + 20 normales) | 60 / 60 (antes: 10 / 50) |
 
@@ -211,8 +212,8 @@ En un cable, la ruta LZ4 sin pérdida es más rápida; H.264 está pensado para 
 | Configuración | Generación | Procesamiento de prompt |
 |---|---|---|
 | Archivos GGUF simples (referencia) | 3,37 tok/s | 5,7 tok/s |
-| Paquete de expertos (reorganizado para el SSD) | 4,76 tok/s (+41 %) | 8,1 tok/s |
+| Paquete de expertos (redistribuido para el SSD) | 4,76 tok/s (+41%) | 8,1 tok/s |
 | Igual, a través del concentrador | 4,66 tok/s | 8,0 tok/s |
 | Prompt largo (4105 tokens) con 2 GB de margen de VRAM | 3,02 tok/s | 55,7 tok/s |
 
-Aproximadamente la mitad del tiempo restante por token es espera a la única unidad NVMe; los detalles y los callejones sin salida están en [`docs/OPTIMIZATION-inferssd.md`](docs/OPTIMIZATION-inferssd.md).
+Aproximadamente la mitad del tiempo restante por token es espera a la única unidad NVMe; detalles y callejones sin salida en [`docs/OPTIMIZATION-inferssd.md`](docs/OPTIMIZATION-inferssd.md).
