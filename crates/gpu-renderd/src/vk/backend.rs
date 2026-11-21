@@ -92,7 +92,7 @@ impl Drop for VulkanBackend {
         self.replay.destroy_devices();
         for e in self.instances.drain_all() {
             // SAFETY: instancja została wyjęta z tablicy, więc nikt jej już nie użyje; urządzenia zniszczone powyżej.
-            unsafe { (e.fns.destroy_instance)(e.raw, std::ptr::null()) };
+            crate::vk::replay::with_lifecycle(false, || unsafe { (e.fns.destroy_instance)(e.raw, std::ptr::null()) });
         }
     }
 }
@@ -300,7 +300,7 @@ impl GpuBackend for VulkanBackend {
             }
             Err(_) => {
                 // SAFETY: instancja została dopiero co utworzona i nie ma jeszcze żadnych obiektów potomnych.
-                unsafe { (fns.destroy_instance)(raw, std::ptr::null()) };
+                crate::vk::replay::with_lifecycle(false, || unsafe { (fns.destroy_instance)(raw, std::ptr::null()) });
                 Err(ERR_UNKNOWN)
             }
         }
@@ -315,7 +315,7 @@ impl GpuBackend for VulkanBackend {
             self.replay.registry.unregister(p.raw());
         }
         // SAFETY: instancja jest ważna i wyjęta z tablicy, więc nikt jej już nie użyje.
-        unsafe { (entry.fns.destroy_instance)(entry.raw, std::ptr::null()) };
+        crate::vk::replay::with_lifecycle(false, || unsafe { (entry.fns.destroy_instance)(entry.raw, std::ptr::null()) });
         Ok(())
     }
 

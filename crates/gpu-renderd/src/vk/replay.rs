@@ -118,6 +118,42 @@ fn ns_since(t: Option<std::time::Instant>) -> u64 {
     t.map_or(0, |t| t.elapsed().as_nanos() as u64)
 }
 
+/// Cykl życia urządzeń (`vkCreateDevice`, `vkDestroyDevice`, sprzątanie sesji) jest szeregowany w całym procesie, a po zniszczeniu urządzenia następne tworzenie
+/// czeka `GPU_RENDERD_DEVICE_GAP_MS` (domyślnie 250 ms). Powód: w dzienniku serwera WSZYSTKIE 6 zdarzeń `VK_ERROR_DEVICE_LOST` dnia 2026-11-21 wystąpiły w
+/// `vkCreateDevice` tuż po zamknięciu poprzedniego połączenia (sprzątanie jego urządzenia w innym wątku), a Xid 32 wywoływało też natychmiastowe
+/// create+destroy w sondzie startowej; sterownik NVIDIA wygląda na wrażliwy na nakładanie się tworzenia i niszczenia kontekstów. Nie zweryfikowane na
+/// prawdziwych startach gry w chwili dodania (test syntetyczny vkcube nie odtwarza Xid).
+static DEVICE_LIFECYCLE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn device_gap() -> std::time::Duration {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    std::time::Duration::from_millis(*V.get_or_init(|| std::env::var("GPU_RENDERD_DEVICE_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(250)))
+}
+
+/// Blokada cyklu życia; przy tworzeniu (`create`) czeka, aż od ostatniego zniszczenia minie odstęp.
+fn lifecycle_lock(create: bool) -> std::sync::MutexGuard<'static, Option<std::time::Instant>> {
+    let g = DEVICE_LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+    if create {
+        if let Some(t) = *g {
+            let gap = device_gap();
+            let el = t.elapsed();
+            if el < gap {
+                std::thread::sleep(gap - el);
+            }
+        }
+    }
+    g
+}
+
+/// Wykonuje `f` pod blokadą cyklu życia (przy `create` po odstępie od ostatniego zniszczenia) i zapisuje czas końca; używane też do `vkDestroyInstance`
+/// w `backend.rs` (krótkie sesje sond tworzą i zamykają instancje w trakcie `vkCreateDevice` gry).
+pub(crate) fn with_lifecycle<R>(create: bool, f: impl FnOnce() -> R) -> R {
+    let mut g = lifecycle_lock(create);
+    let r = f();
+    *g = Some(std::time::Instant::now());
+    r
+}
+
 /// Po `VK_ERROR_DEVICE_LOST` sterownik NVIDIA zostaje w złym stanie (błąd Xid 32 w dzienniku jądra; kolejne `vkCreateDevice` wisiały 126 s i kończyły się tym samym błędem),
 /// więc proces kończy się po chwili (na dostarczenie odpowiedzi błędu do klienta) i pozostaje zrestartować go nadzorcy (systemd `--user`, `Restart=always`).
 /// `GPU_RENDERD_EXIT_ON_LOST=0` wyłącza.
@@ -426,7 +462,14 @@ impl Replayer {
         }
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
         let t0 = trace_on().then(std::time::Instant::now);
-        let rax = unsafe { call_thunk(f, &ints, &floats) }.ok_or(ERR_UNKNOWN)?;
+        let lifecycle = matches!(cmd.name, "vkCreateDevice" | "vkDestroyDevice");
+        let mut life_guard = lifecycle.then(|| lifecycle_lock(cmd.name == "vkCreateDevice"));
+        let rax = unsafe { call_thunk(f, &ints, &floats) };
+        if let Some(g) = life_guard.as_mut() {
+            **g = Some(std::time::Instant::now());
+        }
+        drop(life_guard);
+        let rax = rax.ok_or(ERR_UNKNOWN)?;
         if let Some(t0) = t0 {
             trace_text(&format!("  t {} {}us", cmd.name, t0.elapsed().as_micros()));
         }
@@ -758,6 +801,8 @@ impl Replayer {
 
     pub fn destroy_devices(&mut self) {
         let devices: Vec<(u64, Entry)> = self.registry_devices();
+        // Całe sprzątanie sesji pod blokadą cyklu życia (patrz `DEVICE_LIFECYCLE`), z zapisem czasu końca.
+        let mut life_guard = (!devices.is_empty()).then(|| lifecycle_lock(false));
         for (id, e) in devices {
             if let (Ok(wait), Ok(destroy)) = (self.func_by_name("vkDeviceWaitIdle"), self.func_by_name("vkDestroyDevice")) {
                 // SAFETY: uchwyt urządzenia jest ważny do chwili zniszczenia; po nim wpis znika z rejestru.
@@ -806,6 +851,10 @@ impl Replayer {
             }
             self.registry.unregister(id);
         }
+        if let Some(g) = life_guard.as_mut() {
+            **g = Some(std::time::Instant::now());
+        }
+        drop(life_guard);
         if let Some(v) = &self.read_view {
             v.clear();
         }
