@@ -41,6 +41,7 @@ fn main() {
     for var in ["VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_LOADER_LAYERS_ENABLE"] {
         std::env::remove_var(var);
     }
+    gpu_renderd::vk::health::gate_or_exit(std::time::Duration::from_secs(25));
     let listener = match TcpListener::bind(&listen) {
         Ok(l) => l,
         Err(e) => {

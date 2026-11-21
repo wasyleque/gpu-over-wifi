@@ -2,6 +2,7 @@
 pub mod backend;
 pub mod chain;
 pub mod handles;
+pub mod health;
 pub mod loader;
 pub mod registry;
 pub mod replay;
