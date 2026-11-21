@@ -1243,6 +1243,39 @@ unsafe fn descriptor_lockfree(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints:
     false
 }
 
+/// Histogram czasu zapytań z obiegiem po sieci: przedziały górne w ms (1, 2, 5, 10, 20, 50, 100, powyżej), liczniki i największa wartość.
+const QLAT_BOUNDS_MS: [u64; 7] = [1, 2, 5, 10, 20, 50, 100];
+static QLAT: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+static QLAT_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn qlat_record(us: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let i = QLAT_BOUNDS_MS.iter().position(|&b| us < b * 1000).unwrap_or(7);
+    QLAT[i].fetch_add(1, Relaxed);
+    QLAT_MAX_US.fetch_max(us, Relaxed);
+}
+
+fn qlat_report() -> Option<String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let c: Vec<u64> = QLAT.iter().map(|a| a.load(Relaxed)).collect();
+    let n: u64 = c.iter().sum();
+    if n == 0 {
+        return None;
+    }
+    let pct = |q: f64| -> String {
+        let target = (n as f64 * q).ceil() as u64;
+        let mut acc = 0;
+        for (i, v) in c.iter().enumerate() {
+            acc += v;
+            if acc >= target {
+                return if i < 7 { format!("<{} ms", QLAT_BOUNDS_MS[i]) } else { ">100 ms".to_string() };
+            }
+        }
+        ">100 ms".to_string()
+    };
+    Some(format!("czas zapytań z obiegiem po sieci: {n}x, p50 {}, p95 {}, p99 {}, maks {:.1} ms; przedziały [<1, <2, <5, <10, <20, <50, <100, >=100 ms]: {:?}", pct(0.5), pct(0.95), pct(0.99), QLAT_MAX_US.load(Relaxed) as f64 / 1000.0, c))
+}
+
 /// Numer polecenia `vkGetDescriptorEXT` (ustalany raz).
 fn descriptor_op() -> u16 {
     static OP: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
@@ -2062,6 +2095,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         }
     }
     let t0 = std::time::Instant::now();
+    let rt0 = st.stats.roundtrips;
     // Blokujące oczekiwania (`vkWaitSemaphores`, `vkWaitForFences`) wysyłamy do serwera w krótkich odcinkach (1 -> 4 ms) i powtarzamy do upływu
     // limitu aplikacji. Serwer wykonuje żądania po kolei, więc długie oczekiwanie blokowałoby przetwarzanie kolejnych żądań, w tym zgłoszenia pracy,
     // na którą to oczekiwanie czeka (vkd3d czeka na wartość semafora, którą inny wątek zgłosi dopiero potem): zablokowany strumień, gra stoi do
@@ -2141,6 +2175,10 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
         slice_ns = (slice_ns * 2).min(slice_max);
     };
     let _ = &hold;
+    // Rozkład czasu zapytań z obiegiem po sieci (bez oczekiwań i prezentacji): punkt odniesienia dla zmian kolejki wysyłki (patrz docs/DESIGN-bulk-channel.md).
+    if st.stats.roundtrips > rt0 && !matches!(cmd.name, "vkWaitSemaphores" | "vkWaitSemaphoresKHR" | "vkWaitForFences" | "vkQueueWaitIdle" | "vkDeviceWaitIdle" | "vkQueuePresentKHR") {
+        qlat_record(t0.elapsed().as_micros() as u64);
+    }
     trace(cmd.name, r, t0.elapsed().as_micros());
     periodic_stats(&st.stats);
     r
@@ -2285,6 +2323,9 @@ fn periodic_stats(stats: &Stats) {
             eprintln!("[gpu-icd] oczekiwania na semafor wg przyczyny: wracają wcześniej {}, z odświeżeniem pamięci {}, odpytywanie (limit 0) {}, krótki limit czasu {}, bez kontraktu {}", WAIT_KIND[0].load(Relaxed), WAIT_KIND[1].load(Relaxed), WAIT_KIND[2].load(Relaxed), WAIT_KIND[4].load(Relaxed), WAIT_KIND[3].load(Relaxed));
         }
         eprintln!("[gpu-icd] żądania z odpowiedzią: {n}x, średnio kolejka+zapis do gniazda {q} µs, od zapisu do odpowiedzi {r} µs");
+        if let Some(h) = qlat_report() {
+            eprintln!("[gpu-icd] {h}");
+        }
         eprintln!("[gpu-icd] wysyłki pamięci wg obiektów: {}", stats.top_uploads());
         if stats.lazy_memories > 0 {
             use std::sync::atomic::Ordering::Relaxed;

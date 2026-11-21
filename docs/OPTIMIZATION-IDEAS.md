@@ -128,3 +128,6 @@ Następny krok (do zmierzenia, nie odrzucony): **push z serwera przy zakończeni
 `GPU_ICD_FETCHLOG` jest ich ok. 17), a serwer dołącza ich zawartość (z deltą względem poprzedniej wersji) do odpowiedzi na oczekiwanie fence/semafora. Błąd strony po stronie klienta
 znajduje wtedy dane już lokalnie (bez obiegu). Klient-side prefetch przegrał wyścig, bo startuje dopiero po powrocie oczekiwania; push na serwerze startuje w chwili zakończenia GPU
 i podróżuje razem z odpowiedzią. Wymaga zmiany protokołu (nowa wiadomość `SetHotWindows`, rozszerzona odpowiedź oczekiwania) i testów kolejności z serwerem pipeline'owym.
+
+## 2026-11-22: osobny kanał dla dużych zapisów pamięci (zapytania za zapisami w kolejce TCP)
+Plan i kryteria sukcesu/porażki: [`DESIGN-bulk-channel.md`](DESIGN-bulk-channel.md). Zmierzony średni koszt kolejki to ok. 0,4 ms na klatkę (górna granica zysku +1-3% FPS), ale ogon (zapytania 30-95 ms w fazie ładowania, klatki > 60 ms) może się poprawić; najpierw sprawdzić tańszą hipotezę (backpressure kolejki trzymany pod blokadą instancji), potem budować. Niewdrożone.
