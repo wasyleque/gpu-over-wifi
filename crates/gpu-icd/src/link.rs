@@ -353,8 +353,75 @@ pub fn wire_of(memory: u64) -> u64 {
 /// `GPU_ICD_MEM_LZ4=1` wraca do LZ4 (np. dla starszego serwera, który nie zna `MemWriteZstd`).
 /// Poziom zstd dla zapisów pamięci (`GPU_ICD_ZSTD_LEVEL`, domyślnie 1; ujemne -1..-7 to tryby "fast": szybsze kodowanie kosztem rozmiaru, z prefiksem lustra): łącze 1 Gb/s jest w ciężkich scenach prawie nasycone, a wątki robocze mają zapas CPU.
 fn zstd_level() -> i32 {
-    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("GPU_ICD_ZSTD_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|l| (-7..=19).contains(l) && *l != 0).unwrap_or(1))
+    static ENV: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    match *ENV.get_or_init(|| std::env::var("GPU_ICD_ZSTD_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|l| (-7..=19).contains(l) && *l != 0)) {
+        Some(l) => l,
+        None => ADAPT_LEVEL.load(std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
+/// Poziom zstd dobierany do zajętości łącza (bez `GPU_ICD_ZSTD_LEVEL`): zmiana poziomu między ramkami jest bezpieczna (zstd nie niesie stanu poza prefiksem z lustra,
+/// który jest taki sam na każdym poziomie), więc w odróżnieniu od przełączania kodeka można ją robić w obie strony. Procesor klienta jest wąskim gardłem (dwa wątki
+/// kompresji zużyły w Tomb Raiderze ok. 1,3 rdzenia przy poziomie 1), a łącze zwykle ma zapas: poziom -5 dał tam Overall 43,5 FPS wobec 42,1 (+3,2%) przy ruchu 112-201 MB/s;
+/// gdy łącze zbliża się do nasycenia, wracamy do poziomu 1 (o połowę mniej bajtów).
+static ADAPT_LEVEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(LEVEL_FAST);
+const LEVEL_FAST: i32 = -5;
+const LEVEL_SMALL: i32 = 1;
+/// Histereza: wracamy do małych ramek powyżej `UTIL_HIGH` pojemności łącza, a do szybkich dopiero poniżej `UTIL_LOW` (między nimi poziom się nie zmienia).
+const UTIL_HIGH: f64 = 0.75;
+const UTIL_LOW: f64 = 0.50;
+const LEVEL_WINDOW_S: f64 = 2.0;
+
+#[derive(Default)]
+struct LevelAdapt {
+    started: bool,
+    win_start_s: f64,
+    win_wire: u64,
+}
+
+impl LevelAdapt {
+    /// Zwraca nowy poziom (albo `None`, gdy okno jeszcze trwa). `capacity_mbs`: pojemność łącza w MB/s, `current`: bieżący poziom.
+    fn observe(&mut self, now_s: f64, wire: u64, capacity_mbs: f64, current: i32) -> Option<i32> {
+        if !self.started {
+            self.started = true;
+            self.win_start_s = now_s;
+            self.win_wire = wire;
+            return None;
+        }
+        let dt = now_s - self.win_start_s;
+        if dt < LEVEL_WINDOW_S {
+            return None;
+        }
+        let mbs = wire.saturating_sub(self.win_wire) as f64 / dt / 1e6;
+        self.win_start_s = now_s;
+        self.win_wire = wire;
+        let util = mbs / capacity_mbs.max(1.0);
+        Some(if util > UTIL_HIGH {
+            LEVEL_SMALL
+        } else if util < UTIL_LOW {
+            LEVEL_FAST
+        } else {
+            current
+        })
+    }
+}
+
+/// Pojemność łącza w MB/s: prędkość interfejsu (o 6% mniej na narzut) albo 1 Gb/s, gdy nie da się jej ustalić (Wi-Fi).
+fn link_capacity_mbs() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| link_mbps().map_or(125.0, |m| m as f64 / 8.0) * 0.94)
+}
+
+/// Wołane przy każdym zapisie pamięci (tanio: jedno porównanie czasu pod mutexem).
+fn adapt_level() {
+    use std::sync::atomic::Ordering::Relaxed;
+    static ST: Mutex<Option<(std::time::Instant, LevelAdapt)>> = Mutex::new(None);
+    let mut g = ST.lock().unwrap_or_else(|e| e.into_inner());
+    let (t0, ad) = g.get_or_insert_with(|| (std::time::Instant::now(), LevelAdapt::default()));
+    let now = t0.elapsed().as_secs_f64();
+    if let Some(l) = ad.observe(now, WIRE_TOTAL.load(Relaxed), link_capacity_mbs(), ADAPT_LEVEL.load(Relaxed)) {
+        ADAPT_LEVEL.store(l, Relaxed);
+    }
 }
 
 /// Tryb zapisów pamięci: start zawsze od zstd z prefiksem (o połowę mniej bajtów); gdy ruch na łączu jest przez dłuższy czas mały, a łącze szybkie, sesja
@@ -833,6 +900,7 @@ const READ_DEP_MAX_AGE: u64 = 40000;
         self.mem_last.insert(memory, self.seq);
         self.mem_last_n.insert(memory, self.n_frames);
         adapt_codec();
+        adapt_level();
         let input = if mem_pfx() {
             // Prefiks i aktualizację lustra robi wątek roboczy w kolejności tur (numer nadajemy tu, pod blokadą instancji).
             JobInput::MemPfx(self.seq, memory, offset, raw, self.next_turn())
@@ -1332,5 +1400,28 @@ mod adapt_tests {
         assert!(!a.observe(60.0, wire));
         wire += 150_000_000;
         assert!(!a.observe(65.0, wire));
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+
+    #[test]
+    fn level_follows_utilisation_with_hysteresis() {
+        let mut a = LevelAdapt::default();
+        let cap = 300.0;
+        assert_eq!(a.observe(0.0, 0, cap, LEVEL_FAST), None);
+        // 100 MB/s = 33% pojemności: szybki.
+        assert_eq!(a.observe(2.0, 200_000_000, cap, LEVEL_FAST), Some(LEVEL_FAST));
+        // 240 MB/s = 80% > 75%: małe ramki.
+        assert_eq!(a.observe(4.0, 200_000_000 + 480_000_000, cap, LEVEL_FAST), Some(LEVEL_SMALL));
+        // 180 MB/s = 60%: między progami, poziom zostaje (małe ramki).
+        let w = 200_000_000 + 480_000_000 + 360_000_000;
+        assert_eq!(a.observe(6.0, w, cap, LEVEL_SMALL), Some(LEVEL_SMALL));
+        // 100 MB/s = 33% < 50%: znów szybki.
+        assert_eq!(a.observe(8.0, w + 200_000_000, cap, LEVEL_SMALL), Some(LEVEL_FAST));
+        // okno krótsze niż 2 s: bez decyzji.
+        assert_eq!(a.observe(8.5, w + 250_000_000, cap, LEVEL_FAST), None);
     }
 }
