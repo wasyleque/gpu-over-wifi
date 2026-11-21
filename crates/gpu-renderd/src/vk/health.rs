@@ -58,6 +58,15 @@ pub fn probe_device() -> Result<(), i32> {
             let mut dev: *mut c_void = std::ptr::null_mut();
             let r = unsafe { create(p, d.as_ptr() as *const c_void, std::ptr::null(), &mut dev) };
             if r >= 0 && !dev.is_null() {
+                // Łagodne zamknięcie (domyślnie): natychmiastowe `vkDestroyDevice` zaraz po utworzeniu wywoływało u sterownika NVIDIA Xid 32 (uszkodzony strumień
+                // poleceń) w ok. 1 na 12 startów (pomiar 2026-11-21), więc czekamy na bezczynność urządzenia i dajemy sterownikowi chwilę.
+                if gentle() {
+                    if let Some(w) = unsafe { lib.proc_addr(inst, CStr::from_bytes_with_nul(b"vkDeviceWaitIdle\0").unwrap_or(c"")) } {
+                        let wait: unsafe extern "C" fn(*mut c_void) -> i32 = unsafe { std::mem::transmute(w) };
+                        unsafe { wait(dev) };
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
                 unsafe { destroy(dev, std::ptr::null()) };
             } else {
                 ok = false;
@@ -72,6 +81,10 @@ pub fn probe_device() -> Result<(), i32> {
         unsafe { destroy_instance(inst, std::ptr::null()) };
     }
     result
+}
+
+fn gentle() -> bool {
+    std::env::var("GPU_RENDERD_PROBE_GENTLE").map(|v| v != "0").unwrap_or(true)
 }
 
 /// Wołane z `main` przed nasłuchiwaniem: do `limit` sekund na udane założenie urządzenia, inaczej `exit(75)`.
