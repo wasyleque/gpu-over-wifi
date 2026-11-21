@@ -8,9 +8,9 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 
 > **Status: early research project.** Things work in the lab, not yet in everyday use. Linux only for now (Windows client is planned). Results per game: [Measurements](#measurements) (at the end).
 
-## Cyberpunk 2077 on a remote GPU: from 2 FPS to **25.5 FPS** (and still climbing)
+## Cyberpunk 2077 on a remote GPU: from 2 FPS to **28 FPS** (and still climbing)
 
-![Cyberpunk 2077 (DirectX 12 through Proton) running fullscreen at 1080p on a Ryzen 5 1600X desktop, rendered on a remote RTX 3090 Ti: built-in benchmark 25.5 FPS average, 56 max](docs/images/cyberpunk-2077-benchmark-remote-rtx3090ti.jpg)
+![Cyberpunk 2077 (DirectX 12 through Proton) running fullscreen at 1080p on a Ryzen 5 1600X desktop, rendered on a remote RTX 3090 Ti: built-in benchmark about 28 FPS average, 56 max](docs/images/cyberpunk-2077-benchmark-remote-rtx3090ti.jpg)
 
 **Cyberpunk 2077**, a DirectX 12 game running through Proton and vkd3d-proton on a desktop with a weak CPU (Ryzen 5 1600X), drawn by an RTX 3090 Ti in another machine over a 2.5 Gb/s cable, built-in benchmark, **1920x1080 fullscreen, same settings every run** (the screenshot is a frame from such a run; for reference the same PC with its own local card gets ~86 FPS, so the remote GPU is not yet at parity):
 
@@ -19,7 +19,8 @@ Share one powerful home GPU between your devices: run big AI models, play games 
 | first attempt | 2-5 | | it started at all |
 | 2026-11-05 | 7.6 | 38 | many round trips per frame, lock contention |
 | 2026-11-21 morning | 15.5 | | |
-| **2026-11-21 evening** | **25.5** (25.0-25.8 over repeated runs) | **57** | read-back of GPU results now travels differentially in the same round trip as the wait, read channel, lock-free fetches, self-tuning |
+| **2026-11-21 night** | **28.1** (27.7-28.1) | **56** | server profiled with `perf`: two hot spots removed on the critical thread |
+| 2026-11-21 evening | 25.5 (25.0-25.8 over repeated runs) | 57 | read-back of GPU results now travels differentially in the same round trip as the wait, read channel, lock-free fetches, self-tuning |
 
 The game really runs on the client; only the graphics card is remote. No frame generation, no resolution tricks, no per-game profile: the same driver code serves every game. Every number is a measured run from the repository ([`docs/measurements`](docs/measurements/2026-11-19-desktop/README.md), runs in [`cp-bench-runs.tsv`](docs/measurements/cp-bench-runs.tsv), reproduce with `tools/cp-bench.sh`), including the ideas that did **not** help (recorded with their numbers). Still not smooth (the minimum is ~14 FPS and the frame is a chain of ~28 dependent round trips), and work continues.
 
@@ -55,7 +56,7 @@ The game really runs on the client; only the graphics card is remote. No frame g
 
 | Works | Not yet |
 |---|---|
-| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally; **real games run**: American Truck Simulator 68-72 FPS (light scenes), **Cyberpunk 2077 at 1080p: 25.5 FPS average** (from 2-5), Hamster Hunter 21-34 FPS, FurMark ~93 FPS | Smooth heavy games: Cyberpunk 2077 (DirectX 12 via Proton) averages 25.5 FPS but dips to ~14, and busy scenes (ATS cockpit) drop to ~6 FPS; both are bound by network round trips, plan in [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md) |
+| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally; **real games run**: American Truck Simulator 68-72 FPS (light scenes), **Cyberpunk 2077 at 1080p: ~28 FPS average** (from 2-5), Hamster Hunter 21-34 FPS, FurMark ~93 FPS | Smooth heavy games: Cyberpunk 2077 (DirectX 12 via Proton) averages ~28 FPS but dips to ~15, and busy scenes (ATS cockpit) drop to ~6 FPS; both are bound by network round trips, plan in [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md) |
 | LZ4 and H.264 frame transport, selectable (`GPU_ICD_CODEC`) | Windows client driver, HEVC |
 | AI proxy with VRAM-aware scheduling, DeepSeek via InferSSD | Game-session reservations in the scheduler |
 
@@ -120,7 +121,7 @@ All numbers are from single lab runs, not statistics: treat them as orders of ma
 
 | Date | Client | Result | What changed / what limits it |
 |---|---|---|---|
-| 2026-11-21 (night) | same desktop, after a server-side profile fix (handle-registry index) | **26.5-26.6 FPS average**, max 56 (min ~15) | the server spent 9 % of its CPU scanning the whole handle registry on every memory read; found with `perf`, fixed with a per-kind index |
+| 2026-11-21 (night) | same desktop, after two server-side profile fixes | **27.7-28.1 FPS average**, max 56 (min ~15.7) | profiling the server with `perf` found two silly hot spots on the critical thread: a full scan of the handle registry on every memory read (9 % of CPU) and a CPU-count syscall storm (5.6 %); 26.5 after the first fix, 28 after the second |
 | 2026-11-21 (evening) | Ryzen 5 1600X desktop, 2.5 Gb/s, built-in benchmark, 1920x1080 fullscreen | **25.0-25.8 FPS average, max 57** (min ~14); on the same PC with its own local card ~86 FPS | the frame is a chain of ~28 dependent sync points, each paid a round trip for CPU read-back of GPU results. Hot read-back windows (17 fixed 64 KB windows, ~55 fetches per frame) are read differentially in the same round trip as the wait (server returns only changed pages), plus a dedicated read channel, lock-free lazy fetch, self-tuning, server fixes (leaked driver contexts made `vkCreateDevice` take 8-126 s after ~28 sessions). Tried and **rejected after measurement**: scan outside the global lock, descriptor prefetch, thread priorities, compression variants. Details: [`docs/measurements/2026-11-19-desktop`](docs/measurements/2026-11-19-desktop/README.md) |
 | 2026-11-21 (morning) | same desktop | 14.7-16.2 FPS average | before the differential read-back |
 | 2026-11-05 | Ryzen 5 4500U laptop, 1 Gb/s, 1080p, 14-minute session | **7.6 FPS median** (p10 7.2, p90 10.6, up to 38 in quiet scenes), frame latency ~18 ms; tester's verdict: playable | 76 round trips per frame (43 are semaphore waits), instance-lock contention, 5 MB of memory writes per frame; [`docs/measurements/2026-11-05-cyberpunk`](docs/measurements/2026-11-05-cyberpunk/README.md) |

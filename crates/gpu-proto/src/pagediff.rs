@@ -29,14 +29,25 @@ pub fn page_hash(page: &[u8]) -> u64 {
 /// Od tylu stron wzwyż skróty liczy się równolegle (poniżej koszt uruchomienia wątków przewyższa zysk).
 const PARALLEL_MIN_PAGES: usize = 512;
 
+/// Liczba procesorów, liczona RAZ (patrz `page_hashes`).
+pub fn cpus() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |c| c.get()))
+}
+
 /// Skróty pierwszych `n` stron `data` (strona `i` = bajty `i*PAGE..min((i+1)*PAGE, len)`); duże obszary dzielone na wątki.
 fn page_hashes(data: &[u8], first: usize, n: usize, len: usize) -> Vec<u64> {
     let one = |k: usize| {
         let i = first + k;
         page_hash(&data[i * PAGE..((i + 1) * PAGE).min(len)])
     };
-    let threads = std::thread::available_parallelism().map_or(1, |c| c.get()).min(8).min(n / 256);
-    if n < PARALLEL_MIN_PAGES || threads < 2 {
+    // Najpierw tani warunek rozmiaru: `available_parallelism` czyta przy każdym wywołaniu pliki cgroup (open/read/statx/close), a profil perf serwera
+    // (dwarf) pokazał tam ok. 5,6% próbek wątku obsługi, bo ten kod wołano przy każdym odczycie różnicowym małej pamięci.
+    if n < PARALLEL_MIN_PAGES {
+        return (0..n).map(one).collect();
+    }
+    let threads = cpus().min(8).min(n / 256);
+    if threads < 2 {
         return (0..n).map(one).collect();
     }
     let mut out = vec![0u64; n];

@@ -15,7 +15,8 @@ pub fn nv12_to_bgra(data: &[u8], y_pitch: usize, y_off: usize, uv_pitch: usize, 
         return Ok(out);
     }
     // Pasma wierszy konwertowane równolegle (tyle wątków, ile rdzeni, ale nie za cienkie pasma).
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8).min((h / 32).max(1));
+    static CPUS: std::sync::OnceLock<usize> = std::sync::OnceLock::new(); // `available_parallelism` czyta pliki cgroup przy każdym wywołaniu
+    let threads = (*CPUS.get_or_init(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))).min(8).min((h / 32).max(1));
     let rows_per = h.div_ceil(threads);
     std::thread::scope(|sc| {
         for (band, chunk) in out.chunks_mut(rows_per * w * 4).enumerate() {
