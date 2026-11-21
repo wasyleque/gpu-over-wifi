@@ -21,7 +21,14 @@ const VK_ERROR_INITIALIZATION_FAILED: i32 = -3;
 const VK_ERROR_MEMORY_MAP_FAILED: i32 = -5;
 const VK_ERROR_DEVICE_LOST: i32 = -4;
 /// Partia wychodzi, gdy przekroczy ten rozmiar (albo na punkcie synchronizacji).
-const BATCH_FLUSH: usize = 64 * 1024;
+const BATCH_FLUSH_DEFAULT: usize = 64 * 1024;
+
+/// Próg wysłania zaległej partii poleceń (`GPU_ICD_BATCH_FLUSH_KB`, domyślnie 64): mniejszy próg pozwala serwerowi zacząć odtwarzanie wcześniej, gdy klient
+/// jeszcze nagrywa (nakładanie nagrywania i wykonania), kosztem większej liczby pakietów.
+fn batch_flush() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_BATCH_FLUSH_KB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|k| (1..=1024).contains(k)).map_or(BATCH_FLUSH_DEFAULT, |k| k * 1024))
+}
 /// Największy deskryptor, który zapamiętujemy (sterowniki zwracają kilkadziesiąt bajtów) i limit liczby wpisów cache.
 const DESC_CACHE_MAX_BYTES: u64 = 1024;
 const DESC_CACHE_MAX_ENTRIES: usize = 200_000;
@@ -1844,7 +1851,7 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
             let mut st = lock_state(inst);
             st.batch.extend_from_slice(&data);
             st.stats.commands += 1;
-            if st.batch.len() > BATCH_FLUSH {
+            if st.batch.len() > batch_flush() {
                 st.flush();
             }
         }
@@ -2089,6 +2096,8 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
                 crate::watchdog::phase(crate::watchdog::WAIT_LOCK_FINISH, p.base);
                 let t_lock = std::time::Instant::now();
                 st = lock_state(inst);
+                crate::timeline::RECVW.with(|c| c.set(c.get() + (t_ph2 - t_ph1).as_micros() as u64));
+                crate::timeline::RELOCKW.with(|c| c.set(c.get() + t_lock.elapsed().as_micros() as u64));
                 crate::watchdog::phase(crate::watchdog::HOLD_LOCK, p.base);
                 LOCK_WAIT_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3050,7 +3059,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     let has_data_out = params.iter().any(|p| p.shape == Shape::Pointer && !p.is_const && p.elem != Elem::Handle && p.ptr_depth == 1);
     if force_async || (cmd.class != CmdClass::Sync && !has_data_out && cmd.ret != Ret::U64 && !is_pipeline_probe(cmd.name, slots) && !(may_fail_legitimately(cmd.name) && !speculated)) {
         st.batch.extend(bytes);
-        if st.batch.len() > BATCH_FLUSH {
+        if st.batch.len() > batch_flush() {
             st.flush();
         }
         if cmd.name == "vkCreateImageView" && flags().desc_prefetch && slots.len() >= 4 && slots[3] != 0 {

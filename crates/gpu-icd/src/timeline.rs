@@ -9,7 +9,7 @@ const WINDOW: Duration = Duration::from_millis(250);
 static PHASE: AtomicU8 = AtomicU8::new(0);
 static INIT: std::sync::Once = std::sync::Once::new();
 static T0: Mutex<Option<(Instant, Duration)>> = Mutex::new(None);
-static EVENTS: Mutex<Vec<(u64, u64, String, &'static str, u64)>> = Mutex::new(Vec::new());
+static EVENTS: Mutex<Vec<(u64, u64, String, &'static str, u64, u64, u64)>> = Mutex::new(Vec::new());
 
 fn init() {
     INIT.call_once(|| {
@@ -23,6 +23,9 @@ fn init() {
 thread_local! {
     /// Czas oczekiwania TEGO wątku na blokadę instancji w bieżącym poleceniu (µs); ustawia `fwd::forward_inner`.
     pub static LOCKW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Czas oczekiwania na odpowiedź serwera (µs) i ponownego wzięcia blokady po odpowiedzi (µs) w bieżącym poleceniu.
+    pub static RECVW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub static RELOCKW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static NAME: String = std::fs::read_to_string("/proc/thread-self/comm").map(|s| s.trim().to_string()).unwrap_or_default();
 }
 
@@ -67,7 +70,8 @@ pub fn record(name: &'static str, start: Instant, end: Instant) {
     let s = start.duration_since(t0).as_micros() as u64;
     let thread = NAME.with(|n| n.clone());
     let lw = LOCKW.with(|c| c.replace(0));
-    EVENTS.lock().unwrap_or_else(|e| e.into_inner()).push((s, dur.as_micros() as u64, thread, name, lw));
+    let (rv, rl) = (RECVW.with(|c| c.replace(0)), RELOCKW.with(|c| c.replace(0)));
+    EVENTS.lock().unwrap_or_else(|e| e.into_inner()).push((s, dur.as_micros() as u64, thread, name, lw, rv, rl));
 }
 
 fn finish() {
@@ -77,7 +81,7 @@ fn finish() {
     let mut ev = std::mem::take(&mut *EVENTS.lock().unwrap_or_else(|e| e.into_inner()));
     ev.sort();
     eprintln!("[gpu-icd] OŚ CZASU ({} zdarzeń w oknie {} ms): początek µs, czas µs, wątek, polecenie, czekanie na blokadę µs", ev.len(), WINDOW.as_millis());
-    for (s, d, t, n, lw) in ev {
-        eprintln!("[tl] {s:>8} {d:>6} {t:<16} {n} lock={lw}");
+    for (s, d, t, n, lw, rv, rl) in ev {
+        eprintln!("[tl] {s:>8} {d:>6} {t:<16} {n} lock={lw} recv={rv} relock={rl}");
     }
 }

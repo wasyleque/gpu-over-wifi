@@ -148,6 +148,23 @@ fn flush_reads() -> bool {
     *V.get_or_init(|| std::env::var_os("GPU_RENDERD_FLUSH_READS").is_some())
 }
 
+/// Domyślnie WŁĄCZONE (`GPU_RENDERD_FLUSH_ALL=0` wraca do zbierania): każda odpowiedź wychodzi od razu po obsłużeniu żądania, a nie razem z odpowiedziami na całą kolejkę gotowych żądań
+/// (odpowiedź na krótkie zapytanie czekała za kolejnymi żądaniami, w tym za blokującymi oczekiwaniami na GPU).
+fn flush_all() -> bool {
+    #[cfg(test)]
+    if let Some(v) = TEST_FLUSH_ALL.with(|c| c.get()) {
+        return v;
+    }
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_RENDERD_FLUSH_ALL").map(|v| v != "0").unwrap_or(true))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test może wymusić tryb zbierania (`Some(false)`) albo natychmiastowy (`Some(true)`) niezależnie od środowiska; dotyczy tylko bieżącego wątku.
+    static TEST_FLUSH_ALL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 static CH_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CH_QUEUE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CH_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -459,7 +476,7 @@ fn serve_loop<S: FrameSource, W: Write, B: GpuBackend>(
             let response_frame = Frame::new(frame.header.stream, flags::CRC, frame.header.seq, frame.header.epoch, response.encode())?;
             pending.extend_from_slice(&response_frame.encode());
             // Odczyt pamięci blokuje wątek gry po stronie klienta: nie czekamy z odpowiedzią, aż opróżni się kolejka następnych żądań.
-            if sync_read && flush_reads() {
+            if (sync_read && flush_reads()) || flush_all() {
                 flush_pending(writer, &mut pending)?;
             }
 
@@ -770,6 +787,7 @@ mod tests {
 
     #[test]
     fn responses_to_requests_read_together_are_written_together_in_order() {
+        TEST_FLUSH_ALL.with(|c| c.set(Some(false)));
         let (mut s, _) = session();
         let mut input = req_frame(1, 0, &hello());
         for seq in 2..=6 {
@@ -781,6 +799,21 @@ mod tests {
         assert_eq!(r.len(), 6);
         assert_eq!(r.iter().map(|(f, _)| f.header.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6], "kolejność zachowana");
         assert_eq!(out.writes, 1, "sześć odpowiedzi z jednego odczytu to jeden zapis do gniazda");
+    }
+
+    #[test]
+    fn with_flush_all_every_response_is_written_immediately_and_in_order() {
+        TEST_FLUSH_ALL.with(|c| c.set(Some(true)));
+        let (mut s, _) = session();
+        let mut input = req_frame(1, 0, &hello());
+        for seq in 2..=6 {
+            input.extend(req_frame(seq, 0, &Request::EnumInstanceVersion));
+        }
+        let mut out = CountingWriter { bytes: Vec::new(), writes: 0 };
+        assert_eq!(serve_connection(&mut s, &mut Cursor::new(input), &mut out), Ok(()));
+        let r = parse_responses(&out.bytes);
+        assert_eq!(r.iter().map(|(f, _)| f.header.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6], "kolejność zachowana");
+        assert_eq!(out.writes, 6, "każda odpowiedź to osobny zapis do gniazda (krótkie zapytanie nie czeka za kolejką)");
     }
 
     #[test]
