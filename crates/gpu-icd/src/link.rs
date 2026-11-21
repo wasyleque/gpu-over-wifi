@@ -359,7 +359,48 @@ fn zstd_level() -> i32 {
 
 fn mem_zstd() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var_os("GPU_ICD_MEM_LZ4").is_none())
+    *V.get_or_init(|| match std::env::var("GPU_ICD_MEM_LZ4") {
+        Ok(v) => v == "0",
+        // Bez jawnej zmiennej: łącze >= 2 Gb/s dostaje LZ4 (zapisy rozpakowuje wątek odczytu serwera, a nie wątek wykonujący; pomiar: Cyberpunk 28,3 -> 29,1-29,5 FPS
+        // przy 2,5 Gb/s), wolniejsze łącza (Wi-Fi, 1 Gb/s) zstd z prefiksem, który wysyła o połowę mniej bajtów.
+        Err(_) => !link_fast(),
+    })
+}
+
+/// Prędkość łącza do serwera z `GPU_ICD_ADDR` w Mb/s: interfejs z tablicy tras (najdłuższy pasujący prefiks), prędkość z `/sys/class/net/<if>/speed`.
+/// `None`, gdy nie da się ustalić (Wi-Fi nie podaje prędkości, adres nie jest IPv4, brak trasy).
+pub fn link_mbps() -> Option<u32> {
+    let addr = std::env::var("GPU_ICD_ADDR").ok()?;
+    let host = addr.rsplit_once(':').map_or(addr.as_str(), |(h, _)| h);
+    let ip: std::net::Ipv4Addr = host.parse().ok()?;
+    let iface = route_iface(&std::fs::read_to_string("/proc/net/route").ok()?, ip)?;
+    let v: i64 = std::fs::read_to_string(format!("/sys/class/net/{iface}/speed")).ok()?.trim().parse().ok()?;
+    (v > 0).then_some(v as u32)
+}
+
+/// Interfejs trasy do `ip` z tekstu `/proc/net/route` (najdłuższy pasujący prefiks). Pola adresu i maski to bajty sieciowe wypisane jako liczba
+/// w porządku hosta, więc na little endian `10.42.0.0` jest `00002A0A`.
+fn route_iface(route: &str, ip: std::net::Ipv4Addr) -> Option<String> {
+    let ip = u32::from_le_bytes(ip.octets());
+    let mut best: Option<(u32, String)> = None;
+    for line in route.lines().skip(1) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 8 {
+            continue;
+        }
+        let (Ok(dest), Ok(mask)) = (u32::from_str_radix(f[1], 16), u32::from_str_radix(f[7], 16)) else { continue };
+        if ip & mask == dest {
+            let bits = mask.count_ones();
+            if best.as_ref().is_none_or(|(b, _)| bits > *b) {
+                best = Some((bits, f[0].to_string()));
+            }
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+fn link_fast() -> bool {
+    link_mbps().is_some_and(|m| m >= 2000)
 }
 
 /// Bajty czekające w kolejce wysyłki (aktualizuje wątek wysyłający i producenci).
@@ -1135,4 +1176,22 @@ mod tests {
         srv.join().unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::route_iface;
+
+    const ROUTE: &str = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+wlan0\t00000000\t0100A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
+enp3s0\t00002A0A\t00000000\t0001\t0\t0\t100\t0000FFFF\t0\t0\t0
+wlan0\t0000A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0
+";
+
+    #[test]
+    fn longest_prefix_route_picks_the_direct_link_interface() {
+        assert_eq!(route_iface(ROUTE, "10.42.0.2".parse().unwrap()).as_deref(), Some("enp3s0"));
+        assert_eq!(route_iface(ROUTE, "192.168.0.83".parse().unwrap()).as_deref(), Some("wlan0"));
+        assert_eq!(route_iface(ROUTE, "8.8.8.8".parse().unwrap()).as_deref(), Some("wlan0"), "trasa domyślna");
+    }
 }
