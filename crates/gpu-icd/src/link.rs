@@ -357,14 +357,78 @@ fn zstd_level() -> i32 {
     *V.get_or_init(|| std::env::var("GPU_ICD_ZSTD_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|l| (-7..=19).contains(l) && *l != 0).unwrap_or(1))
 }
 
+/// Tryb zapisów pamięci: start zawsze od zstd z prefiksem (o połowę mniej bajtów); gdy ruch na łączu jest przez dłuższy czas mały, a łącze szybkie, sesja
+/// przechodzi JEDNOKIERUNKOWO na LZ4 (zapisy rozpakowuje wątek odczytu serwera, nie wątek wykonujący). W jedną stronę, bo po przejściu żadna ramka nie
+/// używa prefiksu, więc lustra klienta i serwera nie muszą pozostać zgodne. Pomiar 2026-11-21 (łącze 2,5 Gb/s): Cyberpunk (ok. 25 MB/s zstd) +3% z LZ4;
+/// Rise of the Tomb Raider (100-125 MB/s zstd, 200-250 MB/s LZ4) Overall 40,5 z zstd wobec 36,5 z LZ4. `GPU_ICD_MEM_LZ4=1` wymusza LZ4 od początku,
+/// `=0` wymusza zstd bez przełączania.
+static LZ4_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn env_codec() -> Option<bool> {
+    static V: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("GPU_ICD_MEM_LZ4").ok().map(|v| v != "0"))
+}
+
 fn mem_zstd() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match std::env::var("GPU_ICD_MEM_LZ4") {
-        Ok(v) => v == "0",
-        // Bez jawnej zmiennej: łącze >= 2 Gb/s dostaje LZ4 (zapisy rozpakowuje wątek odczytu serwera, a nie wątek wykonujący; pomiar: Cyberpunk 28,3 -> 29,1-29,5 FPS
-        // przy 2,5 Gb/s), wolniejsze łącza (Wi-Fi, 1 Gb/s) zstd z prefiksem, który wysyła o połowę mniej bajtów.
-        Err(_) => !link_fast(),
-    })
+    match env_codec() {
+        Some(lz4) => !lz4,
+        None => !LZ4_MODE.load(std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
+/// Decyzja o przejściu na LZ4: okna 5 s, ruch na łączu (MB/s) < `LOW_MBS` przez `NEED_WINDOWS` kolejnych okien z faktycznym ruchem (>= `ACTIVE_MBS`).
+const ADAPT_WINDOW_S: f64 = 5.0;
+const LOW_MBS: f64 = 60.0;
+const ACTIVE_MBS: f64 = 5.0;
+const NEED_WINDOWS: u32 = 6;
+
+#[derive(Default)]
+struct Adapt {
+    win_start_s: f64,
+    win_wire: u64,
+    low: u32,
+    started: bool,
+}
+
+impl Adapt {
+    /// `now_s`: czas w sekundach od dowolnego początku, `wire`: skumulowane bajty na łączu. Zwraca `true`, gdy sesja ma przejść na LZ4.
+    fn observe(&mut self, now_s: f64, wire: u64) -> bool {
+        if !self.started {
+            self.started = true;
+            self.win_start_s = now_s;
+            self.win_wire = wire;
+            return false;
+        }
+        let dt = now_s - self.win_start_s;
+        if dt < ADAPT_WINDOW_S {
+            return false;
+        }
+        let mbs = wire.saturating_sub(self.win_wire) as f64 / dt / 1e6;
+        self.win_start_s = now_s;
+        self.win_wire = wire;
+        if (ACTIVE_MBS..LOW_MBS).contains(&mbs) {
+            self.low += 1;
+        } else {
+            self.low = 0;
+        }
+        self.low >= NEED_WINDOWS
+    }
+}
+
+/// Wołane przy każdym zapisie pamięci (tanio: jedno porównanie czasu pod mutexem); po przejściu na LZ4 nic nie robi.
+fn adapt_codec() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if env_codec().is_some() || LZ4_MODE.load(Relaxed) || !link_fast() {
+        return;
+    }
+    static ST: Mutex<Option<(std::time::Instant, Adapt)>> = Mutex::new(None);
+    let mut g = ST.lock().unwrap_or_else(|e| e.into_inner());
+    let (t0, ad) = g.get_or_insert_with(|| (std::time::Instant::now(), Adapt::default()));
+    let now = t0.elapsed().as_secs_f64();
+    if ad.observe(now, WIRE_TOTAL.load(Relaxed)) {
+        LZ4_MODE.store(true, Relaxed);
+        eprintln!("[gpu-icd] ruch zapisów pamięci mały i stały: przejście na LZ4 (jednokierunkowo)");
+    }
 }
 
 /// Prędkość łącza do serwera z `GPU_ICD_ADDR` w Mb/s: interfejs z tablicy tras (najdłuższy pasujący prefiks), prędkość z `/sys/class/net/<if>/speed`.
@@ -490,8 +554,8 @@ fn mem_frame(seq: u16, memory: u64, offset: u64, raw: Vec<u8>) -> Result<Vec<u8>
 /// Czy zapisy pamięci używają prefiksu z lustra "ostatnio przesłane" (domyślnie tak; `GPU_ICD_NO_PFX=1` wyłącza, a `GPU_ICD_RUNS=1` też, bo tryb
 /// RUNS pisze do pamięci bez aktualizacji lustra serwera).
 fn mem_pfx() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| mem_zstd() && mem_dict().is_none() && std::env::var_os("GPU_ICD_NO_PFX").is_none() && std::env::var_os("GPU_ICD_RUNS").is_none())
+    static REST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    mem_zstd() && *REST.get_or_init(|| mem_dict().is_none() && std::env::var_os("GPU_ICD_NO_PFX").is_none() && std::env::var_os("GPU_ICD_RUNS").is_none())
 }
 
 /// Zapis pamięci jako ramka `MemWriteZstdPfx` (zstd z prefiksem = poprzednia treść zakresu), a gdy to nie daje 10% oszczędności, jako surowy
@@ -757,6 +821,7 @@ const READ_DEP_MAX_AGE: u64 = 40000;
         self.n_frames += 1;
         self.mem_last.insert(memory, self.seq);
         self.mem_last_n.insert(memory, self.n_frames);
+        adapt_codec();
         let input = if mem_pfx() {
             // Prefiks i aktualizację lustra robi wątek roboczy w kolejności tur (numer nadajemy tu, pod blokadą instancji).
             JobInput::MemPfx(self.seq, memory, offset, raw, self.next_turn())
@@ -1217,5 +1282,44 @@ wlan0\t0000A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0
         assert_eq!(route_iface(ROUTE, "10.42.0.2".parse().unwrap()).as_deref(), Some("enp3s0"));
         assert_eq!(route_iface(ROUTE, "192.168.0.83".parse().unwrap()).as_deref(), Some("wlan0"));
         assert_eq!(route_iface(ROUTE, "8.8.8.8".parse().unwrap()).as_deref(), Some("wlan0"), "trasa domyślna");
+    }
+}
+
+#[cfg(test)]
+mod adapt_tests {
+    use super::Adapt;
+
+    #[test]
+    fn switches_only_after_enough_consecutive_active_low_windows() {
+        let mut a = Adapt::default();
+        let mut wire = 0u64;
+        assert!(!a.observe(0.0, wire));
+        // 30 MB/s przez 6 okien po 5 s => przejście dokładnie przy szóstym oknie.
+        for k in 1..=6 {
+            wire += 150_000_000;
+            let sw = a.observe(5.0 * k as f64, wire);
+            assert_eq!(sw, k == 6, "okno {k}");
+        }
+    }
+
+    #[test]
+    fn heavy_or_idle_windows_reset_the_count() {
+        let mut a = Adapt::default();
+        let mut wire = 0u64;
+        a.observe(0.0, wire);
+        for k in 1..=5 {
+            wire += 150_000_000; // 30 MB/s
+            assert!(!a.observe(5.0 * k as f64, wire));
+        }
+        wire += 600_000_000; // 120 MB/s: zerowanie
+        assert!(!a.observe(30.0, wire));
+        for k in 1..=5 {
+            wire += 150_000_000;
+            assert!(!a.observe(30.0 + 5.0 * k as f64, wire), "po zerowaniu trzeba znowu 6 okien");
+        }
+        // okno bez ruchu (menu): też zeruje, nie przybliża przejścia
+        assert!(!a.observe(60.0, wire));
+        wire += 150_000_000;
+        assert!(!a.observe(65.0, wire));
     }
 }

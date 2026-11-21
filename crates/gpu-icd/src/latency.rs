@@ -154,6 +154,9 @@ pub fn shown(seq: u32) {
                 s.timeouts_in_row = 0;
             }
         }
+        // Klatki znów się wyświetlają: hamowanie, wyłączone na stałe po 5 przekroczeniach czasu (np. przy starcie, zanim ruszyło wideo), wraca. Bez tego do końca sesji
+        // nic nie ograniczało klatek w locie (Rise of the Tomb Raider z wyłączonym vsync: opóźnienie 4-7 s i "lepkie" menu, `hamowanie gry: 0 razy`).
+        s.throttle_off = false;
     });
     ROOM.notify_all();
 }
@@ -299,6 +302,13 @@ mod tests {
         let t = Instant::now();
         wait_for_room(2, Duration::from_millis(500));
         assert!(t.elapsed() < Duration::from_millis(50), "hamowanie powinno być wyłączone");
+        // Wyświetlenie klatki włącza hamowanie z powrotem.
+        shown(3);
+        sent(4);
+        sent(5);
+        let t = Instant::now();
+        wait_for_room(2, Duration::from_millis(80));
+        assert!(t.elapsed() >= Duration::from_millis(60), "po wyświetleniu klatki hamowanie znowu czeka na miejsce: {:?}", t.elapsed());
         with(|s| *s = State::default());
     }
 
