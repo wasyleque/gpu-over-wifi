@@ -239,3 +239,10 @@ Ręczne profile na grę nie skalują się, więc ICD stroi się sam: trzy opcje 
 FPS z własnych `vkQueuePresentKHR` w oknach 3 s i na przemian porównuje wariant bieżący z przeciwnym (po 25 s rozgrzewki, 2 pary okien na przełącznik, margines 5%, powtórka co 5 min). Jawna zmienna
 `GPU_ICD_HOTPUSH`/`GPU_ICD_READCHAN`/`GPU_ICD_LAZY_UNLOCK` przypina przełącznik, `GPU_ICD_TUNER=0` wyłącza strojenie. Cyberpunk: tuner sam zmierzył odczyt różnicowy 31,3 FPS (włączony) wobec 16,1 (wyłączony)
 i 36,3 wobec 17,8, i zostawił go włączonego; pozostałe dwie opcje uznał za obojętne/pomocnicze. Koszt strojenia: ok. 25,3 FPS w całym przebiegu wobec ok. 25,8 bez tunera (okna z gorszym wariantem).
+
+### Kto blokuje się w oczekiwaniach i na co czeka odbiór odpowiedzi (2026-11-21, Cyberpunk, 25 FPS)
+
+Blokujące `vkWaitSemaphores` (76,8 tys., średnio 6,6 ms) wykonują WĄTKI POMOCNICZE vkd3d-proton (`vkd3d_fence`, `vkd3d_queue`, `vkd3d-swapchain`), nie wątki gry (`redDispatcher` tylko 134 wywołania):
+to one budzą grę po zakończeniu pracy GPU, więc ich opóźnienie to opóźnienie sygnału ogrodzenia widzianego przez grę. Serwer wykonuje zapytania szybko (średnio 57 µs), więc 6,6 ms to nie GPU ani wykonawca.
+Odbiór odpowiedzi (490 tys. odbiorów): średnio **1,08 ms czekania na własną kolej** (odpowiedzi czytane ściśle w kolejności biletów, przez wątki, które muszą być obudzone) i 0,32 ms samego odczytu ramki — kolejka biletów ma 3× większy koszt niż sieć.
+Prior art (docs/PRIOR-ART-2026-11-21.md): najlepszy kandydat to lokalne repliki stanu fence/semafor/query wypychane razem z sygnałem (Venus „feedback slots”, Wang et al. „shadow resources”).

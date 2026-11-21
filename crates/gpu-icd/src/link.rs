@@ -78,6 +78,7 @@ impl Shared {
 
     /// Odbiera odpowiedź dla biletu `ticket` (czeka na swoją kolej; nie wymaga blokady instancji). Odroczone odpowiedzi wcześniejszych biletów odczytuje po drodze.
     pub fn recv_at(&self, ticket: u64) -> Result<Response, ClientError> {
+        let t_enter = std::time::Instant::now();
         loop {
             let mut t = self.turn.lock().unwrap_or_else(|e| e.into_inner());
             if t.broken {
@@ -109,7 +110,11 @@ impl Shared {
             }
         }
         // Tylko wątek, którego jest kolej, dochodzi tutaj, więc blokada odczytu nie jest rywalizowana.
+        let t_turn = std::time::Instant::now();
+        TURN_WAIT_NS.fetch_add((t_turn - t_enter).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let r = self.read_one();
+        READ_ONE_NS.fetch_add(t_turn.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        RECV_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         marks_replied(ticket);
         let mut t = self.turn.lock().unwrap_or_else(|e| e.into_inner());
         t.served += 1;
@@ -305,6 +310,10 @@ fn marks_written(ticket: u64, t0: std::time::Instant) {
         m.insert(ticket, Mark { t0, written: Some(now) });
     }
 }
+
+pub static TURN_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static READ_ONE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static RECV_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn marks_replied(ticket: u64) {
     let now = std::time::Instant::now();

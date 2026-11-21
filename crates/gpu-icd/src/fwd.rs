@@ -2141,7 +2141,12 @@ fn periodic_stats(stats: &Stats) {
             let qn = FETCH_Q_N.load(Relaxed).max(1);
             eprintln!("[gpu-icd] kolejka nadawcza przed odczytem leniwym: średnio {} KB w {:.1} partiach ({} odczytów)", FETCH_Q_BYTES.load(Relaxed) / qn / 1024, FETCH_Q_ITEMS.load(Relaxed) as f64 / qn as f64, qn);
             eprintln!("[gpu-icd] kanał odczytów: {} odczytów, średnio {} µs, ucieczek do strumienia sterującego {}", crate::readchan::READS.load(Relaxed), crate::readchan::READ_NS.load(Relaxed) / 1000 / crate::readchan::READS.load(Relaxed).max(1), crate::readchan::FALLBACKS.load(Relaxed));
+            {
+                let n = crate::link::RECV_N.load(Relaxed).max(1);
+                eprintln!("[gpu-icd] odbiór odpowiedzi: {} odbiorów, średnio czekanie na swoją kolej {} µs, samo odczytanie ramki {} µs", n, crate::link::TURN_WAIT_NS.load(Relaxed) / 1000 / n, crate::link::READ_ONE_NS.load(Relaxed) / 1000 / n);
+            }
             eprintln!("[gpu-icd] strojenie: {}", crate::tuner::report());
+            eprintln!("[gpu-icd] blokujące oczekiwania wg wątku: {}", wait_by_thread_report());
             eprintln!("[gpu-icd] pominięte unieważnienia (bramka transferów): {}", LAZY_GATED.load(Relaxed));
             eprintln!("[gpu-icd] pobrania z wyprzedzeniem: {} okien, czas {} ms", crate::lazymap::PREFETCHED.load(Relaxed), crate::lazymap::PREFETCH_NS.load(Relaxed) / 1_000_000);
             eprintln!("[gpu-icd] pobrania leniwe: czekanie na blokadę instancji {} ms, praca pod blokadą (skan + obieg) {} ms, w tym flush {} ms i samo wywołanie MemRead {} ms", crate::lazymap::FETCH_LOCK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_WORK_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_FLUSH_NS.load(Relaxed) / 1_000_000, crate::lazymap::FETCH_CALL_NS.load(Relaxed) / 1_000_000);
@@ -3168,6 +3173,17 @@ pub(crate) unsafe fn exec_finish(st: &mut InstState, p: Pending, r: Responses) -
     let e = st.stats.rt_by_cmd.entry(cmd.name).or_insert((0, 0));
     e.0 += 1;
     e.1 += p.t_recv.elapsed().as_nanos() as u64;
+    if cmd.name.starts_with("vkWaitSemaphores") {
+        // Które wątki gry blokują się w oczekiwaniach i jak długo (nazwa wątku z /proc przy raporcie).
+        extern "C" {
+            fn gettid() -> i32;
+        }
+        let tid = unsafe { gettid() } as u32;
+        let mut g = WAIT_BY_THREAD.lock().unwrap_or_else(|e| e.into_inner());
+        let e = g.entry(tid).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += p.t_recv.elapsed().as_nanos() as u64;
+    }
     if let Ok(Response::Synced { error }) = r.sy {
         if error < 0 {
             st.lose();
@@ -3486,6 +3502,15 @@ fn lock_with_timeout(inst: &InstanceObj) -> Option<std::sync::MutexGuard<'_, Ins
 }
 
 static HOT_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WAIT_BY_THREAD: std::sync::Mutex<std::collections::BTreeMap<u32, (u64, u64)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn wait_by_thread_report() -> String {
+    let g = WAIT_BY_THREAD.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<(u32, u64, u64)> = g.iter().map(|(t, (n, ns))| (*t, *n, *ns)).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v.iter().take(8).map(|(t, n, ns)| format!("{}#{}: {}x {} ms (śr {} µs)", std::fs::read_to_string(format!("/proc/self/task/{t}/comm")).unwrap_or_default().trim(), t, n, ns / 1_000_000, ns / 1000 / (*n).max(1))).collect::<Vec<_>>().join("; ")
+}
+
 static INV_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HOT_APPLY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HOT_SKIP_MORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
