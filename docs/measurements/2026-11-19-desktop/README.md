@@ -318,3 +318,19 @@ Po `tools/cstates.sh on` na obu maszynach (głębokie stany C wyłączone, `net.
 ## Zajętość wątków pomocniczych vkd3d blokującymi oczekiwaniami (2026-11-21, z logu ICD)
 
 Przyrosty liczników `blokujące oczekiwania wg wątku` między kolejnymi liniami logu (odstęp ok. 5 s, ok. 150 klatek, 29 FPS): `vkd3d_fence` #1 +640 oczekiwań i +1,8 s zablokowania (ok. 36% czasu), `vkd3d_fence` #2 +600 i +1,7 s (ok. 34%), `vkd3d_queue` #1 +480 i +1,0 s (ok. 20%), `vkd3d_queue` #2 +320 i +1,0 s (ok. 20%); razem ok. 15 blokujących oczekiwań na klatkę, średnio 4-5 ms każde. Żaden pojedynczy wątek nie jest zablokowany przez cały czas, więc ścieżka krytyczna nie jest jednym wątkiem oczekującym, tylko łańcuchem zależności między kilkoma (fence -> queue -> swapchain -> wątek gry). Opóźnienie klatki od oddania do wyświetlenia to tylko 13-15 ms (93-100% poniżej 20 ms), czyli ok. 20 ms klatki przy 29 FPS to czas PRZED oddaniem (gra + oczekiwania), a nie transport obrazu. Kolejny krok: czasy zdarzeń w obrębie jednej klatki (kto na kogo czeka), żeby wskazać, które oczekiwanie jest ostatnim ogniwem łańcucha.
+
+## Oś czasu klatki: kto na co czeka (GPU_ICD_TIMELINE, 2026-11-21)
+
+Nowe narzędzie diagnostyczne `GPU_ICD_TIMELINE=<s>` (moduł `timeline.rs`): okno 250 ms po `<s>` sekundach, każde wywołanie ICD z czasem trwania, wątkiem i czasem oczekiwania na blokadę instancji, zrzut raz do logu (`[tl]`). Dwa przebiegi w trakcie benchmarku Cyberpunka (29,7 i 29,5 FPS), ok. 830 zdarzeń na ok. 8 klatek:
+
+| wątek / polecenie | wywołań | suma czasu | w tym czekanie na blokadę |
+|---|---|---|---|
+| vkd3d_fence `vkWaitSemaphores` | 256 | 510 ms | 121 ms |
+| vkd3d_queue `vkWaitSemaphores` | 72 | 271 ms | 20 ms |
+| redDispatcher `vkGetDescriptorEXT` | 55 | 170 ms | 11 ms |
+| redDispatcher `vkResetCommandPool` | 77 | 108 ms | **92 ms** |
+| vkd3d_queue `vkQueueSubmit2` | 141 | 101 ms | **79 ms** |
+| redDispatcher `vkEndCommandBuffer` | 67 | 94 ms | **85 ms** |
+| redDispatcher `vkGetDeviceImageMemoryRequirements` | 25 | 44 ms | 36 ms |
+
+Wnioski: (1) `vkResetCommandPool`, `vkEndCommandBuffer`, `vkQueueSubmit2` to w ok. 80-90% czas czekania na globalną blokadę instancji (a nie praca ICD): sumarycznie 36% czasu wszystkich wywołań w oknie to czekanie na blokadę. (2) `vkGetDescriptorEXT` prawie nie czeka na blokadę (11 z 170 ms): jego ok. 3 ms to obieg po sieci i kolejka na serwerze, a nie ICD; wątek `redDispatcher6` spędza w wywołaniach ICD prawie 100% okna, szeregowo (GetDescriptorEXT, CreateImage, GetImageMemoryRequirements, BindImageMemory2, CreateImageView: tworzenie zasobów). (3) Wcześniejszy eksperyment (prescan, skan pod blokadą 82 -> 44 s) nie podniósł FPS, więc samo zmniejszenie zajętości blokady nie wystarcza; ścieżka krytyczna zależy od łańcucha serwer-GPU, nie tylko od blokady. Kierunki wymagające większych zmian: blokada per kolejka/obiekt zamiast globalnej, zapytania (deskryptory, wymagania pamięci) na osobnym połączeniu wykonywanym równolegle na serwerze, równoległe nagrywanie CB na serwerze.

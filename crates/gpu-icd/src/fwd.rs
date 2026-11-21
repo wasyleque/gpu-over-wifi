@@ -1941,6 +1941,18 @@ unsafe fn spin_watch(op: u16, ints: &[u64; 14], r: u64) {
 }
 
 unsafe fn forward(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
+    if crate::timeline::recording() {
+        let t = std::time::Instant::now();
+        let r = forward_untimed(op, ints, floats);
+        if let Some(c) = COMMANDS.get(op as usize) {
+            crate::timeline::record(c.name, t, std::time::Instant::now());
+        }
+        return r;
+    }
+    forward_untimed(op, ints, floats)
+}
+
+unsafe fn forward_untimed(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     if spin_op(op) {
         let r = forward_inner(op, ints, floats);
         spin_watch(op, &ints, r);
@@ -1979,6 +1991,7 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     let mut st = lock_state(inst);
     crate::watchdog::phase(crate::watchdog::HOLD_LOCK, 0);
     let waited = t_lock.elapsed().as_nanos() as u64;
+    crate::timeline::LOCKW.with(|c| c.set(waited / 1000));
     LOCK_WAIT_NS.fetch_add(waited, std::sync::atomic::Ordering::Relaxed);
     if let Some(a) = WAIT_NS_BY_OP.get(op as usize) {
         a.fetch_add(waited, std::sync::atomic::Ordering::Relaxed);

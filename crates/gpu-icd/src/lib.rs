@@ -31,6 +31,7 @@ mod coldtrap;
 mod hotset;
 mod memtrack;
 mod prescan;
+mod timeline;
 mod present;
 mod swapchain;
 mod templates;
