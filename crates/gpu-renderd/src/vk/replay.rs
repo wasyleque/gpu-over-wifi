@@ -131,8 +131,23 @@ fn device_gap() -> std::time::Duration {
 }
 
 /// Blokada cyklu życia; przy tworzeniu (`create`) czeka, aż od ostatniego zniszczenia minie odstęp.
-fn lifecycle_lock(create: bool) -> std::sync::MutexGuard<'static, Option<std::time::Instant>> {
-    let g = DEVICE_LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+fn lifecycle_lock(create: bool) -> Option<std::sync::MutexGuard<'static, Option<std::time::Instant>>> {
+    // Limit czekania na blokadę (8 s): sprzątanie poprzedniej sesji potrafi utknąć w `vkDestroyDevice` sterownika NVIDIA (100% CPU, 2026-11-22, Shadow of the Tomb Raider po
+    // błędzie sesji), a bez limitu cała nowa gra czekała na nie w nieskończoność; po limicie idziemy dalej bez blokady (jak przed 0.3.55).
+    let t_wait = std::time::Instant::now();
+    let g = loop {
+        match DEVICE_LIFECYCLE.try_lock() {
+            Ok(g) => break g,
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if t_wait.elapsed() > std::time::Duration::from_secs(8) {
+                    eprintln!("gpu-renderd: blokada cyklu życia urządzeń zajęta ponad 8 s (zawieszone sprzątanie sesji?), kontynuuję bez niej");
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    };
     if create {
         if let Some(t) = *g {
             let gap = device_gap();
@@ -142,7 +157,7 @@ fn lifecycle_lock(create: bool) -> std::sync::MutexGuard<'static, Option<std::ti
             }
         }
     }
-    g
+    Some(g)
 }
 
 /// Wykonuje `f` pod blokadą cyklu życia (przy `create` po odstępie od ostatniego zniszczenia) i zapisuje czas końca; używane też do `vkDestroyInstance`
@@ -150,7 +165,9 @@ fn lifecycle_lock(create: bool) -> std::sync::MutexGuard<'static, Option<std::ti
 pub(crate) fn with_lifecycle<R>(create: bool, f: impl FnOnce() -> R) -> R {
     let mut g = lifecycle_lock(create);
     let r = f();
-    *g = Some(std::time::Instant::now());
+    if let Some(g) = g.as_mut() {
+        **g = Some(std::time::Instant::now());
+    }
     r
 }
 
@@ -463,7 +480,7 @@ impl Replayer {
         // SAFETY: `f` to funkcja Vulkana o nazwie polecenia, a parametry odpowiadają jego deklaracji (metadane z vk.xml).
         let t0 = trace_on().then(std::time::Instant::now);
         let lifecycle = matches!(cmd.name, "vkCreateDevice" | "vkDestroyDevice");
-        let mut life_guard = lifecycle.then(|| lifecycle_lock(cmd.name == "vkCreateDevice"));
+        let mut life_guard = lifecycle.then(|| lifecycle_lock(cmd.name == "vkCreateDevice")).flatten();
         let rax = unsafe { call_thunk(f, &ints, &floats) };
         if let Some(g) = life_guard.as_mut() {
             **g = Some(std::time::Instant::now());
@@ -802,7 +819,7 @@ impl Replayer {
     pub fn destroy_devices(&mut self) {
         let devices: Vec<(u64, Entry)> = self.registry_devices();
         // Całe sprzątanie sesji pod blokadą cyklu życia (patrz `DEVICE_LIFECYCLE`), z zapisem czasu końca.
-        let mut life_guard = (!devices.is_empty()).then(|| lifecycle_lock(false));
+        let mut life_guard = (!devices.is_empty()).then(|| lifecycle_lock(false)).flatten();
         for (id, e) in devices {
             if let (Ok(wait), Ok(destroy)) = (self.func_by_name("vkDeviceWaitIdle"), self.func_by_name("vkDestroyDevice")) {
                 // SAFETY: uchwyt urządzenia jest ważny do chwili zniszczenia; po nim wpis znika z rejestru.

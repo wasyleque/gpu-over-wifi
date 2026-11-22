@@ -1868,6 +1868,30 @@ unsafe fn fast_record(op: u16, cmd: &gpu_proto::meta::CommandMeta, ints: &[u64; 
         return false;
     }
     fill_slots(params, ints, floats, &mut slots);
+    // `vkCmdPushDescriptorSet*`: jak przy `vkUpdateDescriptorSets` (patrz `sanitize_descriptor_writes`) czytamy tylko ten ze wskaźników pImageInfo/pBufferInfo/pTexelBufferView,
+    // który odpowiada typowi deskryptora; vkd3d-proton nie zeruje pozostałych, a kodek wysyłał ich śmieci (Shadow of the Tomb Raider: "nieznany uchwyt VkBufferView" przy
+    // `vkCmdPushDescriptorSet`, a po nim lawina błędów, bo serwer przerywa dekodowanie całej partii). Kopie zapisów żyją do końca kodowania.
+    let mut _push_writes: Vec<u8> = Vec::new();
+    let mut _push_info: Vec<u8> = Vec::new();
+    match cmd.name {
+        "vkCmdPushDescriptorSet" | "vkCmdPushDescriptorSetKHR" if slots[4] != 0 && slots[4] <= 65536 && slots[5] != 0 => {
+            _push_writes = sanitize_descriptor_writes(std::slice::from_raw_parts(slots[5] as *const u8, slots[4] as usize * 64));
+            slots[5] = _push_writes.as_ptr() as u64;
+        }
+        // VkPushDescriptorSetInfo: sType @0, pNext @8, stageFlags @16, layout @24, set @32, descriptorWriteCount @36, pDescriptorWrites @40 (48 B).
+        "vkCmdPushDescriptorSet2" | "vkCmdPushDescriptorSet2KHR" if slots[1] != 0 => {
+            let info = std::slice::from_raw_parts(slots[1] as *const u8, 48);
+            let n = u32::from_le_bytes([info[36], info[37], info[38], info[39]]) as usize;
+            let w = u64::from_le_bytes(info[40..48].try_into().unwrap_or([0; 8]));
+            if n != 0 && n <= 65536 && w != 0 {
+                _push_writes = sanitize_descriptor_writes(std::slice::from_raw_parts(w as *const u8, n * 64));
+                _push_info = info.to_vec();
+                _push_info[40..48].copy_from_slice(&(_push_writes.as_ptr() as u64).to_le_bytes());
+                slots[1] = _push_info.as_ptr() as u64;
+            }
+        }
+        _ => {}
+    }
     let mut e = Encoder::new();
     if encode_command(op, slots.as_ptr() as *const u8, &mut e, &IcdCtx).is_err() {
         return false; // błąd zgłosi zwykła ścieżka (z komunikatem w logu)
@@ -2909,6 +2933,10 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     for (kind, ptr, n) in outs {
         for i in 0..n {
             let id = st.alloc_id();
+            // Diagnostyka (`GPU_ICD_TRACE_VIEWS=1`): kto utworzył jaki uchwyt widoku bufora (Shadow of the Tomb Raider: serwer zgłosił nieznany `VkBufferView` w `vkCmdPushDescriptorSet`).
+            if kind == "VkBufferView" && std::env::var_os("GPU_ICD_TRACE_VIEWS").is_some() {
+                eprintln!("[gpu-icd] widok bufora {id:#x} utworzony (instancja {:p}, wątek {:?}, {})", &*st as *const _, std::thread::current().id(), cmd.name);
+            }
             std::ptr::write_unaligned(ptr.add(i), id);
             if DISPATCHABLE.contains(&kind) {
                 disp_outs.push((ptr.add(i), id));
