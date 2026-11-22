@@ -58,7 +58,7 @@ The game really runs on the client; only the graphics card is remote. No frame g
 
 | Works | Not yet |
 |---|---|
-| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally; **real games run**: American Truck Simulator 68-72 FPS (light scenes), **Cyberpunk 2077 at 1080p: ~32 FPS average** (from 2-5), Hamster Hunter 21-34 FPS, FurMark ~93 FPS | Smooth heavy games: Cyberpunk 2077 (DirectX 12 via Proton) averages ~32 FPS but dips to ~19, and busy scenes (ATS cockpit) drop to ~6 FPS; both are bound by network round trips, plan in [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md) |
+| Remote RTX appears in `vulkaninfo`; `vkcube` renders on it and shows locally; **real games run**: American Truck Simulator 68-72 FPS (light scenes), **Cyberpunk 2077 at 1080p: ~32 FPS average** (from 2-5), **Shadow of the Tomb Raider (DirectX 12) ~43 FPS** and **Rise of the Tomb Raider (DirectX 12) ~48 FPS** at 1080p, Hamster Hunter 21-34 FPS, FurMark ~93 FPS | Smooth heavy games: Cyberpunk 2077 (DirectX 12 via Proton) averages ~32 FPS but dips to ~19, and busy scenes (ATS cockpit) drop to ~6 FPS; both are bound by network round trips, plan in [`docs/consult/11-next-steps.md`](docs/consult/11-next-steps.md) |
 | LZ4 and H.264 frame transport, selectable (`GPU_ICD_CODEC`) | Windows client driver, HEVC |
 | AI proxy with VRAM-aware scheduling, DeepSeek via InferSSD | Game-session reservations in the scheduler |
 
@@ -78,10 +78,11 @@ checked, we measured ourselves, and several ideas that sounded promising did not
 |---|---|---|---|---|---|---|
 | Client (laptop) | Lenovo ThinkPad 20JNS5UQ0N | Intel Core i5-6300U, 4 threads | 8 GB | Intel HD Graphics 520 (Skylake GT2) | – | Arch Linux (Omarchy), Hyprland/Wayland |
 | Client 2 (laptop, used for the game measurements) | Acer laptop (hostname `wasyl-V1-12`) | AMD Ryzen 5 4500U, 6 cores / 6 threads | 6.6 GB usable (upgrade to 16 GB planned) | AMD Radeon Vega (Renoir) integrated + Radeon 550X (Polaris 12) discrete, both disabled for the games | – | Ubuntu 26.04.1, kernel 7.0.0-42, GNOME/Wayland |
+| Client 3 (desktop, used for the Cyberpunk and Tomb Raider measurements) | custom desktop (hostname `wasyll`) | AMD Ryzen 5 1600X, 6 cores / 12 threads | 16 GB (15.5 GB usable) | NVIDIA GTX 1080 Ti 11 GB (only used for the native reference runs; the remote runs use the server's card) | Micron 2450 NVMe 512 GB | Arch Linux (Omarchy), Hyprland/Wayland, Proton (CachyOS build) through Heroic |
 | Server A ("gpu-hub") | desktop | AMD Ryzen 9 5900XT, 16 cores | 64 GB DDR4 (AM4 platform) | NVIDIA RTX 3090 Ti, 24 GB, driver 580.178 | Kingston NVMe 2 TB (PCIe 4) | Ubuntu 26.04 |
 | Server B | desktop | AMD Ryzen 9 5950X, 16 cores | 64 GB DDR4 (AM4 platform) | NVIDIA RTX 3090, 24 GB, driver 580.105 | ADATA SX8200 NVMe 2 TB + 1 TB SSD | Ubuntu 24.04 |
 
-Link client-A: direct 1 Gb/s Ethernet cable, ~0.2 ms round trip. Client 2 (the Ryzen laptop, all game numbers below): direct 1 Gb/s cable to server A through its built-in Realtek RTL8111/8168 NIC (0.15 ms round trip, `rx-usecs 0`) or a USB 3 Gigabit adapter (RTL8153, ~0.37 ms, less stable); Wi-Fi is Realtek RTL8723BE and not used for rendering. Client-B: VPN (not used for the numbers below).
+Client 3 (desktop): direct 2.5 Gb/s cable to server A, about 0.16 ms round trip. Link client-A: direct 1 Gb/s Ethernet cable, ~0.2 ms round trip. Client 2 (the Ryzen laptop, all game numbers below): direct 1 Gb/s cable to server A through its built-in Realtek RTL8111/8168 NIC (0.15 ms round trip, `rx-usecs 0`) or a USB 3 Gigabit adapter (RTL8153, ~0.37 ms, less stable); Wi-Fi is Realtek RTL8723BE and not used for rendering. Client-B: VPN (not used for the numbers below).
 RAM *type* follows from the platform (Ryzen 5000 on AM4 supports DDR4 only); module speed and timings were not read because that needs root (`dmidecode`) and are marked as TBD.
 
 ## Try it
