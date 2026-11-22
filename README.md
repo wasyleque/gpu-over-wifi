@@ -154,6 +154,12 @@ All numbers are from single lab runs, not statistics: treat them as orders of ma
 | 2026-11-22 | Ryzen 5 1600X desktop, 2.5 Gb/s, vsync off | **42.8-44.4 FPS average** (p50 21.4 ms, p99 43 ms, 0 frames over 200 ms), native DX12 on the GTX 1080 Ti: 74 | sparse-memory queries cached (35.1 -> 38.2), five more texel-buffer formats synthesised locally (42.8). A CPU profile shows the game's own code at ~46 %, the kernel 22 %, our driver 16 %: the gap to native is mostly latency and ordering, not our CPU cost. Details: [`docs/measurements/2026-11-22-sottr/`](docs/measurements/2026-11-22-sottr/README.md) |
 | 2026-11-22 (DX11 fallback) | same desktop | **25 FPS average** | DirectX 12 did not start: the driver reported no sparse (tiled) resources |
 
+### Dying Light (part 1, Epic, Proton, DirectX 11 -> DXVK, 1080p, no built-in benchmark)
+
+| Date | Client | Result | What changed / what limits it |
+|---|---|---|---|
+| 2026-11-22 | Ryzen 5 1600X desktop, 2.5 Gb/s, vsync off, frame cap off, textures/shadows/foliage High | **indoors 54-57 FPS** with no stalls over 100 ms (p99 frame time 30-33 ms); **outdoors in the open city about 30 FPS** (23-39, p99 70-160 ms); cutscenes locked by the game at 30 FPS | one manual run, FPS from the driver log and the DXVK overlay; first runs were capped by vsync and by the game's own frame limit (30/60 FPS plateaus). Details and screenshots: [`docs/measurements/2026-11-22-dyinglight/`](docs/measurements/2026-11-22-dyinglight/README.md) |
+
 ### American Truck Simulator (native Linux, `-rdevice vk`)
 
 | Date | Client | Result | What changed / what limits it |
