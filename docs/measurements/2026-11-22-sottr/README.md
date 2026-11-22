@@ -104,3 +104,18 @@ Sprostowanie: `vkGetPhysicalDeviceFragmentShadingRatesKHR` (`BadLen("nieznany id
 Serwer (`GPU_RENDERD_STATS=1`, wątek `renderd-sublat` odpytuje `vkGetSemaphoreCounterValue` co 200 µs) mierzy czas od powrotu `vkQueueSubmit2` do osiągnięcia wartości sygnalizowanego semafora: **233 563 zgłoszeń, średnio 452 µs; [<2, <5, <10, <20, >=20 ms] = [216 595, 15 008, 1 960, 0, 0]**. Klient w tym samym przebiegu widzi opóźnienie od zgłoszenia do obserwacji ukończenia **średnio 71,8 ms** (145 tys. zgłoszeń, [<2 ... >=80 ms] = [3 734, 24 098, 29 706, 27 809, 29 472, 11 367, 18 902]).
 Wniosek: praca zgłoszona do GPU kończy się w ułamku milisekundy, a pozostałe ok. 71 ms to czas przed wykonaniem po stronie serwera (kolejka wysyłki klienta i kolejka żądań serwera) albo moment, w którym aplikacja SAMA sprawdza ukończenie (vkd3d odpytuje fence co klatkę), więc metryka klienta jest zawyżona zachowaniem gry i NIE dowodzi, że opóźnienie ogranicza FPS. Hipoteza o limicie klatek w locie spowodowanym czasem wykonania na serwerze jest odrzucona.
 Zostaje koszt po stronie klienta: wątki gry blokują się na `GetDescriptorEXT` dla obrazów (Cyberpunk: `redDispatcher*` 13-21 s każdy na przebieg, ok. 15-25% czasu; SOTTR: wątek główny ok. 9%), plus kodowanie poleceń (ok. 10% CPU wątków gry) i śledzenie pamięci w jądrze (ok. 18%). Pojedyncze zapytanie o deskryptor obrazu kosztuje ok. 4 ms, choć RTT to 0,16 ms: czeka w kolejce serwera za wykonywanym akurat pakietem poleceń. Kierunek: osobna ścieżka dla zapytań niezależnych od biegu poleceń (kanał odczytów, `after_ctrl`), żeby zapytanie o deskryptor nie czekało za pakietem poleceń.
+
+### Zapytania o deskryptory na kanale odczytów (`GPU_ICD_DESC_CHAN=1`, 0.3.79): wynik ujemny, domyślnie wyłączone
+
+Pomysł: `vkGetDescriptorEXT` (bajty deskryptora obrazu liczy sterownik serwera) blokował wątki gry (Cyberpunk: `redDispatcher*` 13-21 s na przebieg), bo zapytanie czekało w kolejce serwera za pakietem poleceń. Zbudowane: żądanie `QueryAfter` (opcode 26) na połączeniu odczytów, wykonywane na wątku odczytu serwera po ramce, od której zależy zapytanie (ramka z utworzeniem widoku/samplera, `Link::cmds_seq`), z tabelą widoków, samplerów i urządzeń współdzieloną w `ReadView` (`desc_insert/desc_remove/desc_query`), bez skanu pamięci aplikacji po stronie klienta, z powrotem do strumienia sterującego po odmowie.
+**Znaleziony błąd (naprawiony):** wpis widoku zdejmowałem z tabeli dopiero PO `vkDestroyImageView`, więc wątek odczytu mógł użyć właśnie zniszczonego widoku: `vkQueueSubmit2 -> -4` (`VK_ERROR_DEVICE_LOST`) i wywalenie gry w kilku przebiegach. Teraz wpis jest zdejmowany PRZED zniszczeniem (blokada zapisu czeka na zapytania w toku).
+**Pomiar (Cyberpunk, A/B/A, jeden przebieg na wariant):**
+
+| Wariant | FPS |
+|---|---|
+| kanał włączony, zależność od ostatniej ramki (pierwsza wersja) | 32,57 (inne: 2 nieudane próby) |
+| kanał włączony, zależność od ramki obiektu | 32,01 / 31,72 |
+| kanał włączony, po poprawce wyścigu | 30,62 / 31,97 |
+| kanał wyłączony (ta sama seria) | 32,52 / 32,43 / 33,25 |
+
+Po poprawce kanał obsłużył 39 tys. zapytań, średnio 1,86 ms (z tego 0,45 ms czekania na wspólny mutex połączenia, reszta to samo wywołanie), wobec ok. 2,9 ms zwykłą drogą; mimo szybszego pojedynczego zapytania FPS jest NIŻSZY o ok. 1-2 (poza rozrzutem pojedynczych przebiegów trudno stwierdzić więcej). Wniosek: blokowanie wątków renderu na tych zapytaniach nie jest tym, co ogranicza klatkę, albo koszt przeniesiony (wspólny mutex kanału, wątek odczytu serwera, utrata lokalnego cache) go zjada. Opcja zostaje, ale domyślnie wyłączona; nie rozwijam jej dalej.

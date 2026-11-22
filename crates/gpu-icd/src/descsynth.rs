@@ -179,6 +179,27 @@ pub unsafe fn input_of(info: *const u8) -> Option<(u32, u64, u64)> {
     Some((ty, std::ptr::read_unaligned(p.add(16) as *const u64), std::ptr::read_unaligned(p.add(24) as *const u64)))
 }
 
+/// Identyfikatory obiektów (widok obrazu, sampler) użytych w `VkDescriptorGetInfoEXT`: `Some(vec)` dla deskryptorów obrazów i samplerów, `None` dla reszty (nieznane typy).
+/// Typy: 0 sampler (`pSampler` -> VkSampler), 1 połączony obraz+sampler, 2 obraz, 3 obraz zapisywalny, 10 załącznik wejściowy (`VkDescriptorImageInfo`: sampler @0, imageView @8).
+///
+/// # Safety
+/// `info` musi być zerem albo wskazywać na poprawne `VkDescriptorGetInfoEXT` (a wskaźnik w unii: na ważną strukturę).
+pub unsafe fn image_objects_of(info: *const u8) -> Option<Vec<u64>> {
+    if info.is_null() {
+        return None;
+    }
+    let ty = std::ptr::read_unaligned(info.add(16) as *const u32);
+    let p = std::ptr::read_unaligned(info.add(24) as *const *const u8);
+    if p.is_null() {
+        return None;
+    }
+    match ty {
+        0 => Some(vec![std::ptr::read_unaligned(p as *const u64)]),
+        1 | 2 | 3 | 10 => Some(vec![std::ptr::read_unaligned(p as *const u64), std::ptr::read_unaligned(p.add(8) as *const u64)]),
+        _ => None,
+    }
+}
+
 // ---------- bufory teksela (UNIFORM_TEXEL_BUFFER = 4, STORAGE_TEXEL_BUFFER = 5) ----------
 //
 // Sonda `descriptor_probe` (1008 próbek: 18 formatów x 7 zakresów x 4 adresy, RTX 3090 Ti, sterownik 580; surowe dane w

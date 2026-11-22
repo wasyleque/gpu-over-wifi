@@ -85,7 +85,24 @@ fn reads_loop<S: FrameSource, W: Write>(source: &mut S, writer: &mut W, view: &c
                     }
                 }
             }
-            Ok(_) => Response::Error { code: ERR_PROTOCOL, message: "only MemReadAfter on a reads connection".to_string() },
+            Ok(Request::QueryAfter { after, data }) => {
+                let t0 = std::time::Instant::now();
+                if !view.wait_for(after as u16, WAIT) {
+                    Response::Error { code: ERR_PROTOCOL, message: "timeout waiting for the control stream".to_string() }
+                } else {
+                    let t_wait = t0.elapsed();
+                    let t1 = std::time::Instant::now();
+                    let r = view.desc_query(&data);
+                    if stats_on() {
+                        note_chan_read(t0.saturating_duration_since(at), t_wait, t1.elapsed());
+                    }
+                    match r {
+                        Ok(d) => Response::Data(d),
+                        Err(c) => Response::Error { code: c, message: "query failed".to_string() },
+                    }
+                }
+            }
+            Ok(_) => Response::Error { code: ERR_PROTOCOL, message: "only MemReadAfter and QueryAfter on a reads connection".to_string() },
             Err(e) => return Err(ServeError::Msg(e)),
         };
         send_reply(writer, &frame, &reply)?;

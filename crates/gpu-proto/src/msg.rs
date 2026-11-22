@@ -115,6 +115,9 @@ pub enum Request {
     /// Odczyt pamięci na połączeniu odczytów: serwer czeka, aż strumień sterujący sesji wykona ramkę o numerze `after`, i dopiero wtedy czyta (bez
     /// czekania na ramki późniejsze). Odpowiedzi idą w kolejności żądań (`Data` albo `Error`).
     MemReadAfter { after: u64, memory: u64, offset: u64, len: u32 },
+    /// Zapytanie (jak `Query`) na połączeniu odczytów: serwer czeka, aż strumień sterujący wykona ramkę `after`, i wykonuje je na wątku odczytu, bez stania za pakietami poleceń.
+    /// Dozwolone tylko zapytania, które czytają wyłącznie obiekty z tabeli widoku sesji (dziś `vkGetDescriptorEXT`). Odpowiedź: `Data` (kod wyniku + parametry wyjściowe) albo `Error`.
+    QueryAfter { after: u64, data: Vec<u8> },
     /// Bez odpowiedzi: serwer czyta `len` bajtów obrazu z `memory` (po wykonaniu wcześniejszych poleceń)
     /// i wysyła je jako ramkę `seq` na połączeniu wideo. `format`: 1 = BGRA8, 2 = RGBA8 (jak `video::PixelFormat`);
     /// `codec`: 0 = surowe, 2 = LZ4 (jak `video::Codec`).
@@ -305,6 +308,11 @@ impl Request {
                 e.put_u64(*memory);
                 e.put_u64(*offset);
                 e.put_u32(*len);
+            }
+            Request::QueryAfter { after, data } => {
+                e.put_u8(26);
+                e.put_u64(*after);
+                e.put_bytes(data);
             }
             Request::PresentFrame { memory, len, seq, width, height, format, codec } => {
                 e.put_u8(15);
@@ -522,6 +530,14 @@ impl Request {
                 }
                 Request::MemReadAfter { after, memory, offset, len }
             }
+            26 => {
+                let after = d.get_u64()?;
+                let data = d.get_bytes()?;
+                if data.len() > MAX_BATCH {
+                    return Err(MsgError::LimitExceeded("batch"));
+                }
+                Request::QueryAfter { after, data: data.to_vec() }
+            }
             15 => {
                 let memory = d.get_u64()?;
                 let len = d.get_u32()?;
@@ -663,6 +679,7 @@ mod tests {
             Request::AttachVideo { session: u64::MAX },
             Request::AttachReads { session: 3 },
             Request::MemReadAfter { after: u64::MAX, memory: 5, offset: 1 << 33, len: 65536 },
+            Request::QueryAfter { after: 77, data: vec![3; 48] },
             Request::PresentFrame { memory: 9, len: 1_870_000, seq: 77, width: 650, height: 718, format: 1, codec: 2 },
         ]
     }

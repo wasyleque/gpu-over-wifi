@@ -734,6 +734,9 @@ pub struct Link {
     mem_last: std::collections::HashMap<u64, u16>,
     /// Licznik wszystkich ramek strumienia sterującego bez zawijania i jego wartości przy `last_sync` i zapisach pamięci (`mem_last_n`): pozwalają ocenić WIEK zależności.
     n_frames: u64,
+    /// Ile ramek `Cmds` wysłano i numery strumienia tych ramek (ostatnie `CMDS_RING`): zależność zapytania na kanale odczytów to ramka, w której powstał obiekt.
+    cmds_gen: u64,
+    cmds_ring: std::collections::VecDeque<u16>,
     last_sync_n: u64,
     mem_last_n: std::collections::HashMap<u64, u64>,
 }
@@ -831,7 +834,7 @@ impl Link {
             workers.push(h);
         }
         let direct = if std::env::var_os("GPU_ICD_SYNC_SEND").is_some() { Some(Mutex::new(direct_stream)) } else { None };
-        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0, mirror: Arc::new(MirrorGate { st: Default::default(), cv: Condvar::new(), dead: Default::default() }), mturn: 0, forget_pending: Vec::new(), last_sync: seq, mem_last: Default::default(), n_frames: 0, last_sync_n: 0, mem_last_n: Default::default() })
+        Ok(Link { out, shared, sender: Some(sender), workers, seq, direct, sent: 0, mirror: Arc::new(MirrorGate { st: Default::default(), cv: Condvar::new(), dead: Default::default() }), mturn: 0, forget_pending: Vec::new(), last_sync: seq, mem_last: Default::default(), n_frames: 0, cmds_gen: 0, cmds_ring: std::collections::VecDeque::new(), last_sync_n: 0, mem_last_n: Default::default() })
     }
 
     /// Opis stanu kolejki odpowiedzi (do diagnostyki zawieszeń).
@@ -863,6 +866,31 @@ impl Link {
         dep
     }
 
+    /// Numer ostatniej ramki strumienia sterującego (zależność dla zapytań na kanale odczytów: wszystko, co aplikacja wydała do tej chwili, jest już w ramkach).
+    pub fn last_seq(&self) -> u16 {
+        self.seq
+    }
+
+    const CMDS_RING: usize = 8192;
+
+    /// Numer ostatnio wysłanej ramki `Cmds`; następna partia poleceń będzie miała numer o 1 większy.
+    pub fn cmds_gen(&self) -> u64 {
+        self.cmds_gen
+    }
+
+    /// Numer strumienia ramki `Cmds` o numerze `g` (`None`: jeszcze niewysłana). Dla ramki starszej niż pamięć pierścienia: wartość uznawana przez serwer za dawno wykonaną.
+    pub fn cmds_seq(&self, g: u64) -> Option<u16> {
+        if g > self.cmds_gen {
+            return None;
+        }
+        let len = self.cmds_ring.len() as u64;
+        let oldest = self.cmds_gen + 1 - len.min(self.cmds_gen + 1);
+        if len == 0 || g < oldest {
+            return Some(self.seq.wrapping_sub(Self::READ_DEP_MAX_AGE as u16));
+        }
+        self.cmds_ring.get((g - oldest) as usize).copied()
+    }
+
     pub fn shared(&self) -> Arc<Shared> {
         self.shared.clone()
     }
@@ -879,6 +907,13 @@ const READ_DEP_MAX_AGE: u64 = 40000;
     fn frame(&mut self, req: &Request, out: &mut Vec<u8>) -> Result<(), ClientError> {
         self.seq = self.seq.wrapping_add(1);
         self.n_frames += 1;
+        if matches!(req, Request::Cmds { .. }) {
+            self.cmds_gen += 1;
+            self.cmds_ring.push_back(self.seq);
+            if self.cmds_ring.len() > Self::CMDS_RING {
+                self.cmds_ring.pop_front();
+            }
+        }
         if matches!(req, Request::Sync) {
             self.last_sync = self.seq;
             self.last_sync_n = self.n_frames;

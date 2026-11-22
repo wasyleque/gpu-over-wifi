@@ -60,6 +60,10 @@ pub fn get_for(session: u64) -> Option<Arc<ReadChan>> {
 
 pub static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static READ_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static QUERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static QUERY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static QUERY_LOCK_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static QUERY_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl ReadChan {
@@ -95,6 +99,35 @@ impl ReadChan {
                 eprintln!("[gpu-icd] kanał odczytów: błąd transportu, wyłączony: {e:?}");
                 self.broken.store(true, Ordering::Relaxed);
                 FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// Zapytanie (`vkGetDescriptorEXT`) po ramce `after`, wykonywane na wątku odczytu serwera. `None` = wołający wraca do strumienia sterującego; błąd transportu wyłącza kanał.
+    pub fn query(&self, after: u16, data: Vec<u8>) -> Option<Vec<u8>> {
+        let t = std::time::Instant::now();
+        let mut c = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        QUERY_LOCK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let r = c.call(&Request::QueryAfter { after: after as u64, data });
+        QUERY_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        match r {
+            Ok(Response::Data(d)) => {
+                QUERIES.fetch_add(1, Ordering::Relaxed);
+                Some(d)
+            }
+            Ok(_) | Err(gpu_renderd::client::ClientError::Remote(..)) => {
+                static SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if SEEN.fetch_add(1, Ordering::Relaxed) < 5 {
+                    eprintln!("[gpu-icd] kanał odczytów: serwer odmówił zapytania ({r:?})");
+                }
+                QUERY_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            Err(e) => {
+                eprintln!("[gpu-icd] kanał odczytów: błąd transportu, wyłączony: {e:?}");
+                self.broken.store(true, Ordering::Relaxed);
+                QUERY_FALLBACKS.fetch_add(1, Ordering::Relaxed);
                 None
             }
         }

@@ -572,6 +572,13 @@ impl Replayer {
                 }
             }
         }
+        // Obiekty używane przez zapytania na kanale odczytów (`QueryAfter`) zdejmujemy z jego tabeli PRZED zniszczeniem: blokada zapisu czeka na zapytania w toku, więc wątek
+        // odczytu nie użyje widoku, samplera ani urządzenia po `vkDestroy*` (wcześniej wpis znikał dopiero po wywołaniu, co dało use-after-free i VK_ERROR_DEVICE_LOST).
+        if matches!(cmd.name, "vkDestroyImageView" | "vkDestroySampler" | "vkDestroyDevice") {
+            if let (Some(v), Some(id)) = (&self.read_view, seen.get(if cmd.name == "vkDestroyDevice" { 0 } else { 1 })) {
+                v.desc_remove(*id);
+            }
+        }
         // Obiekty pomocnicze kopii GPU zwalniamy przed obiektami, na których wiszą (inaczej zostaną w sterowniku).
         if cmd.name == "vkDestroyDevice" {
             self.copy_forget_device(ints[0]);
@@ -644,6 +651,14 @@ impl Replayer {
                     continue;
                 }
                 self.registry.register(*id, Entry { kind, real, parent, size }).map_err(code)?;
+                if let Some(v) = self.read_view.clone() {
+                    v.desc_insert(kind, *id, real);
+                    if *kind == "VkDevice" {
+                        if let Ok(f) = self.func_by_name("vkGetDescriptorEXT") {
+                            v.set_desc_fn(f);
+                        }
+                    }
+                }
             }
         }
         if cmd.name == "vkAllocateDescriptorSets" && seen.len() >= 2 {
@@ -676,6 +691,7 @@ impl Replayer {
             self.registry.unregister(*id);
             if let Some(v) = &self.read_view {
                 v.remove(*id);
+                v.desc_remove(*id);
             }
             self.maps.remove(id);
             self.mirror.remove(id);

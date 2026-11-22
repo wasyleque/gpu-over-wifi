@@ -28,6 +28,11 @@ pub struct ReadView {
     table: RwLock<HashMap<u64, MapInfo>>,
     /// Wskaźnik na `vkInvalidateMappedMemoryRanges` (0 = jeszcze nieznany: odczyt zwraca błąd i klient wraca do strumienia sterującego).
     invalidate: AtomicUsize,
+    /// Obiekty potrzebne zapytaniom wykonywanym na wątku odczytu (`QueryAfter`): (rodzaj, identyfikator klienta) -> uchwyt rzeczywisty. Wykonawca wpisuje je przy tworzeniu
+    /// i usuwa przy niszczeniu (blokada zapisu czeka na zapytania w toku, jak przy odwzorowaniach pamięci), więc obiekt nie zniknie w trakcie wywołania sterownika.
+    desc: RwLock<HashMap<(u8, u64), u64>>,
+    /// Wskaźnik na `vkGetDescriptorEXT` (0 = nieznany: zapytanie dostaje błąd i klient wraca do strumienia sterującego).
+    desc_fn: AtomicUsize,
 }
 
 /// Ile ramek wstecz uznajemy za "już wykonane" (reszta okna 16 bitów to "jeszcze nie": ramka, na którą czekamy, jest co najwyżej `65536 - PAST_WINDOW` = 20536 ramek
@@ -50,6 +55,8 @@ impl ReadView {
             waiters: AtomicUsize::new(0),
             table: RwLock::new(HashMap::new()),
             invalidate: AtomicUsize::new(0),
+            desc: RwLock::new(HashMap::new()),
+            desc_fn: AtomicUsize::new(0),
         })
     }
 
@@ -102,6 +109,75 @@ impl ReadView {
 
     pub fn clear(&self) {
         self.table.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.desc.write().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    fn desc_kind(ty: &str) -> Option<u8> {
+        match ty {
+            "VkDevice" => Some(0),
+            "VkImageView" => Some(1),
+            "VkSampler" => Some(2),
+            _ => None,
+        }
+    }
+
+    pub fn set_desc_fn(&self, f: *const c_void) {
+        self.desc_fn.store(f as usize, Ordering::SeqCst);
+    }
+
+    /// Wpisuje obiekt używany przez zapytania na kanale odczytów (inne rodzaje są ignorowane).
+    pub fn desc_insert(&self, ty: &str, wire: u64, real: u64) {
+        if let Some(k) = Self::desc_kind(ty) {
+            self.desc.write().unwrap_or_else(|e| e.into_inner()).insert((k, wire), real);
+        }
+    }
+
+    /// Usuwa obiekt o identyfikatorze `wire` (identyfikatory są unikalne w instancji); wraca, gdy żadne zapytanie w toku go nie używa.
+    pub fn desc_remove(&self, wire: u64) {
+        let mut g = self.desc.write().unwrap_or_else(|e| e.into_inner());
+        for k in 0..3u8 {
+            g.remove(&(k, wire));
+        }
+    }
+
+    /// Wykonuje na wątku odczytu zapytanie `vkGetDescriptorEXT` (zakodowane jak `Request::Query`): kod wyniku + parametry wyjściowe albo `Err`.
+    /// Blokada odczytu tabeli obiektów trzyma widoki i samplery przez całe wywołanie sterownika.
+    pub fn desc_query(&self, data: &[u8]) -> Result<Vec<u8>, i32> {
+        use gpu_vkcodec::codec::{decode_command, encode_out_params, Ctx, Identity};
+        use gpu_vkcodec::CodecError;
+        struct DescCtx<'a>(&'a HashMap<(u8, u64), u64>);
+        impl Ctx for DescCtx<'_> {
+            fn handle_to_wire(&self, _ty: &str, raw: u64) -> Result<u64, CodecError> {
+                Ok(raw)
+            }
+            fn wire_to_handle(&self, ty: &str, wire: u64) -> Result<u64, CodecError> {
+                if wire == 0 {
+                    return Ok(0);
+                }
+                let k = ReadView::desc_kind(ty).ok_or(CodecError::Handle(wire))?;
+                self.0.get(&(k, wire)).copied().ok_or(CodecError::Handle(wire))
+            }
+        }
+        let f = self.desc_fn.load(Ordering::SeqCst);
+        if f == 0 {
+            return Err(-1);
+        }
+        let g = self.desc.read().unwrap_or_else(|e| e.into_inner());
+        let mut dec = gpu_wire::Decoder::new(data);
+        let dc = decode_command(&mut dec, &DescCtx(&g)).map_err(|_| -1)?.ok_or(-1)?;
+        if dc.command.name != "vkGetDescriptorEXT" || dec.remaining() != 0 {
+            return Err(-1);
+        }
+        let args = dc.args.ptr as *const u8;
+        // SAFETY: sloty parametrów (8 B) leżą w arenie dekodera; wskaźniki w nich (struktura wejściowa, bufor wyjściowy) też.
+        let ints: Vec<u64> = dc.command.params().iter().map(|p| unsafe { std::ptr::read_unaligned(args.add(p.offset as usize) as *const u64) }).collect();
+        // SAFETY: `f` to `vkGetDescriptorEXT` (device, pDescriptorInfo, dataSize, pDescriptor); uchwyty są prawdziwe i chronione blokadą odczytu tabeli.
+        unsafe { crate::vk::replay::call_thunk(f as *const c_void, &ints, &[]) }.ok_or(-1)?;
+        let mut enc = gpu_wire::Encoder::new();
+        enc.put_u32(0);
+        // SAFETY: `dc.args` to świeżo odtworzone i wykonane parametry tego polecenia.
+        unsafe { encode_out_params(dc.command, dc.args.ptr, &mut enc, &Identity) }.map_err(|_| -1)?;
+        Ok(enc.finish())
     }
 
     /// Kopiuje `len` bajtów z `memory` od `offset` (po `vkInvalidateMappedMemoryRanges`). `Err` = nieznana pamięć/zakres albo brak funkcji.

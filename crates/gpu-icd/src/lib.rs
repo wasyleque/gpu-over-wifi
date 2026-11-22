@@ -99,6 +99,8 @@ struct InstState {
     seen_pages: std::collections::HashSet<u64>,
     /// Cache wymagań pamięci obrazów i buforów (bez obiegu po sieci dla identycznych obiektów).
     memreq: memreq::MemReqCache,
+    /// Widoki obrazów i samplery -> numer partii poleceń (`Link::cmds_gen`), w której zostały utworzone (zależność zapytań o deskryptory na kanale odczytów).
+    pub(crate) obj_gen: std::collections::HashMap<u64, u64>,
     /// Księgowość pul i układów deskryptorów (spekulatywne odpowiedzi na `vkAllocateDescriptorSets`).
     desc: descpool::DescriptorAccounts,
     /// Czy pamięć wolno odświeżać z serwera po oczekiwaniu (typ HOST_CACHED albo mała); duże pamięci write-combined czyta się wolno.
@@ -403,6 +405,7 @@ unsafe extern "C" fn create_instance(info: *const u8, _alloc: *const c_void, out
             },
             seen_pages: Default::default(),
             memreq: Default::default(),
+            obj_gen: Default::default(),
             mem_refresh: HashMap::new(),
             mem_cached: HashMap::new(),
             mem_upload: Default::default(),

@@ -447,7 +447,7 @@ impl<B: GpuBackend> Session<B> {
                     self.enc.new_stream(tx); // nowy strumień zaczyna się od IDR
                     Response::Handle(id)
                 }
-                Request::AttachReads { .. } | Request::MemReadAfter { .. } => Response::Error { code: ERR_PROTOCOL, message: "reads only on a reads connection (AttachReads first)".to_string() },
+                Request::AttachReads { .. } | Request::MemReadAfter { .. } | Request::QueryAfter { .. } => Response::Error { code: ERR_PROTOCOL, message: "reads only on a reads connection (AttachReads first)".to_string() },
                 Request::AttachVideo { .. } => Response::Error { code: ERR_PROTOCOL, message: "attach only as the first request of a video connection".to_string() },
                 Request::PresentFrame { memory, len, seq, width, height, format, codec } => {
                     let r = self.present_frame(memory, len, seq, width, height, format, codec);

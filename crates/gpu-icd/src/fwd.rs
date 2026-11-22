@@ -189,6 +189,8 @@ pub struct Flags {
     pub sem_cache: bool,
     /// G1: spekulacyjny `vkGetDescriptorEXT` zaraz po `vkCreateImageView` (`GPU_ICD_DESC_PREFETCH=1`).
     pub desc_prefetch: bool,
+    /// `GPU_ICD_DESC_CHAN=1`: zapytania `vkGetDescriptorEXT`, które nie dały się obsłużyć lokalnie, idą kanałem odczytów (wątek odczytu serwera), a nie strumieniem sterującym za pakietami poleceń.
+    pub desc_chan: bool,
     pub debug: bool,
     pub trace: bool,
     pub periodic: bool,
@@ -223,6 +225,7 @@ pub fn flags() -> &'static Flags {
     static F: std::sync::OnceLock<Flags> = std::sync::OnceLock::new();
     F.get_or_init(|| Flags {
         desc_prefetch: std::env::var_os("GPU_ICD_DESC_PREFETCH").is_some(),
+        desc_chan: std::env::var("GPU_ICD_DESC_CHAN").is_ok_and(|v| v == "1"),
         sem_cache: on_by_default("GPU_ICD_SEM_CACHE"),
         lazy_scan_one: on_by_default("GPU_ICD_LAZY_SCAN_ONE"),
         no_refresh_uncached: std::env::var_os("GPU_ICD_NO_REFRESH_UNCACHED").is_some(),
@@ -2142,7 +2145,14 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
             slots[i] = if total == 0 { 0 } else { remaining.min(slice_ns) };
         }
         let t_ph0 = std::time::Instant::now();
-        let r = match exec_begin(&mut st, op, &mut slots, false) {
+        let mut chan_retry = false;
+        let step = {
+            ALLOW_CHAN.with(|c| c.set(true));
+            let s = exec_begin(&mut st, op, &mut slots, false);
+            ALLOW_CHAN.with(|c| c.set(false));
+            s
+        };
+        let r = match step {
             Step::Done(v) => v,
             Step::Pending(p) if flags().locked_wait => {
                 let resp = p.receive();
@@ -2167,6 +2177,13 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
                 LOCK_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 hold = HoldTimer(std::time::Instant::now(), op);
                 let t_ph3 = std::time::Instant::now();
+                if resp.retry {
+                    // Kanał odczytów odmówił: to samo polecenie jeszcze raz, zwykłą drogą (strumień sterujący).
+                    CHAN_RETRY.with(|c| c.set(true));
+                    chan_retry = true;
+                    drop(p);
+                    0
+                } else {
                 let rr = exec_finish(&mut st, p, resp);
                 if cmd.name.starts_with("vkWaitSemaphores") {
                     use std::sync::atomic::Ordering::Relaxed;
@@ -2180,8 +2197,12 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
                     }
                 }
                 rr
+                }
             }
         };
+        if chan_retry {
+            continue;
+        }
         // Odcinek upłynął bez spełnienia warunku (VK_TIMEOUT = 2), a limit aplikacji jeszcze nie: odpuszczamy blokadę na chwilę i pytamy ponownie.
         let timed_out = r as u32 as i32 == 2;
         let more = match (wait_idx, wait_total) {
@@ -2288,6 +2309,7 @@ fn periodic_stats(stats: &Stats) {
             let qn = FETCH_Q_N.load(Relaxed).max(1);
             eprintln!("[gpu-icd] kolejka nadawcza przed odczytem leniwym: średnio {} KB w {:.1} partiach ({} odczytów)", FETCH_Q_BYTES.load(Relaxed) / qn / 1024, FETCH_Q_ITEMS.load(Relaxed) as f64 / qn as f64, qn);
             eprintln!("[gpu-icd] kanał odczytów: {} odczytów, średnio {} µs, ucieczek do strumienia sterującego {}", crate::readchan::READS.load(Relaxed), crate::readchan::READ_NS.load(Relaxed) / 1000 / crate::readchan::READS.load(Relaxed).max(1), crate::readchan::FALLBACKS.load(Relaxed));
+            eprintln!("[gpu-icd] kanał odczytów, zapytania o deskryptory: {} zapytań, średnio {} µs (w tym czekanie na połączenie {} µs), powrotów do strumienia sterującego {}", crate::readchan::QUERIES.load(Relaxed), crate::readchan::QUERY_NS.load(Relaxed) / 1000 / crate::readchan::QUERIES.load(Relaxed).max(1), crate::readchan::QUERY_LOCK_NS.load(Relaxed) / 1000 / crate::readchan::QUERIES.load(Relaxed).max(1), crate::readchan::QUERY_FALLBACKS.load(Relaxed));
             {
                 let n = crate::link::RECV_N.load(Relaxed).max(1);
                 eprintln!("[gpu-icd] odbiór odpowiedzi: {} odbiorów, średnio czekanie na swoją kolej {} µs, samo odczytanie ramki {} µs", n, crate::link::TURN_WAIT_NS.load(Relaxed) / 1000 / n, crate::link::READ_ONE_NS.load(Relaxed) / 1000 / n);
@@ -3128,6 +3150,9 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         let key = if cmd.name == "vkCreateImage" { crate::memreq::MemReqCache::image_key(slots[1] as *const u8) } else { crate::memreq::MemReqCache::buffer_key(slots[1] as *const u8) };
         st.memreq.object_created(id, key);
     }
+    if (cmd.name == "vkDestroyImageView" || cmd.name == "vkDestroySampler") && slots[1] != 0 {
+        st.obj_gen.remove(&slots[1]);
+    }
     if (cmd.name == "vkDestroyImage" || cmd.name == "vkDestroyBuffer") && slots[1] != 0 {
         st.memreq.object_destroyed(slots[1]);
         st.gpuw.buffer_destroyed(slots[1]);
@@ -3200,6 +3225,11 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         if st.batch.len() > batch_flush() {
             st.flush();
         }
+        if matches!(cmd.name, "vkCreateImageView" | "vkCreateSampler") && slots.len() >= 4 && slots[3] != 0 {
+            let id = std::ptr::read_unaligned(slots[3] as *const u64);
+            // Ta komenda siedzi w partii, która pójdzie jako następna ramka `Cmds`.
+            st.obj_gen.insert(id, st.client.cmds_gen() + 1);
+        }
         if cmd.name == "vkCreateImageView" && flags().desc_prefetch && slots.len() >= 4 && slots[3] != 0 {
             let view = std::ptr::read_unaligned(slots[3] as *const u64);
             prefetch_view_descriptors(st, slots[0], view);
@@ -3211,6 +3241,60 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
     let deferred_fail = crate::link::DEFERRED_FAIL.swap(0, std::sync::atomic::Ordering::Relaxed);
     if deferred_fail != 0 {
         return Step::Done(fail(deferred_fail));
+    }
+    // Zapytanie o deskryptor poza strumieniem sterującym (`GPU_ICD_DESC_CHAN=1`): serwer wykonuje je na wątku odczytu, gdy tylko wykona poprzedzające je polecenia
+    // (np. `vkCreateImageView`), zamiast za całym pakietem poleceń; bez skanu pamięci aplikacji (deskryptor zależy tylko od obiektów GPU). Odpowiedź wraca bez blokady instancji.
+    let no_chan = CHAN_RETRY.with(|c| c.replace(false));
+    if cmd.name == "vkGetDescriptorEXT" && flags().desc_chan && !flags().locked_wait && !no_chan && ALLOW_CHAN.with(|c| c.get()) && st.session != 0 {
+        if let Some(ch) = crate::readchan::get_for(st.session) {
+            // Zależność: ramka, w której powstały obiekty z zapytania (widok, sampler); zwykle dawno wykonana, więc zapytanie nie czeka za pakietami późniejszymi.
+            // Obiekt z jeszcze niewysłanej partii albo nieznany: wysyłamy partię i czekamy na ostatnią ramkę (jak wcześniej).
+            let objs = crate::descsynth::image_objects_of(slots[1] as *const u8);
+            let mut need: Option<u64> = Some(0);
+            match &objs {
+                None => need = None,
+                Some(ids) => {
+                    for id in ids.iter().filter(|i| **i != 0) {
+                        match (st.obj_gen.get(id), need) {
+                            (Some(g), Some(n)) => need = Some(n.max(*g)),
+                            _ => need = None,
+                        }
+                    }
+                }
+            }
+            if need.is_none_or(|g| g > st.client.cmds_gen()) && !st.batch.is_empty() {
+                let data = std::mem::take(&mut st.batch);
+                st.stats.cmd_bytes += data.len() as u64;
+                st.stats.cmd_batches += 1;
+                if st.client.send(&Request::Cmds { data }).is_err() {
+                    st.lose();
+                }
+            }
+            let after = match need {
+                Some(0) => st.client.cmds_seq(0).unwrap_or_else(|| st.client.last_seq().wrapping_sub(40000)),
+                Some(g) => st.client.cmds_seq(g).unwrap_or_else(|| st.client.last_seq()),
+                None => st.client.last_seq(),
+            };
+            st.stats.roundtrips += 1;
+            return Step::Pending(Pending {
+                op,
+                slots_ptr: slots.as_mut_ptr(),
+                slots_len: slots.len(),
+                pre_ids: Vec::new(),
+                hot: Vec::new(),
+                alloc_ctx: None,
+                speculated: false,
+                audited: false,
+                desc_key,
+                query_key: None,
+                base: 0,
+                sent_ok: true,
+                t_recv: std::time::Instant::now(),
+                submit_gen: st.submit_gen,
+                shared: st.client.shared(),
+                chan: Some((ch, after, bytes)),
+            });
+        }
     }
     // DIAGNOSTYKA, nie rozwiązanie: `GPU_ICD_DIAG_NOSCAN=1` pomija skan zapisów aplikacji przy oczekiwaniach (dane aplikacji mogą nie dotrzeć), żeby zmierzyć górną granicę zysku z usunięcia skanu spod blokady.
     static DIAG_NOSCAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -3298,6 +3382,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         t_recv: std::time::Instant::now(),
         submit_gen: st.submit_gen,
         shared: st.client.shared(),
+        chan: None,
     })
 }
 
@@ -3319,6 +3404,8 @@ pub(crate) struct Pending {
     t_recv: std::time::Instant,
     submit_gen: u64,
     shared: std::sync::Arc<crate::link::Shared>,
+    /// Zapytanie wysłane kanałem odczytów zamiast strumieniem sterującym: (kanał, ramka zależności, zakodowane polecenie).
+    chan: Option<(std::sync::Arc<crate::readchan::ReadChan>, u16, Vec<u8>)>,
 }
 
 /// Wynik pierwszej fazy wykonania polecenia: gotowa wartość albo oczekiwanie na odpowiedź serwera.
@@ -3333,14 +3420,23 @@ pub(crate) struct Responses {
     sy: Result<Response, gpu_renderd::client::ClientError>,
     deltas: Vec<Option<Vec<u8>>>,
     hot: Vec<Option<Vec<u8>>>,
+    /// Kanał odczytów odmówił: wołający powtarza polecenie zwykłą drogą (strumień sterujący).
+    retry: bool,
 }
 
 impl Pending {
     /// Odbiera odpowiedzi w kolejności biletów; nie wymaga blokady instancji (to cały sens: inne wątki gry pracują w tym czasie).
     pub(crate) fn receive(&self) -> Responses {
+        if let Some((ch, after, data)) = &self.chan {
+            let closed = || Err(gpu_renderd::client::ClientError::Closed);
+            return match ch.query(*after, data.clone()) {
+                Some(d) => Responses { q: Ok(Response::Data(d)), sy: Ok(Response::Synced { error: 0 }), deltas: Vec::new(), hot: Vec::new(), retry: false },
+                None => Responses { q: closed(), sy: closed(), deltas: Vec::new(), hot: Vec::new(), retry: true },
+            };
+        }
         if !self.sent_ok {
             let closed = || Err(gpu_renderd::client::ClientError::Closed);
-            return Responses { q: closed(), sy: closed(), deltas: vec![None; self.pre_ids.len()], hot: vec![None; self.hot.len()] };
+            return Responses { q: closed(), sy: closed(), deltas: vec![None; self.pre_ids.len()], hot: vec![None; self.hot.len()], retry: false };
         }
         let q = self.shared.recv_at(self.base);
         let sy = self.shared.recv_at(self.base + 1);
@@ -3348,8 +3444,15 @@ impl Pending {
         let deltas = (0..self.pre_ids.len()).map(|i| if let Ok(Response::Data(d)) = self.shared.recv_at(self.base + 2 + i as u64) { Some(d) } else { None }).collect();
         let n0 = self.base + 2 + self.pre_ids.len() as u64;
         let hot = (0..self.hot.len()).map(|i| if let Ok(Response::Data(d)) = self.shared.recv_at(n0 + i as u64) { Some(d) } else { None }).collect();
-        Responses { q, sy, deltas, hot }
+        Responses { q, sy, deltas, hot, retry: false }
     }
+}
+
+thread_local! {
+    /// Ustawiane przez `forward_inner` na czas `exec_begin`: tylko ten wołający umie obsłużyć zapytanie wysłane kanałem odczytów (odbiór bez blokady i powrót do strumienia sterującego).
+    static ALLOW_CHAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Ponowienie po odmowie kanału odczytów: kolejne `exec_begin` tego samego polecenia idzie zwykłą drogą.
+    static CHAN_RETRY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Wykonuje polecenie w całości pod blokadą instancji (wołający już ją ma): pierwsza faza, odbiór odpowiedzi, druga faza.
