@@ -137,3 +137,24 @@ fn finish() {
         eprintln!("[tl] {s:>8} {d:>6} {t:<16} {n} lock={lw} recv={rv} relock={rl}");
     }
 }
+
+/// Czas zablokowania wątków w poleceniach z obiegiem po sieci, wg (wątek, polecenie): (liczba, suma µs). Diagnostyka ścieżki krytycznej
+/// (`GPU_ICD_STATS=periodic`): pokazuje, KTÓRY wątek czeka i na co, czego nie widać w zbiorczym "obiegi wg poleceń".
+static BLOCKED: Mutex<Option<std::collections::HashMap<(String, &'static str), (u64, u64)>>> = Mutex::new(None);
+
+pub fn blocked(cmd: &'static str, us: u64) {
+    let name = NAME.with(|n| n.clone());
+    let mut g = BLOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    let e = g.get_or_insert_with(Default::default).entry((name, cmd)).or_insert((0, 0));
+    e.0 += 1;
+    e.1 += us;
+}
+
+/// Pierwsze `n` pozycji wg sumarycznego czasu: "wątek/polecenie liczba x czas ms".
+pub fn blocked_report(n: usize) -> String {
+    let g = BLOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(m) = g.as_ref() else { return String::new() };
+    let mut v: Vec<_> = m.iter().collect();
+    v.sort_by_key(|(_, (_, us))| std::cmp::Reverse(*us));
+    v.iter().take(n).map(|((t, c), (k, us))| format!("{t}/{} {k}x {}ms", c.trim_start_matches("vk"), us / 1000)).collect::<Vec<_>>().join("; ")
+}

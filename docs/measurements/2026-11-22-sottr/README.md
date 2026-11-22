@@ -75,3 +75,21 @@ Jeden przebieg na wariant (część poprawy może być rozrzutem; liczba zapyta�
 
 `perf record -F 499 --call-graph dwarf` na `SOTTR.exe` (desktop, Ryzen 5 1600X). Udział w próbkach: kod gry (Wine PE, `[JIT]`) 45,8%, jądro 21,6%, `libgpu_icd_pipelined.so` 15,9%, libc 8,9%, d3d12core 2,6%. Wg wątków: `cdcMulticore Lo` 25,4%, `SOTTR.exe` 18,6%, `cdcMulticore Id` 15,9%, `cdcMulticore St` 14,3%; wątki ICD: kompresja `gpu-icd-frame0/1` po ok. 4%, wideo 3,4%. Największa pozycja jądra: `pagemap_scan_pmd_entry` 2,5% (śledzenie zmian pamięci), potem blokady `native_queued_spin_lock_slowpath` ~1%.
 Wniosek: sam ICD to ok. jedna szósta CPU klienta; kod gry dominuje. Luka do natywnych 74 FPS (ta sama maszyna) nie wynika więc głównie z kosztu CPU samego ICD, tylko z opóźnień i szeregowania (czekanie na GPU, `WaitSemaphores`, odczyty), do zbadania osobno. Jeden próbkowany odcinek.
+
+### Które wątki czekają na serwer (instrumentacja `zablokowane wątki`, 0.3.74)
+
+Nowa linia logu (`GPU_ICD_STATS=periodic`): czas zablokowania wątków w poleceniach z obiegiem po sieci, wg (wątek, polecenie). Przebieg DX12, czysty pomiar: **44,4 FPS**. Suma z ok. 170 s:
+
+| Wątek / polecenie | Wywołań | Suma | Uwagi |
+|---|---|---|---|
+| vkd3d_fence / WaitSemaphores | 144 tys. | 229 s | wątek pomocniczy, czeka na GPU |
+| vkd3d_queue / WaitSemaphores | 31 tys. | 129 s | wątek pomocniczy |
+| vkd3d-swapchain / WaitSemaphores | 13 tys. | 51 s | |
+| ResourceCreatio / GetImageSparseMemoryRequirements | 23 tys. | 38 s | ładowanie zasobów |
+| ResourceCreatio / GetDescriptorEXT | 17,5 tys. | 37 s | |
+| SOTTR.exe / GetDescriptorEXT | 5,3 tys. | 14,8 s | wątek główny gry, ok. 9% czasu |
+| cdcMulticore St / WaitSemaphores | 4 tys. | 11,3 s | wątek renderu gry, ok. 7% |
+| cdcMulticore Lo / GetDescriptorEXT | 318 | 1,4 s | |
+
+Wątki renderu gry (`cdcMulticore *`, `SOTTR.exe`) blokują się w zapytaniach tylko ok. 7-9% czasu; wielkie sumy to wątki pomocnicze vkd3d czekające na GPU (czekanie z natury). Hamulec klatek: 736 ms łącznie w 170 s, czyli nie ogranicza. Z profilu `perf`: koszt ICD w wątkach gry to ok. 10% ich CPU (`forward_inner`, `enc_struct`, `find_struct`, `read_uint`), kod gry ok. 60%, jądro ok. 18%.
+Wniosek: ani zapytania synchroniczne, ani koszt kodowania nie tłumaczą luki do natywnych 74 FPS (łącznie górna granica ok. 15-20%). Hipoteza do sprawdzenia: opóźnienie wykonania klatki na serwerze (od `vkQueueSubmit` do sygnału fence) w połączeniu z limitem klatek w locie samej gry (vkd3d czeka na fence klatki N-2).

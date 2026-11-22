@@ -2203,6 +2203,9 @@ unsafe fn forward_inner(op: u16, ints: [u64; 14], floats: [f64; 8]) -> u64 {
     if st.stats.roundtrips > rt0 && !matches!(cmd.name, "vkWaitSemaphores" | "vkWaitSemaphoresKHR" | "vkWaitForFences" | "vkQueueWaitIdle" | "vkDeviceWaitIdle" | "vkQueuePresentKHR") {
         qlat_record(t0.elapsed().as_micros() as u64);
     }
+    if flags().periodic && st.stats.roundtrips > rt0 {
+        crate::timeline::blocked(cmd.name, t0.elapsed().as_micros() as u64);
+    }
     trace(cmd.name, r, t0.elapsed().as_micros());
     periodic_stats(&st.stats);
     r
@@ -2268,6 +2271,7 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        eprintln!("[gpu-icd] zablokowane wątki (wątek/polecenie): {}", crate::timeline::blocked_report(14));
         {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!("[gpu-icd] skany pamięci wg przyczyny [flush, odczyt leniwy, EndCommandBuffer, G1, obieg synchroniczny]: {:?}", SETTLE_BY.iter().map(|c| c.load(Relaxed)).collect::<Vec<_>>());
