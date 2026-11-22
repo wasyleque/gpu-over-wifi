@@ -59,3 +59,14 @@ Po wsparciu pamięci rzadkiej (patrz wyżej) Shadow of the Tomb Raider w trybie 
 | DX12, z cache zapytań rzadkich (0.3.71) | **38,2** | 24,9 / 41,7 / 49,2 ms | 19 | 0 | 103 ms | <20 ms / 374 ms |
 
 Zmiana: `vkGetPhysicalDeviceSparseImageFormatProperties2` i `vkGetImageSparseMemoryRequirements(2)` dopisane do cache zapytań (`query_cacheable`). Liczba zapytań z obiegiem po sieci spadła z 169 tys. do 84 tys., a czas jednego `GetImageSparseMemoryRequirements` z 3,3 do 1,4 ms. Przestoje 300-950 ms po załadowaniu drugiej sceny zniknęły. Nadal wolne: `WaitSemaphores` (94 tys. po 3,4 ms), `GetDescriptorEXT`; `GetShaderModuleIdentifierEXT` pojawił się tylko w pierwszym przebiegu (67 tys. zapytań) i do zbadania. To jeden przebieg na wariant.
+
+### Synteza deskryptorów tekseli: 5 nowych formatów (0.3.72)
+
+Najczęstsze chybienia syntezy `vkGetDescriptorEXT` w SOTTR DX12 to bufory tekseli formatów 101 (R32G32_UINT) i 107 (R32G32B32A32_UINT), których nie było w tabeli. Sonda na RTX 3090 Ti (`descriptor_probe`, dane: `docs/measurements/descriptor-probes/texel-buffer-rtx3090ti-580-more-formats.txt`) dała wzory `adres >> k`, `zakres >> k`, stała: 99 (k=2, 4115), 101 (3, 3210), 102 (3, 3437), 107 (4, 2777), 108 (4, 2957), zgodne na wszystkich 56 próbkach każdego formatu. Format 104 (12-bajtowy teksel) zostaje na serwerze.
+
+| Przebieg (DX12, 1080p, High, vsync off) | Średnie FPS | p50 / p95 / p99 | Klatki > 60 ms | Maks. | Zapytania z obiegiem | `GetDescriptorEXT` do serwera |
+|---|---|---|---|---|---|---|
+| 0.3.71 | 38,2 | 24,9 / 41,7 / 49,2 ms | 19 | 103 ms | 84 tys. | 57 tys. po 1,8 ms |
+| 0.3.72 | **42,8** | 21,4 / 37,0 / 43,2 ms | 14 | 146 ms | 50 tys. | 23 tys. po 2,3 ms |
+
+Jeden przebieg na wariant (część poprawy może być rozrzutem; liczba zapytań do serwera jest jednak zmierzona wprost). Natywnie na GTX 1080 Ti: 74 FPS.

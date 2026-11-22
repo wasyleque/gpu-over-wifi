@@ -138,7 +138,7 @@ fn probe_buffer_descriptor_encoding() {
         println!("SWEEPA {k} {}", hex(&d));
     }
     // Teksele (UNIFORM/STORAGE_TEXEL_BUFFER, 16 B): wzór zależy od formatu, więc sondujemy formaty x zakresy x adresy (diagnostyka do `descsynth`).
-    let formats = [9u32, 13, 37, 43, 44, 50, 64, 70, 74, 76, 81, 83, 97, 100, 103, 106, 109, 122];
+    let formats = [9u32, 13, 37, 43, 44, 50, 64, 70, 74, 76, 81, 83, 97, 100, 103, 106, 109, 122, 99, 101, 102, 107, 108];
     for ty in [4u32, 5] {
         for &f in &formats {
             for &r in &[4u64, 16, 64, 256, 4096, 65536, 1 << 20] {
