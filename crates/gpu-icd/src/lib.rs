@@ -715,10 +715,39 @@ unsafe extern "C" fn get_image_format_properties(p: *mut c_void, format: u32, ty
     r
 }
 
-unsafe extern "C" fn get_sparse_image_format_properties(_p: *mut c_void, _f: u32, _t: u32, _s: u32, _usage: u32, _tiling: u32, count: *mut u32, _out: *mut u8) {
-    if let Some(c) = count.as_mut() {
+/// `vkGetPhysicalDeviceSparseImageFormatProperties` (bez `2`): składamy z wariantu `2`, przekazywanego do prawdziwej karty. Wcześniej zawsze zwracał 0 właściwości, więc vkd3d-proton
+/// uznawał, że karta nie wspiera zasobów rzadkich ("Sparse images not supported with format ..."), a gry DX12 z zasobami rezerwowanych (Shadow of the Tomb Raider: `CreateReservedResource`) padały.
+unsafe extern "C" fn get_sparse_image_format_properties(p: *mut c_void, format: u32, ty: u32, samples: u32, usage: u32, tiling: u32, count: *mut u32, out: *mut u8) {
+    let Some(c) = count.as_mut() else { return };
+    let Some((op, _)) = gpu_proto::meta::find_command("vkGetPhysicalDeviceSparseImageFormatProperties2") else {
         *c = 0;
+        return;
+    };
+    // SAFETY: wpis tabeli dla tego polecenia to funkcja o sygnaturze (physicalDevice, pFormatInfo, pPropertyCount, pProperties).
+    let f2: unsafe extern "C" fn(*mut c_void, *const u8, *mut u32, *mut u8) = std::mem::transmute(icd_table::ENTRIES[op as usize] as usize);
+    // VkPhysicalDeviceSparseImageFormatInfo2 (40 B): sType @0, pNext @8, format @16, type @20, samples @24, usage @28, tiling @32.
+    let mut info = [0u8; 40];
+    info[0..4].copy_from_slice(&1_000_059_008u32.to_le_bytes());
+    for (at, v) in [(16usize, format), (20, ty), (24, samples), (28, usage), (32, tiling)] {
+        info[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
+    if out.is_null() {
+        f2(p, info.as_ptr(), count, std::ptr::null_mut());
+        return;
+    }
+    // VkSparseImageFormatProperties2 (40 B): sType @0, pNext @8, properties @16 (VkSparseImageFormatProperties, 20 B: aspectMask, imageGranularity x3, flags).
+    let cap = *c as usize;
+    let mut tmp = vec![0u8; cap * 40];
+    for i in 0..cap {
+        tmp[i * 40..i * 40 + 4].copy_from_slice(&1_000_059_007u32.to_le_bytes());
+    }
+    let mut n = cap as u32;
+    f2(p, info.as_ptr(), &mut n, tmp.as_mut_ptr());
+    let n = (n as usize).min(cap);
+    for i in 0..n {
+        std::ptr::copy_nonoverlapping(tmp.as_ptr().add(i * 40 + 16), out.add(i * 20), 20);
+    }
+    *c = n as u32;
 }
 
 const VK_TRUE_U32: u32 = 1;

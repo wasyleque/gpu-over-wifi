@@ -57,6 +57,21 @@ unsafe fn read_uint(meta: &StructMeta, base: *const u8, name: &str) -> Option<u6
         }
         return read_uint(find_struct(m.type_name)?, p, rest);
     }
+    // Parametr-wskaźnik na licznik w trybie wejście/wyjście (`uint32_t* pSparseMemoryRequirementCount`, `pPropertyCount` itp.): długość tablicy wynika z wartości, na którą
+    // wskazuje. Wartość wejściowa jest przesyłana razem ze wskaźnikiem (skalary za wskaźnikiem kodujemy z zawartością), a serwer dekoduje licznik przed tablicą.
+    // Bez tego `vkGetImageSparseMemoryRequirements` kończył się `BadLen("nieznany identyfikator")` (Shadow of the Tomb Raider DX12: zasoby rezerwowane).
+    if let Some(m) = meta.members().iter().find(|m| m.name == name && m.shape == Shape::Pointer && m.ptr_depth == 1 && m.elem == Elem::Scalar && matches!(m.elem_size, 1 | 2 | 4 | 8)) {
+        let ptr = std::ptr::read_unaligned(base.add(m.offset as usize) as *const *const u8);
+        if ptr.is_null() {
+            return None;
+        }
+        return Some(match m.elem_size {
+            1 => *ptr as u64,
+            2 => std::ptr::read_unaligned(ptr as *const u16) as u64,
+            4 => std::ptr::read_unaligned(ptr as *const u32) as u64,
+            _ => std::ptr::read_unaligned(ptr as *const u64),
+        });
+    }
     let m = meta.members().iter().find(|m| m.name == name && m.shape == Shape::Value && m.elem == Elem::Scalar && m.count == 1)?;
     let p = base.add(m.offset as usize);
     Some(match m.elem_size {
