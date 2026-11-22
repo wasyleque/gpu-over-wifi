@@ -70,3 +70,8 @@ Najczęstsze chybienia syntezy `vkGetDescriptorEXT` w SOTTR DX12 to bufory tekse
 | 0.3.72 | **42,8** | 21,4 / 37,0 / 43,2 ms | 14 | 146 ms | 50 tys. | 23 tys. po 2,3 ms |
 
 Jeden przebieg na wariant (część poprawy może być rozrzutem; liczba zapytań do serwera jest jednak zmierzona wprost). Natywnie na GTX 1080 Ti: 74 FPS.
+
+### Profil CPU klienta (perf, 15 s w benchmarku, DX12, 0.3.72)
+
+`perf record -F 499 --call-graph dwarf` na `SOTTR.exe` (desktop, Ryzen 5 1600X). Udział w próbkach: kod gry (Wine PE, `[JIT]`) 45,8%, jądro 21,6%, `libgpu_icd_pipelined.so` 15,9%, libc 8,9%, d3d12core 2,6%. Wg wątków: `cdcMulticore Lo` 25,4%, `SOTTR.exe` 18,6%, `cdcMulticore Id` 15,9%, `cdcMulticore St` 14,3%; wątki ICD: kompresja `gpu-icd-frame0/1` po ok. 4%, wideo 3,4%. Największa pozycja jądra: `pagemap_scan_pmd_entry` 2,5% (śledzenie zmian pamięci), potem blokady `native_queued_spin_lock_slowpath` ~1%.
+Wniosek: sam ICD to ok. jedna szósta CPU klienta; kod gry dominuje. Luka do natywnych 74 FPS (ta sama maszyna) nie wynika więc głównie z kosztu CPU samego ICD, tylko z opóźnień i szeregowania (czekanie na GPU, `WaitSemaphores`, odczyty), do zbadania osobno. Jeden próbkowany odcinek.
