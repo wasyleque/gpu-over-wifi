@@ -162,15 +162,20 @@ impl InferssdBackend {
             None => (Stdio::null(), Stdio::null()),
         };
         let args = self.command_args(path)?;
-        Command::new(&self.cfg.binary)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr)
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("start {}: {e}", self.cfg.binary.display()))
+        let mut cmd = Command::new(&self.cfg.binary);
+        cmd.args(&args).stdin(Stdio::null()).stdout(stdout).stderr(stderr).process_group(0).kill_on_drop(true);
+        // ETXTBSY (os error 26): świeżo zapisany plik wykonywalny bywa jeszcze otwarty do zapisu w równoległym `fork` innego wątku (w testach: skrypt atrapy);
+        // to chwilowy stan, więc krótko ponawiamy zamiast zgłaszać błąd (przyczyna sporadycznych porażek `failed_start_is_reported_and_not_retried_in_a_loop`).
+        let mut tries = 0;
+        loop {
+            match cmd.spawn() {
+                Err(e) if e.raw_os_error() == Some(26) && tries < 20 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                r => return r.map_err(|e| format!("start {}: {e}", self.cfg.binary.display())),
+            }
+        }
     }
 
     /// Czeka, aż serwer odpowie na `/v1/models`; przerywa, gdy proces zginie lub minie limit.
