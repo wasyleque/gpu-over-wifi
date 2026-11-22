@@ -97,6 +97,62 @@ static CMD_TIMES: std::sync::LazyLock<std::sync::Mutex<CmdTimes>> = std::sync::L
 /// Czas (ns) składników zapisu pamięci: prefiks+rozpakowanie, crc32c, kopia do pamięci odwzorowanej, kopia do lustra, skróty stron, flush.
 pub static MW_NS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 
+/// Pomiar po stronie serwera (`GPU_RENDERD_STATS`): czas od powrotu `vkQueueSubmit2` do osiągnięcia wartości sygnalizowanego semafora czasowego, czyli kolejka GPU plus
+/// wykonanie, bez sieci i bez czekania w kolejce żądań. Wątek odpytujący co 200 µs woła `vkGetSemaphoreCounterValue`. Przedziały [<2,<5,<10,<20,<40,<80,>=80 ms].
+struct Pending {
+    dev: u64,
+    sem: u64,
+    val: u64,
+    t: std::time::Instant,
+    f: usize,
+}
+static PENDING: std::sync::Mutex<Vec<Pending>> = std::sync::Mutex::new(Vec::new());
+static SUBMIT_LAT: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+static SUBMIT_LAT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Diagnostyka pomiaru: [wywołania note_submit, wpisy dodane, błędy odpytania, wpisy po limicie wieku].
+static SUBMIT_DBG: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+fn start_poller() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = std::thread::Builder::new().name("renderd-sublat".into()).spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_micros(200));
+            let mut g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            g.retain(|p| {
+                // SAFETY: `f` to `vkGetSemaphoreCounterValue` tej instancji; uchwyty pochodzą z udanego `vkQueueSubmit2` i są ważne, dopóki urządzenie żyje
+                // (po zniszczeniu urządzenia wywołanie zwróci błąd albo ostatnia wartość; wpis i tak zniknie po limicie wieku).
+                let mut v = 0u64;
+                let r = unsafe { std::mem::transmute::<usize, unsafe extern "C" fn(u64, u64, *mut u64) -> i32>(p.f)(p.dev, p.sem, &mut v) };
+                let age = p.t.elapsed();
+                if r != 0 {
+                    SUBMIT_DBG[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else if v < p.val && age >= std::time::Duration::from_secs(5) {
+                    SUBMIT_DBG[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if r == 0 && v >= p.val {
+                    let us = age.as_micros() as u64;
+                    let b = [2000u64, 5000, 10_000, 20_000, 40_000, 80_000].iter().position(|l| us < *l).unwrap_or(6);
+                    SUBMIT_LAT[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    SUBMIT_LAT[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    SUBMIT_LAT_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+                    return false;
+                }
+                r == 0 && age < std::time::Duration::from_secs(5)
+            });
+        });
+    });
+}
+
+pub fn submit_lat_report() -> String {
+    let n = SUBMIT_LAT[7].load(std::sync::atomic::Ordering::Relaxed);
+    let d: Vec<u64> = SUBMIT_DBG.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+    if n == 0 {
+        return format!("brak (diagnostyka [wywołania, wpisy, błędy odpytania, przeterminowane]: {d:?})");
+    }
+    let b: Vec<u64> = (0..7).map(|i| SUBMIT_LAT[i].load(std::sync::atomic::Ordering::Relaxed)).collect();
+    format!("{n} zgłoszeń, średnio {} µs; przedziały [<2, <5, <10, <20, <40, <80, >=80 ms]: {b:?}", SUBMIT_LAT_US.load(std::sync::atomic::Ordering::Relaxed) / n)
+}
+
 pub fn mw_report() -> String {
     use std::sync::atomic::Ordering::Relaxed;
     let v: Vec<u64> = MW_NS.iter().map(|a| a.load(Relaxed) / 1_000_000).collect();
@@ -380,6 +436,9 @@ impl Replayer {
             local.decode_ns += ns_since(t0);
             let t1 = tick();
             let r = self.run(&dc, &seen, false);
+            if r.is_ok() && stats_on() && dc.command.name.starts_with("vkQueueSubmit2") {
+                self.note_submit(&dc, &seen);
+            }
             if t1.is_some() {
                 let e = local.by_name.entry(dc.command.name).or_insert((0, 0));
                 e.0 += 1;
@@ -391,6 +450,48 @@ impl Replayer {
         };
         CMD_TIMES.lock().unwrap_or_else(|e| e.into_inner()).merge(local);
         result
+    }
+
+    /// Pomiar opóźnienia ukończenia: zapisuje (urządzenie, semafor, wartość) z sygnałów `VkSubmitInfo2` do listy odpytywanej przez `renderd-sublat`.
+    fn note_submit(&mut self, dc: &DecodedCommand, seen: &[u64]) {
+        let Ok(f) = self.func_by_name("vkGetSemaphoreCounterValue") else {
+            eprintln!("renderd-sublat: brak vkGetSemaphoreCounterValue");
+            return;
+        };
+        let Some(dev) = seen.first().and_then(|id| self.registry.get(*id)).map(|q| q.parent).filter(|d| *d != 0) else {
+            // `parent` w rejestrze to już RZECZYWISTY uchwyt nadrzędny (pierwszy parametr polecenia po dekodowaniu), nie identyfikator klienta.
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| eprintln!("renderd-sublat: nie znaleziono urządzenia kolejki (seen {:?})", seen.iter().take(4).map(|id| self.registry.get(*id).map(|e| (e.kind, e.parent))).collect::<Vec<_>>()));
+            return;
+        };
+        SUBMIT_DBG[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let args = dc.args.ptr as *const u8;
+        // SAFETY: sloty parametrów (queue, submitCount, pSubmits, fence) po 8 B w arenie dekodera; pSubmits to tablica VkSubmitInfo2 (64 B) z zagnieżdżonymi
+        // wskaźnikami w tej samej arenie; VkSemaphoreSubmitInfo (48 B): semaphore @16, value @24.
+        unsafe {
+            let (count, subs) = (std::ptr::read_unaligned(args.add(8) as *const u64).min(64) as usize, std::ptr::read_unaligned(args.add(16) as *const u64) as *const u8);
+            if subs.is_null() {
+                return;
+            }
+            let now = std::time::Instant::now();
+            let mut g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            for i in 0..count {
+                let sub = subs.add(i * 64);
+                let (n, ps) = (std::ptr::read_unaligned(sub.add(48) as *const u32).min(16) as usize, std::ptr::read_unaligned(sub.add(56) as *const u64) as *const u8);
+                if ps.is_null() {
+                    continue;
+                }
+                for j in 0..n {
+                    let info = ps.add(j * 48);
+                    let (sem, val) = (std::ptr::read_unaligned(info.add(16) as *const u64), std::ptr::read_unaligned(info.add(24) as *const u64));
+                    if g.len() < 4096 {
+                        g.push(Pending { dev, sem, val, t: now, f: f as usize });
+                        SUBMIT_DBG[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        start_poller();
     }
 
     /// Wykonuje jedno polecenie. Odpowiedź: kod wyniku (`i32` LE, także ujemny i dodatni jak `VK_NOT_READY`),

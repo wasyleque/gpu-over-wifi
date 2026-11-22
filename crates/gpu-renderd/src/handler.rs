@@ -152,6 +152,7 @@ mod acct {
                 eprintln!("gpu-renderd czas (od startu): {}", line.join(", "));
                 eprintln!("gpu-renderd polecenia wg czasu: {}", crate::vk::replay::cmd_times_report());
                 eprintln!("gpu-renderd {}", crate::vk::replay::mw_report());
+                eprintln!("gpu-renderd opóźnienie ukończenia zgłoszeń (serwer: po powrocie vkQueueSubmit2 -> semafor): {}", crate::vk::replay::submit_lat_report());
             }
             s.last = Some(now);
         }
