@@ -1176,7 +1176,7 @@ unsafe fn query_cache_lockfree(op: u16, cmd: &gpu_proto::meta::CommandMeta, inst
 
 fn query_cacheable(name: &str) -> bool {
     // Czyste funkcje żądania: możliwości karty i rozmiary/offsety układów deskryptorów (identyfikator układu jest unikalny w instancji).
-    matches!(name, "vkGetPhysicalDeviceImageFormatProperties2" | "vkGetPhysicalDeviceImageFormatProperties2KHR" | "vkGetDescriptorSetLayoutBindingOffsetEXT" | "vkGetDescriptorSetLayoutSizeEXT")
+    matches!(name, "vkGetPhysicalDeviceImageFormatProperties2" | "vkGetPhysicalDeviceImageFormatProperties2KHR" | "vkGetDescriptorSetLayoutBindingOffsetEXT" | "vkGetDescriptorSetLayoutSizeEXT" | "vkGetPhysicalDeviceSparseImageFormatProperties2" | "vkGetPhysicalDeviceSparseImageFormatProperties2KHR" | "vkGetImageSparseMemoryRequirements" | "vkGetImageSparseMemoryRequirements2" | "vkGetImageSparseMemoryRequirements2KHR")
 }
 
 /// Kopiuje zapamiętany deskryptor pod `out`, jeśli jest w cache i ma dokładnie `size` bajtów.

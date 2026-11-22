@@ -48,3 +48,14 @@ Pozostałe incydenty tej sesji: sprzątanie sesji potrafi utknąć w `vkDestroyD
 Zmiany: (1) `vkGetPhysicalDeviceSparseImageFormatProperties` składane z wariantu `...2` przekazywanego do serwera (`gpu-icd/src/lib.rs`), zamiast stubu zwracającego 0; (2) kodek (`gpu-vkcodec/src/codec.rs`, `read_uint`) potrafi odczytać długość tablicy z parametru-wskaźnika na licznik w trybie wejście/wyjście (wcześniej `BadLen("nieznany identyfikator")` w `vkGetImageSparseMemoryRequirements`; dotyczy wszystkich poleceń z dwukrokowym wzorcem licznik/tablica obsługiwanych generycznie).
 Test na prawdziwym urządzeniu (`tools/vk-sparse-formats.py`, `tools/vk-sparse-bind.py`, uruchamiane `tools/run-vk-test.sh <skrypt>` na kliencie, `ctypes` przez nasz ICD, RTX 3090 Ti na serwerze): funkcje `sparseBinding`, `sparseResidencyBuffer/Image2D/Image3D`, `sparseResidency2/4/8/16Samples`, `sparseResidencyAliased` = 1; formaty rzadkie RGBA8 -> kafelek 128x128x1, format 138 -> 256x256x1 (przed zmianą 0 właściwości dla każdego formatu); bufor rzadki 4 MiB: `vkCreateBuffer` (flaga SPARSE_BINDING), `vkGetBufferMemoryRequirements`, `vkAllocateMemory`, `vkQueueBindSparse` (powiązanie i odwiązanie), `vkQueueWaitIdle` = `VK_SUCCESS`; obraz rzadki 1024x1024 RGBA8 (SPARSE_BINDING | SPARSE_RESIDENCY): `vkGetImageSparseMemoryRequirements` (aspekt 0x1, granularność 128x128x1, mip tail od poziomu 1, offset 4194304), `vkQueueBindSparse` jednego kafelka obrazu = `VK_SUCCESS`. Cyberpunk po zmianie: 31,07 FPS (bez regresji).
 Niewiadome: czy to wystarcza vkd3d-proton i grze (DX12 Shadow of the Tomb Raider może wymagać jeszcze np. `vkGetImageSparseMemoryRequirements2`, aliasowania pamięci, mip taila); do sprawdzenia przebiegiem gry.
+
+### DirectX 12 działa (0.3.70 + cache zapytań o pamięć rzadką, 0.3.71)
+
+Po wsparciu pamięci rzadkiej (patrz wyżej) Shadow of the Tomb Raider w trybie DirectX 12 uruchamia się i przechodzi benchmark (1080p, High, vsync off, ta sama konfiguracja co natywnie 74 FPS i zdalnie DX11 25 FPS).
+
+| Przebieg | Średnie FPS | p50 / p95 / p99 klatki | Klatki > 60 ms | Klatki > 200 ms | Maks. klatka | Zapytania z obiegiem (p99 / maks) |
+|---|---|---|---|---|---|---|
+| DX12, bez cache zapytań rzadkich | 35,1 | 25,6 / 43,8 / 58,0 ms | 55 | 21 | 955 ms | >100 ms / 939 ms |
+| DX12, z cache zapytań rzadkich (0.3.71) | **38,2** | 24,9 / 41,7 / 49,2 ms | 19 | 0 | 103 ms | <20 ms / 374 ms |
+
+Zmiana: `vkGetPhysicalDeviceSparseImageFormatProperties2` i `vkGetImageSparseMemoryRequirements(2)` dopisane do cache zapytań (`query_cacheable`). Liczba zapytań z obiegiem po sieci spadła z 169 tys. do 84 tys., a czas jednego `GetImageSparseMemoryRequirements` z 3,3 do 1,4 ms. Przestoje 300-950 ms po załadowaniu drugiej sceny zniknęły. Nadal wolne: `WaitSemaphores` (94 tys. po 3,4 ms), `GetDescriptorEXT`; `GetShaderModuleIdentifierEXT` pojawił się tylko w pierwszym przebiegu (67 tys. zapytań) i do zbadania. To jeden przebieg na wariant.
