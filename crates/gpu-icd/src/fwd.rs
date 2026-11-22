@@ -2271,6 +2271,7 @@ fn periodic_stats(stats: &Stats) {
         *last = Some(now);
         eprintln!("[gpu-icd] {}", stats.report());
         eprintln!("[gpu-icd] obiegi wg poleceń: {}", stats.top_roundtrips());
+        eprintln!("[gpu-icd] opóźnienie ukończenia zgłoszeń (submit -> semafor): {}", submit_latency_report());
         eprintln!("[gpu-icd] zablokowane wątki (wątek/polecenie): {}", crate::timeline::blocked_report(14));
         {
             use std::sync::atomic::Ordering::Relaxed;
@@ -2630,7 +2631,64 @@ fn sem_op() -> u16 {
 }
 
 /// Zapisuje wartość (max z dotychczasową); `fresh` = z odpowiedzi serwera (zeruje licznik odczytów bez zmiany i znacznik odświeżenia w locie).
+/// Opóźnienie ukończenia pracy zgłoszonej `vkQueueSubmit2` z sygnałem semafora czasowego: od zgłoszenia do chwili, gdy klient dowiaduje się o osiągnięciu wartości
+/// (diagnostyka luki do natywnego FPS; obejmuje wykonanie na serwerze i drogę powrotną). Przedziały [<2,<5,<10,<20,<40,<80,>=80 ms].
+static SUBMITS: std::sync::Mutex<Option<std::collections::HashMap<u64, std::collections::VecDeque<(u64, std::time::Instant)>>>> = std::sync::Mutex::new(None);
+static SUBMIT_LAT: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+static SUBMIT_LAT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// # Safety
+/// `slots` to parametry `vkQueueSubmit2[KHR]` (queue, submitCount, pSubmits, fence) z wywołania aplikacji.
+unsafe fn submit_note(name: &str, slots: &[u64]) {
+    if !flags().periodic || !name.starts_with("vkQueueSubmit2") || slots.len() < 3 || slots[2] == 0 {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let mut g = SUBMITS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    for i in 0..(slots[1] as usize).min(64) {
+        let sub = (slots[2] as *const u8).add(i * 64); // VkSubmitInfo2 (64 B): signalSemaphoreInfoCount @48, pSignalSemaphoreInfos @56
+        let (n, ps) = (std::ptr::read_unaligned(sub.add(48) as *const u32).min(16) as usize, std::ptr::read_unaligned(sub.add(56) as *const u64) as *const u8);
+        if ps.is_null() {
+            continue;
+        }
+        for j in 0..n {
+            let info = ps.add(j * 48); // VkSemaphoreSubmitInfo (48 B): semaphore @16, value @24
+            let (sem, val) = (std::ptr::read_unaligned(info.add(16) as *const u64), std::ptr::read_unaligned(info.add(24) as *const u64));
+            let q = m.entry(sem).or_default();
+            if q.len() >= 256 {
+                q.pop_front();
+            }
+            q.push_back((val, now));
+        }
+    }
+}
+
+fn submit_observed(sem: u64, value: u64) {
+    let mut g = SUBMITS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(q) = g.as_mut().and_then(|m| m.get_mut(&sem)) else { return };
+    let now = std::time::Instant::now();
+    while q.front().is_some_and(|(v, _)| *v <= value) {
+        let (_, t) = q.pop_front().unwrap();
+        let us = now.duration_since(t).as_micros() as u64;
+        let b = [2000u64, 5000, 10_000, 20_000, 40_000, 80_000].iter().position(|l| us < *l).unwrap_or(6);
+        SUBMIT_LAT[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SUBMIT_LAT[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SUBMIT_LAT_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn submit_latency_report() -> String {
+    let n = SUBMIT_LAT[7].load(std::sync::atomic::Ordering::Relaxed);
+    if n == 0 {
+        return String::new();
+    }
+    let b: Vec<u64> = (0..7).map(|i| SUBMIT_LAT[i].load(std::sync::atomic::Ordering::Relaxed)).collect();
+    format!("{n} zgłoszeń, średnio {} µs; przedziały [<2, <5, <10, <20, <40, <80, >=80 ms]: {b:?}", SUBMIT_LAT_US.load(std::sync::atomic::Ordering::Relaxed) / n)
+}
+
 fn sem_store(sem: u64, value: u64, fresh: bool) {
+    submit_observed(sem, value);
     let mut g = SEM.lock().unwrap_or_else(|e| e.into_inner());
     let m = g.get_or_insert_with(Default::default);
     let e = m.entry(sem).or_insert(SemState { value, stale: 0, inflight: false });
@@ -2659,10 +2717,10 @@ unsafe fn sem_raise_from_wait(info: u64) {
         return;
     }
     let p = info as *const u8;
-    if std::ptr::read_unaligned(p.add(16) as *const u32) & 1 != 0 {
-        return; // VK_SEMAPHORE_WAIT_ANY_BIT: nie wiadomo, który
-    }
     let n = std::ptr::read_unaligned(p.add(20) as *const u32).min(64) as usize;
+    if std::ptr::read_unaligned(p.add(16) as *const u32) & 1 != 0 && n != 1 {
+        return; // VK_SEMAPHORE_WAIT_ANY_BIT przy wielu semaforach: nie wiadomo, który (jeden semafor: ANY = ALL)
+    }
     let (sems, vals) = (std::ptr::read_unaligned(p.add(24) as *const u64) as *const u64, std::ptr::read_unaligned(p.add(32) as *const u64) as *const u64);
     if sems.is_null() || vals.is_null() {
         return;
@@ -2890,6 +2948,7 @@ pub(crate) unsafe fn exec_begin(st: &mut InstState, op: u16, slots: &mut [u64], 
         sem_store(std::ptr::read_unaligned(p.add(16) as *const u64), std::ptr::read_unaligned(p.add(24) as *const u64), false);
     }
     // Wymagania pamięci: identyczne obrazy i bufory dostają odpowiedź z cache, bez obiegu po sieci.
+    submit_note(cmd.name, slots);
     if let Some(done) = memreq_cached(st, cmd.name, slots) {
         return Step::Done(done);
     }
